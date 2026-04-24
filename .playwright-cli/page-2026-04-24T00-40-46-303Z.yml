@@ -1,0 +1,141 @@
+- generic [ref=e22]:
+  - complementary [ref=e23]:
+    - generic [ref=e24]:
+      - generic [ref=e28]: TestClaw
+      - button [ref=e29]:
+        - img [ref=e30]
+    - navigation [ref=e32]:
+      - button "仪表盘" [ref=e33]:
+        - img [ref=e34]
+        - generic [ref=e39]: 仪表盘
+      - button "AI Agent 配置" [ref=e40]:
+        - img [ref=e41]
+        - generic [ref=e44]: AI Agent 配置
+      - button "用例生成中心" [ref=e45]:
+        - img [ref=e46]
+        - generic [ref=e51]: 用例生成中心
+      - button "接口测试" [ref=e52]:
+        - img [ref=e53]
+        - generic [ref=e55]: 接口测试
+      - button "UI 测试" [ref=e56]:
+        - img [ref=e57]
+        - generic [ref=e60]: UI 测试
+      - button "测试报告" [active] [ref=e61]:
+        - img [ref=e62]
+        - generic [ref=e64]: 测试报告
+      - generic [ref=e66]: 系统管理
+      - button "模型管理" [ref=e67]:
+        - img [ref=e68]
+        - generic [ref=e71]: 模型管理
+      - button "任务中心" [ref=e72]:
+        - img [ref=e73]
+        - generic [ref=e75]: 任务中心
+      - button "用例库" [ref=e76]:
+        - img [ref=e77]
+        - generic [ref=e81]: 用例库
+      - button "文档管理" [ref=e82]:
+        - img [ref=e83]
+        - generic [ref=e87]: 文档管理
+      - button "环境管理" [ref=e88]:
+        - img [ref=e89]
+        - generic [ref=e92]: 环境管理
+  - main [ref=e93]:
+    - generic [ref=e94]:
+      - heading "测试报告" [level=1] [ref=e1056]
+      - generic [ref=e97]:
+        - generic [ref=e98]:
+          - img [ref=e99]
+          - textbox "Search resources..." [ref=e102]
+        - generic [ref=e103]:
+          - button [ref=e104]:
+            - img [ref=e105]
+          - button [ref=e109]:
+            - img [ref=e110]
+          - generic [ref=e114]: AGENT ONLINE
+          - button "退出" [ref=e115]
+    - generic [ref=e1057]:
+      - generic [ref=e1058]:
+        - heading "测试报告" [level=2] [ref=e1059]
+        - paragraph [ref=e1060]: 查看执行记录、错误分析和 AI 辅助诊断。
+      - generic [ref=e1061]:
+        - generic [ref=e1062]:
+          - generic [ref=e1063]: 总记录
+          - generic [ref=e1064]: "5"
+        - generic [ref=e1065]:
+          - generic [ref=e1066]: 通过
+          - generic [ref=e1067]: "0"
+        - generic [ref=e1068]:
+          - generic [ref=e1069]: 失败
+          - generic [ref=e1070]: "1"
+        - generic [ref=e1071]:
+          - generic [ref=e1072]: 发现缺陷
+          - generic [ref=e1073]: "3"
+      - generic [ref=e1074]:
+        - generic [ref=e1075]:
+          - img [ref=e1076]
+          - generic [ref=e1078]: 筛选
+        - combobox [ref=e1079]:
+          - option "全部状态" [selected]
+          - option "通过"
+          - option "失败"
+          - option "缺陷"
+          - option "排队中"
+          - option "运行中"
+        - combobox [ref=e1080]:
+          - option "全部类型" [selected]
+          - option "UI"
+          - option "API"
+          - option "Functional"
+          - option "Full"
+        - generic [ref=e1081]: 5 条记录
+      - generic [ref=e1082]:
+        - generic [ref=e1084] [cursor=pointer]:
+          - generic [ref=e1085]:
+            - generic [ref=e1086]:
+              - generic [ref=e1087]: RUNNING
+              - generic [ref=e1088]: ui
+            - generic [ref=e1089]: 测试创建任务功能
+            - generic [ref=e1090]: https://example.com
+            - generic [ref=e1091]: 2026/4/24 00:36:00
+          - button [ref=e1092]:
+            - img [ref=e1093]
+        - generic [ref=e1097] [cursor=pointer]:
+          - generic [ref=e1098]:
+            - generic [ref=e1099]:
+              - generic [ref=e1100]: BUG FOUND
+              - generic [ref=e1101]: ui
+            - generic [ref=e1102]: Test homepage loads correctly
+            - generic [ref=e1103]: https://example.com
+            - generic [ref=e1104]: 2026/4/23 16:33:48
+          - button [ref=e1105]:
+            - img [ref=e1106]
+        - generic [ref=e1110] [cursor=pointer]:
+          - generic [ref=e1111]:
+            - generic [ref=e1112]:
+              - generic [ref=e1113]: BUG FOUND
+              - generic [ref=e1114]: ui
+            - generic [ref=e1115]: Test homepage loads correctly
+            - generic [ref=e1116]: https://example.com
+            - generic [ref=e1117]: 2026/4/23 16:33:47
+          - button [ref=e1118]:
+            - img [ref=e1119]
+        - generic [ref=e1123] [cursor=pointer]:
+          - generic [ref=e1124]:
+            - generic [ref=e1125]:
+              - generic [ref=e1126]: BUG FOUND
+              - generic [ref=e1127]: ui
+            - generic [ref=e1128]: Test homepage loads correctly
+            - generic [ref=e1129]: https://example.com
+            - generic [ref=e1130]: 2026/4/23 15:18:07
+          - button [ref=e1131]:
+            - img [ref=e1132]
+        - generic [ref=e1136] [cursor=pointer]:
+          - generic [ref=e1137]:
+            - generic [ref=e1138]:
+              - generic [ref=e1139]: FAILED
+              - generic [ref=e1140]: ui
+            - generic [ref=e1141]: tpshop
+            - generic [ref=e1142]: https://hmshop-test.itheima.net/index.php/Admin/Admin/login
+            - generic [ref=e1143]: 2026/4/23 09:50:55
+          - button [ref=e1144]:
+            - img [ref=e1145]

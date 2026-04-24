@@ -1,0 +1,787 @@
+╭─── Claude Code v2.1.118 ─────────────────────────────────────────────────────╮
+│                                 │ Tips for getting started                   │
+│          Welcome back!          │ Run /init to create a CLAUDE.md file with… │
+│                                 │ ────────────────────────────────────────── │
+│             ▐▛███▜▌             │ Recent activity                            │
+│            ▝▜█████▛▘            │ No recent activity                         │
+│              ▘▘ ▝▝              │                                            │
+│                                 │                                            │
+│   gpt-5.4 · API Usage Billing   │                                            │
+│          /opt/testclaw          │                                            │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+✻ Conversation compacted (ctrl+o for history)
+
+  ⎿  Read frontend/vite.config.ts (16 lines)
+  ⎿  Read docker/Dockerfile (23 lines)
+  ⎿  Read docker/docker-compose.yml (56 lines)
+  ⎿  Read frontend/Dockerfile (16 lines)
+  ⎿  Read .env.example (20 lines)
+  ⎿  Plan file referenced (~/.claude/plans/jiggly-jumping-ripple.md)
+
+● 我先检查当前前后端实现，直接补上模型自动拉取、AI 工作流入口和后台界面改造。
+
+● 我先把现有代码面摸清，再有针对性地改。
+
+  Searched for 2 patterns (ctrl+o to expand)
+
+● 我已经定位到前后端入口，接着读取关键文件并补功能。
+
+  Read 12 files (ctrl+o to expand)
+
+● 我已经确认当前缺口：模型配置没有拉取模型列表，任务页也还不是 AI agent 产品流。
+
+  Searched for 1 pattern, read 9 files (ctrl+o to expand)
+
+● 我接着补后端发现模型接口，并把任务流改成更像 AI agent 工作台。
+
+  Read 7 files (ctrl+o to expand)
+
+● Bash(python - <<'PY'
+      import zipfile…)
+  ⎿  Error: Exit code 127
+     /bin/bash: line 7: python: command not found
+● 我把参考设计包也一起看一下，然后直接开始改接口和页面。
+
+● Bash(unzip -l "/opt/testclaw/nexus-ai-test-platform.zip" | sed -n '1,160p')
+  ⎿  Archive:  /opt/testclaw/nexus-ai-test-platform.zip
+       Length      Date    Time    Name
+     ---------  ---------- -----   ----
+     … +18 lines (ctrl+o to expand)
+
+  Read 3 files, listed 1 directory (ctrl+o to expand)
+
+● 我继续看 agent 节点和现有测试，再一次性把后端接口和前端交互补完整。
+
+  Searched for 1 pattern, read 4 files (ctrl+o to expand)
+
+● Bash(unzip -p "/opt/testclaw/nexus-ai-test-platform.zip" src/App.tsx | sed -n
+      '1,220p')
+  ⎿  /**
+      * @license
+      * SPDX-License-Identifier: Apache-2.0
+     … +67 lines (ctrl+o to expand)
+
+● Bash(unzip -p "/opt/testclaw/nexus-ai-test-platform.zip"
+      src/pages/Dashboard.tsx | sed -n '1,260p')
+  ⎿  import React from "react";
+     import {
+       LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Toolt
+     … +145 lines (ctrl+o to expand)
+
+● Bash(unzip -p "/opt/testclaw/nexus-ai-test-platform.zip"
+      src/components/Sidebar.tsx | sed -n '1,240p')
+  ⎿  import React from "react";
+     import { motion, AnimatePresence } from "motion/react";
+     import { NAV_ITEMS } from "@/src/constants";
+     … +60 lines (ctrl+o to expand)
+
+● 我正在把执行结果改成结构化 AI
+  工作流数据，这样任务详情页能展示计划、用例、执行和分析全过程。
+
+  Read 8 files (ctrl+o to expand)
+
+● 我正在补模型发现服务，并顺手把 AI
+  任务页改成“计划-用例-执行-分析”的工作流视图。
+
+  Read 6 files (ctrl+o to expand)
+● 我继续接上文档和环境数据，让 AI 任务创建能直接绑定知识源和执行环境。
+
+  Read 6 files (ctrl+o to expand)
+
+● 我先改后端 schema 和接口，前端会跟着接上。
+
+  Read 1 file (ctrl+o to expand)
+
+● 我开始落代码了，先补 provider 模型发现接口和任务详情的结构化数据。
+
+  Read 3 files (ctrl+o to expand)
+
+● 我先看一下缺陷模型和现有任务数据格式，避免改完后端返回把旧数据打坏。
+
+  Read 2 files (ctrl+o to expand)
+
+● Bash(sqlite3 /opt/testclaw/testclaw.db '.schema tasks')
+  ⎿  Error: Exit code 127
+     /bin/bash: line 1: sqlite3: command not found
+● Bash(sqlite3 /opt/testclaw/testclaw.db 'select id, status,
+      substr(execution_log,1,120) from tasks order by created_at desc limit 5;')
+  ⎿  Cancelled: parallel tool call Bash(sqlite3 /opt/testclaw/testclaw.db 
+     '.sche…) errored
+
+● 我先确认 Playwright CLI 的接入方式，再把执行器一并切过去。
+
+● Bash(gh repo view microsoft/playwright-cli --json
+      name,description,url,defaultBranchRef)
+  ⎿  Error: Exit code 4
+     To get started with GitHub CLI, please run:  gh auth login
+     Alternatively, populate the GH_TOKEN environment variable with a GitHub API
+      authentication token.
+
+● Bash(gh api repos/microsoft/playwright-cli/readme --jq .content | base64 -d |
+      sed -n '1,240p')
+  ⎿  Cancelled: parallel tool call Bash(gh repo view microsoft/playwright-cli 
+     --…) errored
+
+● 我先核对公开文档里的模型发现和 Playwright CLI 用法，再把实现接进去。
+
+● Web Search("2026 OpenAI models API list endpoint documentation /models")
+  ⎿  Did 0 searches in 198s
+
+● Web Search("2026 Anthropic models API list endpoint documentation /v1/models")
+  ⎿  Did 0 searches in 213s
+
+● Fetch(https://github.com/microsoft/playwright-cli)
+  ⎿  Received 461KB (200 OK)
+
+● 我先把 Playwright CLI 文档拿到手，避免执行器接错命令。
+
+● Bash(npm view @playwright/cli version description --json)
+  ⎿  {
+       "version": "0.1.8",
+       "description": "Playwright CLI"
+     }
+
+● Bash(npm view @playwright/cli readme --json)
+  ⎿  "# playwright-cli\n\nPlaywright CLI with SKILLS\n\n### Playwright CLI
+     vs Playwright MCP\n\nThis package provides CLI interface into Playwrig
+     ht. If you are using **coding agents**, that is the best fit.\n\n- **C
+     … +312 lines (ctrl+o to expand)
+
+● 我先核对 OpenAI/Anthropic 的模型列表接口细节，避免模型发现做错。
+
+● Fetch(https://platform.openai.com/docs/api-reference/models/list)
+  ⎿  Error: Request failed with status code 403
+
+● Fetch(https://docs.anthropic.com/en/api/models-list)
+  ⎿  Received 507 bytes (301 Moved Permanently)
+● 我先扫一下现有测试和依赖，再补相应回归用例，避免改完把现有功能打坏。
+
+● Bash(grep -R "respx\|httpx\|ProviderCreate\|TaskRead" -n /opt/testclaw/tests
+      /opt/testclaw/app | sed -n '1,220p')
+  ⎿  /opt/testclaw/app/tools/api_tool.py:4:import httpx
+     /opt/testclaw/app/tools/api_tool.py:20:    response = httpx.request(me
+     thod.upper(), url, headers=headers, json=json_body, timeout=30.0)
+     … +15 lines (ctrl+o to expand)
+
+● Bash(npm --version && node --version)
+  ⎿  11.9.0
+     v24.14.0
+
+● Bash(playwright-cli --version)
+  ⎿  Error: Exit code 127
+     /bin/bash: line 1: playwright-cli: command not found
+
+● 我也把你刚才强调的产品方向记到记忆里，后续会默认按 AI agent 平台优先来做。
+
+  Recalled 1 memory (ctrl+o to expand)
+● 我先补齐 agent 各节点最后产出的结构，避免前端拿不到计划和分析数据。
+
+  Read 2 files (ctrl+o to expand)
+
+● Bash(grep -R "bug_report" -n /opt/testclaw/app | sed -n '1,200p')
+  ⎿  /opt/testclaw/app/api/v1/tasks.py:9:from app.models.bug_report import
+     BugReport
+     /opt/testclaw/app/api/v1/tasks.py:64:async def get_bug_report(task_id:
+     … +20 lines (ctrl+o to expand)
+
+● 我先把 Anthropic/OpenAI 的模型列表接口细节补齐，再落到后端发现接口。
+
+● Fetch(https://platform.claude.com/docs/en/api/models-list)
+  ⎿  Received 6.5KB (200 OK)
+
+● Fetch(https://platform.openai.com/docs/api-reference/models)
+  ⎿  Error: Request failed with status code 403
+
+● 我顺手修一下模型列表里 API Key 掩码显示的问题，它现在掩的是密文。
+
+  Read 2 files (ctrl+o to expand)
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ /mobile                                                                       
+  ⎿  (no content)
+
+❯ 继续                                                                          
+  ⎿  API Error: The operation was aborted.
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ 继续                                                                          
+
+● 开始落代码。先改后端，再改前端。
+
+  后端改动：
+  1. 模型发现接口
+  2. Agent 节点输出结构化数据
+  3. 任务详情返回工作流数据
+
+● Write(app/schemas/discovery.py)
+  ⎿  Wrote 12 lines to app/schemas/discovery.py
+       1 from pydantic import BaseModel
+       2 
+       3 
+       4 class DiscoverModelsRequest(BaseModel):
+       5     type: str
+       6     api_key: str
+       7     base_url: str | None = None
+       8 
+       9 
+      10 class ModelItem(BaseModel):
+     … +2 lines (ctrl+o to expand)
+● Write(app/api/v1/discovery.py)
+  ⎿  Wrote 61 lines to app/api/v1/discovery.py
+       2 from fastapi import APIRouter
+       3 
+       4 from app.core.dependencies import CurrentUser
+       5 from app.schemas.discovery import DiscoverModelsRequest, ModelIt
+         em
+       6 
+       7 router = APIRouter()
+       8 
+       9 
+      10 @router.post("/discover-models", response_model=list[ModelItem])
+     … +61 lines (ctrl+o to expand)
+
+● Update(app/api/router.py)
+  ⎿  Added 1 line, removed 1 line
+      1  from fastapi import APIRouter
+      2  
+      3 -from app.api.v1 import auth, dashboard, documents, environments,
+        - providers, runs, tasks, test_cases, visuals, webhooks          
+      3 +from app.api.v1 import auth, dashboard, discovery, documents, en
+        +vironments, providers, runs, tasks, test_cases, visuals, webhook
+        +s                                                               
+      4  
+      5  router = APIRouter()
+      6  router.include_router(auth.router, prefix="/auth", tags=["auth"]
+         )
+
+● Update(app/api/router.py)
+  ⎿  Added 1 line
+       9  router.include_router(test_cases.router, prefix="/test-cases", 
+          tags=["test-cases"])
+      10  router.include_router(documents.router, prefix="/documents", ta
+          gs=["documents"])
+      11  router.include_router(providers.router, prefix="/providers", ta
+          gs=["providers"])
+      12 +router.include_router(discovery.router, prefix="/providers", ta
+         +gs=["discovery"])                                              
+      13  router.include_router(environments.router, prefix="/environment
+          s", tags=["environments"])
+      14  router.include_router(runs.router, prefix="/runs", tags=["runs"
+          ])
+      15  router.include_router(visuals.router, prefix="/visual-baselines
+          ", tags=["visuals"])
+
+● 现在来改进 agent nodes，以产出结构化的 workflow data，并改进 task schema
+  以暴露工作流阶段。
+
+● Write(app/agent/state.py)
+  ⎿  Added 1 line
+      21      rag_context: str | None
+      22      bug_report: dict | None
+      23      messages: Annotated[list[BaseMessage], add_messages]
+      24 +    workflow_steps: list[dict]                                 
+      25   No newline at end of file
+
+● 现在，改进每个代理节点以发出结构化的工作流步骤。
+
+● Write(app/agent/nodes/planner.py)
+  ⎿  Added 18 lines, removed 4 lines
+       2  
+       3  
+       4  async def run(state: AgentState) -> AgentState:
+       5 -    state["test_plan"] = [                                     
+       5 +    objective = state.get("objective", "")                     
+       6 +    target_url = state.get("target_url", "")                   
+       7 +    test_type = state.get("test_type", "full")                 
+       8 +    plan = [                                                   
+       9          {
+       7 -            "title": state.get("objective", "Generated plan"), 
+       8 -            "target_url": state.get("target_url"),             
+       9 -            "test_type": state.get("test_type", "full"),       
+      10 +            "title": objective or "Generated test plan",       
+      11 +            "target_url": target_url,                          
+      12 +            "test_type": test_type,                            
+      13 +            "phase": "planning",                               
+      14 +            "steps": [                                         
+      15 +                "Analyze target application structure",        
+      16 +                "Identify test scope based on objective",      
+      17 +                "Define test scenarios and priority",          
+      18 +                "Map acceptance criteria to assertions",       
+      19 +            ],                                                 
+      20          }
+      21      ]
+      22 +    state["test_plan"] = plan                                  
+      23 +    state.setdefault("workflow_steps", []).append(             
+      24 +        {"node": "planner", "status": "done", "detail": f"Gener
+         +ated plan with {len(plan)} phase(s)"}                          
+      25 +    )                                                          
+      26      return state
+
+● Write(app/agent/nodes/tc_generator.py)
+  ⎿  Added 8 lines, removed 4 lines
+       3  
+       4  async def run(state: AgentState) -> AgentState:
+       5      test_plan = state.get("test_plan") or []
+       6 -    state["test_cases"] = [                                    
+       6 +    cases = [                                                  
+       7          {
+       8              "title": item.get("title", "Generated test case"),
+       9 -            "steps": ["Open target", "Verify expected behavior"
+         -],                                                             
+      10 -            "expected": ["Page responds successfully"],        
+       9 +            "steps": ["Open target URL", "Execute test actions"
+         +, "Verify expected behavior"],                                 
+      10 +            "expected": ["Page loads successfully", "Assertions
+         + pass"],                                                       
+      11              "priority": "P1",
+      12              "category": "FUNCTIONAL",
+      13              "test_data": {},
+      14          }
+      15          for item in test_plan
+      16      ]
+      17 -    return state                                               
+      17 +    state["test_cases"] = cases                                
+      18 +    state.setdefault("workflow_steps", []).append(             
+      19 +        {"node": "tc_generator", "status": "done", "detail": f"
+         +Generated {len(cases)} test case(s)"}                          
+      20 +    )                                                          
+      21 +    return state                                               
+      22   No newline at end of file
+
+● Write(app/agent/nodes/coder.py)
+  ⎿  Added 34 lines, removed 3 lines
+       1  from app.agent.state import AgentState
+       2  
+       3 +JS_TEMPLATE = """import {{ expect }} from '@playwright/test';  
+       4  
+       4 -DEFAULT_PLAYWRIGHT_SCRIPT = '''from playwright.sync_api import 
+         -Page, expect\n\n\ndef test_generated_flow(page: Page):\n    pag
+         -e.goto("{target_url}")\n    expect(page).to_have_url("{target_u
+         -rl}")\n'''                                                     
+       5 +async function run(page) {{                                    
+       6 +  // Test: {objective}                                         
+       7 +  // Target: {target_url}                                      
+       8 +  await page.goto('{target_url}');                             
+       9 +  await expect(page).toHaveURL(/{url_pattern}/);               
+      10  
+      11 +  // Basic interaction checks                                  
+      12 +  const title = await page.title();                            
+      13 +  console.log('Page title:', title);                           
+      14 +}}                                                             
+      15 +"""                                                            
+      16  
+      17 +DEFAULT_PLAYWRIGHT_SCRIPT = """from playwright.sync_api import 
+         +Page, expect                                                   
+      18 +                                                               
+      19 +                                                               
+      20 +def test_generated_flow(page: Page):                           
+      21 +    page.goto("{target_url}")                                  
+      22 +    expect(page).to_have_url("{target_url}")                   
+      23 +"""                                                            
+      24 +                                                               
+      25 +                                                               
+      26  async def run(state: AgentState) -> AgentState:
+      27      target_url = state.get("target_url") or "http://localhost"
+       9 -    state["generated_code"] = DEFAULT_PLAYWRIGHT_SCRIPT.format(
+         -target_url=target_url)                                         
+      10 -    return state                                               
+      28 +    objective = state.get("objective", "")                     
+      29 +    url_pattern = target_url.replace("https://", "").replace("h
+         +ttp://", "").replace(".", r"\.")                               
+      30 +    code = DEFAULT_PLAYWRIGHT_SCRIPT.format(target_url=target_u
+         +rl)                                                            
+      31 +    js_code = JS_TEMPLATE.format(                              
+      32 +        objective=objective,                                   
+      33 +        target_url=target_url,                                 
+      34 +        url_pattern=url_pattern,                               
+      35 +    )                                                          
+      36 +    state["generated_code"] = code                             
+      37 +    state["generated_code_js"] = js_code                       
+      38 +    state.setdefault("workflow_steps", []).append(             
+      39 +        {"node": "coder", "status": "done", "detail": "Generate
+         +d Playwright test script"}                                     
+      40 +    )                                                          
+      41 +    return state                                               
+      42   No newline at end of file
+
+● Write(app/agent/nodes/executor.py)
+  ⎿  Added 10 lines, removed 2 lines
+       6      code = state.get("generated_code")
+       7      if not code:
+       8          state["execution_result"] = {"status_code": 1, "stdout"
+          : "", "stderr": "No generated code", "trace_path": None}
+       9 +        state.setdefault("workflow_steps", []).append(         
+      10 +            {"node": "executor", "status": "failed", "detail": 
+         +"No generated code to execute"}                                
+      11 +        )                                                      
+      12          return state
+      10 -    state["execution_result"] = execute_playwright_test.invoke(
+         -{"code_content": code})                                        
+      11 -    return state                                               
+      13 +    result = execute_playwright_test.invoke({"code_content": co
+         +de})                                                           
+      14 +    state["execution_result"] = result                         
+      15 +    status = "done" if result.get("status_code") == 0 else "fai
+         +led"                                                           
+      16 +    state.setdefault("workflow_steps", []).append(             
+      17 +        {"node": "executor", "status": status, "detail": f"Exit
+         + code: {result.get('status_code')}"}                           
+      18 +    )                                                          
+      19 +    return state                                               
+      20   No newline at end of file
+
+● Write(app/agent/nodes/analyzer.py)
+  ⎿  Added 7 lines, removed 1 line
+      19      result = state.get("execution_result") or {}
+      20      if result.get("status_code") == 0:
+      21          state["last_error"] = None
+      22 +        state.setdefault("workflow_steps", []).append(         
+      23 +            {"node": "analyzer", "status": "done", "detail": "A
+         +ll assertions passed"}                                         
+      24 +        )                                                      
+      25          return state
+      26      state["last_error"] = result.get("stderr") or "Unknown exec
+          ution error"
+      24 -    return state                                               
+      27 +    state.setdefault("workflow_steps", []).append(             
+      28 +        {"node": "analyzer", "status": "failed", "detail": f"Er
+         +ror: {state['last_error'][:120]}"}                             
+      29 +    )                                                          
+      30 +    return state                                               
+      31   No newline at end of file
+
+● Write(app/agent/nodes/healer.py)
+  ⎿  Added 4 lines, removed 1 line
+       5      state["retry_count"] = state.get("retry_count", 0) + 1
+       6      previous_code = state.get("generated_code") or ""
+       7      state["generated_code"] = previous_code + "\n# self-heal re
+          try applied\n"
+       8 -    return state                                               
+       8 +    state.setdefault("workflow_steps", []).append(             
+       9 +        {"node": "healer", "status": "done", "detail": f"Self-h
+         +eal attempt #{state['retry_count']}"}                          
+      10 +    )                                                          
+      11 +    return state                                               
+      12   No newline at end of file
+
+● Write(app/agent/nodes/knowledge_sink.py)
+  ⎿  Added 8 lines, removed 1 line
+       9              "reproduce_steps": "Run the generated script agains
+          t the target environment.",
+      10              "fix_suggestion": "Inspect the execution log and ta
+          rget application behavior.",
+      11          }
+      12 -    return state                                               
+      12 +        state.setdefault("workflow_steps", []).append(         
+      13 +            {"node": "knowledge_sink", "status": "done", "detai
+         +l": "Bug report generated"}                                    
+      14 +        )                                                      
+      15 +    else:                                                      
+      16 +        state.setdefault("workflow_steps", []).append(         
+      17 +            {"node": "knowledge_sink", "status": "done", "detai
+         +l": "Task completed successfully, knowledge stored"}           
+      18 +        )                                                      
+      19 +    return state                                               
+      20   No newline at end of file
+● 现在，更新 worker，以便将 workflow_steps、test_plan、test_cases 和 bug_report
+  存储为结构化 JSON，并更新任务 schema 以向客户端暴露工作流数据。
+
+● Write(app/worker/tasks.py)
+  ⎿  Added 15 lines, removed 2 lines
+      31              "target_url": target_url,
+      32              "retry_count": 0,
+      33              "messages": [],
+      34 +            "workflow_steps": [],                              
+      35              **kwargs,
+      36          }
+      37          final_state = await agent_graph.ainvoke(state)
+      38          if task:
+      39              task.generated_code = final_state.get("generated_co
+          de")
+      39 -            task.execution_log = json.dumps(final_state.get("ex
+         -ecution_result"), ensure_ascii=False)                          
+      40 +            task.execution_log = json.dumps(                   
+      41 +                {                                              
+      42 +                    "execution_result": final_state.get("execut
+         +ion_result"),                                                  
+      43 +                    "test_plan": final_state.get("test_plan"), 
+      44 +                    "test_cases": final_state.get("test_cases")
+         +,                                                              
+      45 +                    "workflow_steps": final_state.get("workflow
+         +_steps", []),                                                  
+      46 +                    "bug_report": final_state.get("bug_report")
+         +,                                                              
+      47 +                },                                             
+      48 +                ensure_ascii=False,                            
+      49 +                default=str,                                   
+      50 +            )                                                  
+      51              status_code = (final_state.get("execution_result") 
+          or {}).get("status_code")
+      52              task.status = TaskStatus.SUCCEEDED if status_code =
+          = 0 else TaskStatus.FAILED
+      53 +            if final_state.get("last_error") and status_code !=
+         + 0:                                                            
+      54 +                task.status = TaskStatus.BUG_FOUND             
+      55              bug_report = final_state.get("bug_report")
+      56              if bug_report:
+      57                  existing = (
+     ...
+      70                      )
+      71              await db.commit()
+      72              await db.refresh(task)
+      60 -        return final_state                                     
+      73 +        return final_state                                     
+      74   No newline at end of file
+
+● 现在更新任务 schema 以返回结构化工作流数据，并更新任务 API 的同步回退机制。
+
+● Write(app/schemas/task.py)
+  ⎿  Added 41 lines, removed 1 line
+      1 +import json                                                     
+      2  from datetime import datetime
+      3  from typing import Literal
+      4  
+      4 -from pydantic import BaseModel                                  
+      5 +from pydantic import BaseModel, computed_field                  
+      6  
+      7  from app.schemas.common import ORMModel
+      8  
+     ...
+      15      environment_id: str | None = None
+      16  
+      17  
+      18 +class WorkflowStep(BaseModel):                                 
+      19 +    node: str                                                  
+      20 +    status: str                                                
+      21 +    detail: str | None = None                                  
+      22 +                                                               
+      23 +                                                               
+      24  class TaskRead(ORMModel):
+      25      id: str
+      26      objective: str
+     ...
+      31      generated_code: str | None = None
+      32      execution_log: str | None = None
+      33      created_at: datetime
+      34 +                                                               
+      35 +                                                               
+      36 +class TaskDetailRead(TaskRead):                                
+      37 +    workflow_steps: list[WorkflowStep] = []                    
+      38 +    test_plan: list[dict] | None = None                        
+      39 +    test_cases: list[dict] | None = None                       
+      40 +    execution_result: dict | None = None                       
+      41 +                                                               
+      42 +                                                               
+      43 +def parse_task_detail(task_orm) -> dict:                       
+      44 +    log_str = getattr(task_orm, "execution_log", None) or ""   
+      45 +    parsed = {}                                                
+      46 +    try:                                                       
+      47 +        parsed = json.loads(log_str) if log_str else {}        
+      48 +    except Exception:                                          
+      49 +        parsed = {}                                            
+      50 +                                                               
+      51 +    base = {                                                   
+      52 +        "id": task_orm.id,                                     
+      53 +        "objective": task_orm.objective,                       
+      54 +        "target_url": task_orm.target_url,                     
+      55 +        "status": task_orm.status.value if hasattr(task_orm.sta
+         +tus, "value") else str(task_orm.status),                       
+      56 +        "test_type": task_orm.test_type.value if hasattr(task_o
+         +rm.test_type, "value") else str(task_orm.test_type),           
+      57 +        "retry_count": task_orm.retry_count,                   
+      58 +        "generated_code": task_orm.generated_code,             
+      59 +        "execution_log": task_orm.execution_log,               
+      60 +        "created_at": task_orm.created_at.isoformat() if task_o
+         +rm.created_at else None,                                       
+      61 +        "workflow_steps": parsed.get("workflow_steps", []),    
+      62 +        "test_plan": parsed.get("test_plan"),                  
+      63 +        "test_cases": parsed.get("test_cases"),                
+      64 +        "execution_result": parsed.get("execution_result"),    
+      65 +    }                                                          
+      66 +    return base                                                
+
+● 现在更新 tasks API，使其在任务详情中使用 TaskDetailRead 和
+  parse_task_detail，以及同步回退。
+
+● Write(app/api/v1/tasks.py)
+  ⎿  Added 18 lines, removed 6 lines
+       8  from app.core.dependencies import CurrentUser, DbSession
+       9  from app.models.bug_report import BugReport
+      10  from app.models.task import TaskStatus
+      11 -from app.schemas.task import TaskCreate, TaskRead              
+      11 +from app.schemas.task import TaskCreate, TaskRead, parse_task_d
+         +etail                                                          
+      12  from app.services.task_service import task_service
+      13  from app.worker.tasks import run_agent_task
+      14  
+     ...
+      37                  "test_type": payload.test_type,
+      38                  "retry_count": 0,
+      39                  "messages": [],
+      40 +                "workflow_steps": [],                          
+      41              }
+      42          )
+      43          task.generated_code = final_state.get("generated_code")
+      43 -        task.execution_log = json.dumps(final_state.get("execut
+         -ion_result"), ensure_ascii=False)                              
+      44 -        task.status = TaskStatus.SUCCEEDED if (final_state.get(
+         -"execution_result") or {}).get("status_code") == 0 else TaskSta
+         -tus.FAILED                                                     
+      44 +        task.execution_log = json.dumps(                       
+      45 +            {                                                  
+      46 +                "execution_result": final_state.get("execution_
+         +result"),                                                      
+      47 +                "test_plan": final_state.get("test_plan"),     
+      48 +                "test_cases": final_state.get("test_cases"),   
+      49 +                "workflow_steps": final_state.get("workflow_ste
+         +ps", []),                                                      
+      50 +                "bug_report": final_state.get("bug_report"),   
+      51 +            },                                                 
+      52 +            ensure_ascii=False,                                
+      53 +            default=str,                                       
+      54 +        )                                                      
+      55 +        status_code = (final_state.get("execution_result") or {
+         +}).get("status_code")                                          
+      56 +        task.status = TaskStatus.SUCCEEDED if status_code == 0 
+         +else TaskStatus.FAILED                                         
+      57          await db.commit()
+      58          await db.refresh(task)
+      59      return task
+     ...
+      64      return await task_service.list(db)
+      65  
+      66  
+      55 -@router.get("/{task_id}", response_model=TaskRead)             
+      67 +@router.get("/{task_id}")                                      
+      68  async def get_task(task_id: str, db: DbSession, _: CurrentUser)
+          :
+      69      task = await task_service.get(db, task_id)
+      70      if task is None:
+      71          raise HTTPException(status_code=404, detail="Task not f
+          ound")
+      60 -    return task                                                
+      72 +    return parse_task_detail(task)                             
+      73  
+      74  
+      75  @router.get("/{task_id}/bug-report")
+     ...
+      87              yield f"data: {{\"task_id\": \"{task_id}\", \"step\
+          ": {index}, \"status\": \"heartbeat\"}}\n\n"
+      88              await asyncio.sleep(0.1)
+      89  
+      78 -    return StreamingResponse(event_stream(), media_type="text/e
+         -vent-stream")                                                  
+      90 +    return StreamingResponse(event_stream(), media_type="text/e
+         +vent-stream")                                                  
+      91   No newline at end of file
+
+● 现在更新仪表盘，使其也能按状态返回任务计数。
+
+● Write(app/schemas/dashboard.py)
+  ⎿  Added 1 line
+       7      total_providers: int
+       8      total_environments: int
+       9      recent_tasks: list[dict]
+      10 +    tasks_by_status: dict[str, int] = {}                       
+
+● Write(app/api/v1/dashboard.py)
+  ⎿  Added 13 lines, removed 2 lines
+       5  from app.models.api_document import ApiDocument
+       6  from app.models.environment import Environment
+       7  from app.models.llm_provider import LLMProvider
+       8 -from app.models.task import Task                               
+       8 +from app.models.task import Task, TaskStatus                   
+       9  from app.schemas.dashboard import DashboardSummary
+      10  
+      11  router = APIRouter()
+     ...
+      17      total_documents = (await db.execute(select(func.count()).se
+          lect_from(ApiDocument))).scalar_one()
+      18      total_providers = (await db.execute(select(func.count()).se
+          lect_from(LLMProvider))).scalar_one()
+      19      total_environments = (await db.execute(select(func.count())
+          .select_from(Environment))).scalar_one()
+      20 -    recent_tasks_result = await db.execute(select(Task).order_b
+         -y(Task.created_at.desc()).limit(5))                            
+      20 +                                                               
+      21 +    status_counts = {}                                         
+      22 +    for status in TaskStatus:                                  
+      23 +        count = (                                              
+      24 +            await db.execute(select(func.count()).select_from(T
+         +ask).where(Task.status == status))                             
+      25 +        ).scalar_one()                                         
+      26 +        status_counts[status.value] = count                    
+      27 +                                                               
+      28 +    recent_tasks_result = await db.execute(select(Task).order_b
+         +y(Task.created_at.desc()).limit(10))                           
+      29      recent_tasks = [
+      30          {
+      31              "id": task.id,
+      32              "objective": task.objective,
+      33              "status": task.status.value if hasattr(task.status,
+           "value") else str(task.status),
+      34              "target_url": task.target_url,
+      35 +            "test_type": task.test_type.value if hasattr(task.t
+         +est_type, "value") else str(task.test_type),                   
+      36 +            "created_at": task.created_at.isoformat() if task.c
+         +reated_at else None,                                           
+      37          }
+      38          for task in recent_tasks_result.scalars()
+      39      ]
+     ...
+      43          total_providers=total_providers,
+      44          total_environments=total_environments,
+      45          recent_tasks=recent_tasks,
+      46 +        tasks_by_status=status_counts,                         
+      47      )
+
+● 后端已完成。现在，我将彻底重写前端页面。我将同时编写所有页面和样式。
+
+● Write(frontend/src/lib/api.ts)
+  ⎿  
+
+● 现在编写新的 CSS —— 比之前更精致，参考了 claude-code / nexus 演示的颜色。
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ 继续                                                                          
+  ⎿  API Error: 400 {"error":{"message":"Invalid 'input[237].name': empty 
+     string. Expected a string with minimum length 1, but got an empty string 
+     instead.","type":"invalid_request_error","param":"input[237].name","code":"
+     empty_string"}}
+
+❯ 继续                                                                          
+  ⎿  API Error: 400 {"error":{"message":"Invalid 'input[237].name': empty 
+     string. Expected a string with minimum length 1, but got an empty string 
+     instead.","type":"invalid_request_error","param":"input[237].name","code":"
+     empty_string"}}
+
+❯ /model                                                                        
+  ⎿  Set model to gpt-5.4 (default)
+
+❯ /effort                                                                         ⎿  Set effort level to xhigh: Deeper reasoning than high, just below maximum
+     (Opus 4.7 only)
+
+❯ 继续                                                                          
+  ⎿  API Error: 400 {"error":{"message":"Invalid 'input[237].name': empty 
+     string. Expected a string with minimum length 1, but got an empty string 
+     instead.","type":"invalid_request_error","param":"input[237].name","code":"
+     empty_string"}}
+
+❯ 继续                                                                          
+  ⎿  API Error: 400 {"error":{"message":"Invalid 'input[237].name': empty 
+     string. Expected a string with minimum length 1, but got an empty string 
+     instead.","type":"invalid_request_error","param":"input[237].name","code":"
+     empty_string"}}
+
+❯ 继续完成没完成的内容                                                          
+  ⎿  API Error: 400 {"error":{"message":"Invalid 'input[237].name': empty 
+     string. Expected a string with minimum length 1, but got an empty string 
+     instead.","type":"invalid_request_error","param":"input[237].name","code":"
+     empty_string"}}
+
+❯ 继续完成没完成的内容                                                          
+  ⎿  API Error: 400 {"error":{"message":"Invalid 'input[237].name': empty 
+     string. Expected a string with minimum length 1, but got an empty string 
+     instead.","type":"invalid_request_error","param":"input[237].name","code":"
+     empty_string"}}

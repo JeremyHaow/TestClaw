@@ -1,0 +1,84 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e9]: TestClaw
+      - button [ref=e10]:
+        - img [ref=e11]
+    - navigation [ref=e13]:
+      - button "仪表盘" [ref=e14]:
+        - img [ref=e15]
+        - generic [ref=e20]: 仪表盘
+      - button "AI Agent 配置" [ref=e21]:
+        - img [ref=e22]
+        - generic [ref=e25]: AI Agent 配置
+      - button "用例生成中心" [ref=e26]:
+        - img [ref=e27]
+        - generic [ref=e32]: 用例生成中心
+      - button "接口测试" [ref=e33]:
+        - img [ref=e34]
+        - generic [ref=e36]: 接口测试
+      - button "UI 测试" [ref=e37]:
+        - img [ref=e38]
+        - generic [ref=e41]: UI 测试
+      - button "测试报告" [ref=e42]:
+        - img [ref=e43]
+        - generic [ref=e45]: 测试报告
+      - generic [ref=e47]: 系统管理
+      - button "模型管理" [ref=e48]:
+        - img [ref=e49]
+        - generic [ref=e52]: 模型管理
+      - button "任务中心" [ref=e53]:
+        - img [ref=e54]
+        - generic [ref=e56]: 任务中心
+      - button "用例库" [ref=e57]:
+        - img [ref=e58]
+        - generic [ref=e62]: 用例库
+      - button "文档管理" [ref=e63]:
+        - img [ref=e64]
+        - generic [ref=e68]: 文档管理
+      - button "环境管理" [ref=e69]:
+        - img [ref=e70]
+        - generic [ref=e73]: 环境管理
+  - main [ref=e74]:
+    - generic [ref=e75]:
+      - heading "用例生成中心" [level=1] [ref=e77]
+      - generic [ref=e78]:
+        - generic [ref=e79]:
+          - img [ref=e80]
+          - textbox "Search resources..." [ref=e83]
+        - generic [ref=e84]:
+          - button [ref=e85]:
+            - img [ref=e86]
+          - button [ref=e90]:
+            - img [ref=e91]
+          - generic [ref=e95]: AGENT ONLINE
+          - button "退出" [ref=e96]
+    - generic [ref=e98]:
+      - generic [ref=e99]:
+        - heading "用例生成中心" [level=2] [ref=e100]
+        - paragraph [ref=e101]: 支持手动创建、AI 智能生成和 Swagger 导入三种方式。
+      - generic [ref=e102]:
+        - button "AI 生成" [ref=e103]
+        - button "文档导入" [ref=e104]
+        - button "手动创建" [ref=e105]
+      - generic [ref=e106]:
+        - generic [ref=e107]:
+          - heading "AI 生成用例" [level=3] [ref=e108]
+          - generic [ref=e109]:
+            - generic [ref=e110]: 功能描述
+            - textbox "描述需要测试的功能，例如：用户登录流程，包含正确和错误密码场景..." [ref=e111]: 用户登录功能，包含正确密码登录成功和错误密码登录失败的场景
+          - generic [ref=e112]:
+            - generic [ref=e113]: 关联 API 文档（可选）
+            - combobox [ref=e114]:
+              - option "不关联" [selected]
+              - option "test-api.json (openapi)"
+              - option "Test API (openapi)"
+              - option "Document-openapi (openapi)"
+              - option "Document-openapi (openapi)"
+          - generic [ref=e115]:
+            - generic [ref=e116]: API Schema（可选）
+            - textbox "粘贴 OpenAPI schema 或留空" [ref=e117]: N/A
+          - button "AI 生成中..." [disabled] [ref=e125]:
+            - img [ref=e119]
+            - text: AI 生成中...
+        - heading "生成结果" [level=3] [ref=e123]

@@ -1,0 +1,11 @@
+.git
+.venv
+__pycache__
+.pytest_cache
+*.pyc
+*.pyo
+*.pyd
+.env
+frontend/node_modules
+frontend/dist
+testclaw.db

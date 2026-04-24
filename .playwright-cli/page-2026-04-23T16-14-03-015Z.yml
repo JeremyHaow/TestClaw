@@ -1,0 +1,105 @@
+- generic [ref=e22]:
+  - complementary [ref=e23]:
+    - generic [ref=e24]:
+      - generic [ref=e28]: TestClaw
+      - button [ref=e29]:
+        - img [ref=e30]
+    - navigation [ref=e32]:
+      - button "仪表盘" [ref=e33]:
+        - img [ref=e34]
+        - generic [ref=e39]: 仪表盘
+      - button "AI Agent 配置" [ref=e40]:
+        - img [ref=e41]
+        - generic [ref=e44]: AI Agent 配置
+      - button "用例生成中心" [ref=e45]:
+        - img [ref=e46]
+        - generic [ref=e51]: 用例生成中心
+      - button "接口测试" [ref=e52]:
+        - img [ref=e53]
+        - generic [ref=e55]: 接口测试
+      - button "UI 测试" [active] [ref=e56]:
+        - img [ref=e57]
+        - generic [ref=e60]: UI 测试
+      - button "测试报告" [ref=e61]:
+        - img [ref=e62]
+        - generic [ref=e64]: 测试报告
+      - generic [ref=e66]: 系统管理
+      - button "模型管理" [ref=e67]:
+        - img [ref=e68]
+        - generic [ref=e71]: 模型管理
+      - button "任务中心" [ref=e72]:
+        - img [ref=e73]
+        - generic [ref=e75]: 任务中心
+      - button "用例库" [ref=e76]:
+        - img [ref=e77]
+        - generic [ref=e81]: 用例库
+      - button "文档管理" [ref=e82]:
+        - img [ref=e83]
+        - generic [ref=e87]: 文档管理
+      - button "环境管理" [ref=e88]:
+        - img [ref=e89]
+        - generic [ref=e92]: 环境管理
+  - main [ref=e93]:
+    - generic [ref=e94]:
+      - heading "UI 测试" [level=1] [ref=e394]
+      - generic [ref=e97]:
+        - generic [ref=e98]:
+          - img [ref=e99]
+          - textbox "Search resources..." [ref=e102]
+        - generic [ref=e103]:
+          - button [ref=e104]:
+            - img [ref=e105]
+          - button [ref=e109]:
+            - img [ref=e110]
+          - generic [ref=e114]: AGENT ONLINE
+          - button "退出" [ref=e115]
+    - generic [ref=e395]:
+      - generic [ref=e396]:
+        - heading "UI 测试" [level=2] [ref=e397]
+        - paragraph [ref=e398]: 使用 Playwright CLI 交互式控制浏览器，AI 生成测试步骤。
+      - generic [ref=e399]:
+        - generic [ref=e400]:
+          - generic [ref=e401]:
+            - heading "测试配置" [level=3] [ref=e402]
+            - generic [ref=e403]:
+              - generic [ref=e404]: 目标 URL
+              - textbox "https://example.com" [ref=e405]
+            - generic [ref=e406]:
+              - generic [ref=e407]: 测试目标
+              - textbox "描述要测试的功能..." [ref=e408]: 测试页面核心功能
+            - button "AI 生成测试步骤" [disabled] [ref=e409]:
+              - img [ref=e410]
+              - text: AI 生成测试步骤
+          - generic [ref=e413]:
+            - heading "快捷命令" [level=3] [ref=e414]
+            - generic [ref=e415]:
+              - button "打开页面" [ref=e416]:
+                - img [ref=e417]
+                - text: 打开页面
+              - button "截图" [ref=e420]:
+                - img [ref=e421]
+                - text: 截图
+              - button "页面快照" [ref=e424]:
+                - img [ref=e425]
+                - text: 页面快照
+            - generic [ref=e428]:
+              - textbox "输入命令..." [ref=e429]
+              - button [disabled] [ref=e430]:
+                - img [ref=e431]
+        - generic [ref=e433]:
+          - generic [ref=e434]:
+            - heading "测试脚本" [level=3] [ref=e435]
+            - button "执行全部" [disabled] [ref=e436]:
+              - img [ref=e437]
+              - text: 执行全部
+          - generic [ref=e439]:
+            - generic [ref=e440]:
+              - img [ref=e441]
+              - generic [ref=e443]: playwright-cli commands
+            - 'textbox "# Playwright CLI 测试命令（每行一个） # 例如： open https://example.com snapshot click button[submit] screenshot step1.png" [ref=e444]':
+              - /placeholder: "# Playwright CLI 测试命令（每行一个）\n# 例如：\nopen https://example.com\nsnapshot\nclick button[submit]\nscreenshot step1.png"
+          - generic [ref=e445]:
+            - generic [ref=e446]:
+              - generic [ref=e451]: Execution Log
+              - generic [ref=e452]: 0 entries
+            - generic [ref=e454]: 执行命令后日志将显示在此处

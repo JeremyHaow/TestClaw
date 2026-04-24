@@ -1,0 +1,55 @@
+version: '3.9'
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: testclaw
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    env_file:
+      - ../.env
+    depends_on:
+      - db
+      - redis
+    ports:
+      - '127.0.0.1:18000:8000'
+    volumes:
+      - ../sandbox:/app/sandbox
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: celery -A app.worker.celery_app worker --loglevel=info
+    env_file:
+      - ../.env
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ../sandbox:/app/sandbox
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_BASE_URL: /api/v1
+    depends_on:
+      - api
+    ports:
+      - '127.0.0.1:15173:5173'
+
+volumes:
+  pgdata:

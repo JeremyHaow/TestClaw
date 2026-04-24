@@ -1,0 +1,48 @@
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    APP_NAME: str = "TestClaw"
+    API_PREFIX: str = "/api/v1"
+    DATABASE_URL: str = "sqlite+aiosqlite:///./testclaw.db"
+    REDIS_URL: str = "redis://localhost:6379/0"
+    FERNET_KEY: str = ""
+    SECRET_KEY: str = "change-me"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    DEFAULT_ADMIN_USERNAME: str = "admin"
+    DEFAULT_ADMIN_PASSWORD: str = "testclaw123"
+    BACKEND_CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
+    LANGCHAIN_TRACING_V2: bool = False
+    LANGCHAIN_API_KEY: str = ""
+    LANGCHAIN_PROJECT: str = "testclaw"
+    DEFAULT_OPENAI_API_KEY: str = ""
+    DEFAULT_OPENAI_BASE_URL: str = "https://api.openai.com/v1"
+    DEFAULT_MODEL_CODER: str = "gpt-4o"
+    DEFAULT_MODEL_VISION: str = "gpt-4o"
+    DEFAULT_MODEL_PLANNER: str = "gpt-4o"
+    SANDBOX_TIMEOUT: int = 120
+    MAX_RETRY_COUNT: int = 3
+    PROJECT_ROOT: Path = Field(default_factory=lambda: Path(__file__).resolve().parents[1])
+
+    @field_validator("FERNET_KEY", mode="after")
+    @classmethod
+    def allow_empty_fernet_for_bootstrap(cls, value: str) -> str:
+        return value.strip()
+
+    @property
+    def sandbox_dir(self) -> Path:
+        return self.PROJECT_ROOT.parent / "sandbox"
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()

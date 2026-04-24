@@ -1,0 +1,84 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e9]: TestClaw
+      - button [ref=e10]:
+        - img [ref=e11]
+    - navigation [ref=e13]:
+      - button "仪表盘" [ref=e14]:
+        - img [ref=e15]
+        - generic [ref=e20]: 仪表盘
+      - button "AI Agent 配置" [ref=e21]:
+        - img [ref=e22]
+        - generic [ref=e25]: AI Agent 配置
+      - button "用例生成中心" [ref=e26]:
+        - img [ref=e27]
+        - generic [ref=e32]: 用例生成中心
+      - button "接口测试" [ref=e33]:
+        - img [ref=e34]
+        - generic [ref=e36]: 接口测试
+      - button "UI 测试" [ref=e37]:
+        - img [ref=e38]
+        - generic [ref=e41]: UI 测试
+      - button "测试报告" [ref=e42]:
+        - img [ref=e43]
+        - generic [ref=e45]: 测试报告
+      - generic [ref=e47]: 系统管理
+      - button "模型管理" [ref=e48]:
+        - img [ref=e49]
+        - generic [ref=e52]: 模型管理
+      - button "任务中心" [ref=e53]:
+        - img [ref=e54]
+        - generic [ref=e56]: 任务中心
+      - button "用例库" [ref=e57]:
+        - img [ref=e58]
+        - generic [ref=e62]: 用例库
+      - button "文档管理" [ref=e63]:
+        - img [ref=e64]
+        - generic [ref=e68]: 文档管理
+      - button "环境管理" [ref=e69]:
+        - img [ref=e70]
+        - generic [ref=e73]: 环境管理
+  - main [ref=e74]:
+    - generic [ref=e75]:
+      - heading "文档管理" [level=1] [ref=e77]
+      - generic [ref=e78]:
+        - generic [ref=e79]:
+          - img [ref=e80]
+          - textbox "Search resources..." [ref=e83]
+        - generic [ref=e84]:
+          - button [ref=e85]:
+            - img [ref=e86]
+          - button [ref=e90]:
+            - img [ref=e91]
+          - generic [ref=e95]: AGENT ONLINE
+          - button "退出" [ref=e96]
+    - generic [ref=e98]:
+      - generic [ref=e99]:
+        - heading "文档导入" [level=2] [ref=e100]
+        - paragraph [ref=e101]: 导入 OpenAPI / Postman 文档，自动解析接口端点。
+      - generic [ref=e102]:
+        - generic [ref=e103]:
+          - generic [ref=e104] [cursor=pointer]:
+            - img [ref=e105]
+            - paragraph [ref=e108]: 拖拽文件到此处上传
+            - paragraph [ref=e109]: 支持 .json, .yaml, .yml 格式
+          - generic [ref=e110]:
+            - heading "导入接口文档" [level=3] [ref=e111]
+            - generic [ref=e112]:
+              - generic [ref=e113]:
+                - generic [ref=e114]: 名称
+                - textbox "OpenAPI 文档" [ref=e115]
+              - generic [ref=e116]:
+                - generic [ref=e117]: 格式
+                - combobox [ref=e118]:
+                  - option "openapi" [selected]
+                  - option "postman"
+                  - option "yaml"
+              - generic [ref=e119]:
+                - generic [ref=e120]: 内容
+                - textbox "粘贴 OpenAPI / Postman 内容" [ref=e121]
+              - button "导入文档" [ref=e122]
+        - generic [ref=e123]:
+          - heading "已导入文档" [level=3] [ref=e124]
+          - paragraph [ref=e126]: 暂无文档

@@ -1,0 +1,16 @@
+- generic [ref=e4]:
+  - generic [ref=e5]:
+    - generic [ref=e9]: TestClaw
+    - paragraph [ref=e10]: AI 驱动的全链路智能测试平台
+  - generic [ref=e11]:
+    - heading "登录控制台" [level=2] [ref=e12]
+    - generic [ref=e13]:
+      - generic [ref=e14]:
+        - generic [ref=e15]: 用户名
+        - textbox "admin" [ref=e16]
+      - generic [ref=e17]:
+        - generic [ref=e18]: 密码
+        - textbox "请输入密码" [ref=e19]: testclaw123
+      - paragraph [ref=e22]: 登录失败
+      - button "登录" [ref=e20]
+    - generic [ref=e21]: 默认账号：admin / testclaw123

@@ -1,0 +1,6 @@
+{
+  "name": "Nexus AI Test Platform",
+  "description": "An advanced AI-powered testing management system featuring automated case generation, intelligent API/UI testing, and deep diagnostics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["AI Case Generation", "Intelligent Test Execution", "Automated UI Scripting"]
+}

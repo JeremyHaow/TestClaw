@@ -1,0 +1,101 @@
+- generic [ref=e22]:
+  - complementary [ref=e23]:
+    - generic [ref=e24]:
+      - generic [ref=e28]: TestClaw
+      - button [ref=e29]:
+        - img [ref=e30]
+    - navigation [ref=e32]:
+      - button "仪表盘" [ref=e33]:
+        - img [ref=e34]
+        - generic [ref=e39]: 仪表盘
+      - button "AI Agent 配置" [ref=e40]:
+        - img [ref=e41]
+        - generic [ref=e44]: AI Agent 配置
+      - button "用例生成中心" [ref=e45]:
+        - img [ref=e46]
+        - generic [ref=e51]: 用例生成中心
+      - button "接口测试" [active] [ref=e52]:
+        - img [ref=e53]
+        - generic [ref=e55]: 接口测试
+      - button "UI 测试" [ref=e56]:
+        - img [ref=e57]
+        - generic [ref=e60]: UI 测试
+      - button "测试报告" [ref=e61]:
+        - img [ref=e62]
+        - generic [ref=e64]: 测试报告
+      - generic [ref=e66]: 系统管理
+      - button "模型管理" [ref=e67]:
+        - img [ref=e68]
+        - generic [ref=e71]: 模型管理
+      - button "任务中心" [ref=e72]:
+        - img [ref=e73]
+        - generic [ref=e75]: 任务中心
+      - button "用例库" [ref=e76]:
+        - img [ref=e77]
+        - generic [ref=e81]: 用例库
+      - button "文档管理" [ref=e82]:
+        - img [ref=e83]
+        - generic [ref=e87]: 文档管理
+      - button "知识库" [ref=e88]:
+        - img [ref=e89]
+        - generic [ref=e91]: 知识库
+      - button "环境管理" [ref=e92]:
+        - img [ref=e93]
+        - generic [ref=e96]: 环境管理
+  - main [ref=e97]:
+    - generic [ref=e98]:
+      - heading "接口测试" [level=1] [ref=e750]
+      - generic [ref=e101]:
+        - generic [ref=e102]:
+          - img [ref=e103]
+          - textbox "Search resources..." [ref=e106]
+        - generic [ref=e107]:
+          - button [ref=e108]:
+            - img [ref=e109]
+          - button [ref=e113]:
+            - img [ref=e114]
+          - generic [ref=e118]: AGENT ONLINE
+          - button "退出" [ref=e119]
+    - generic [ref=e751]:
+      - generic [ref=e752]:
+        - heading "接口测试" [level=2] [ref=e753]
+        - paragraph [ref=e754]: 管理 API 端点，配置环境变量，一键执行并查看断言结果。
+      - generic [ref=e755]:
+        - generic [ref=e756]:
+          - generic [ref=e757]:
+            - heading "测试配置" [level=3] [ref=e758]
+            - generic [ref=e759]:
+              - generic [ref=e760]: 测试环境
+              - combobox [ref=e761]:
+                - option "选择环境" [selected]
+                - option "测试环境 — https://test.example.com"
+            - generic [ref=e762]:
+              - generic [ref=e763]: API 文档
+              - combobox [ref=e764]:
+                - option "选择文档" [selected]
+                - option "test-api.json (openapi)"
+                - option "Test API (openapi)"
+                - option "Document-openapi (openapi)"
+                - option "Document-openapi (openapi)"
+          - generic [ref=e765]:
+            - heading "手动请求" [level=3] [ref=e766]
+            - generic [ref=e767]:
+              - combobox [ref=e768]:
+                - option "GET" [selected]
+                - option "POST"
+                - option "PUT"
+                - option "DELETE"
+                - option "PATCH"
+              - textbox "https://api.example.com/endpoint" [ref=e769]
+            - generic [ref=e770]:
+              - generic [ref=e771]: Headers JSON
+              - textbox [ref=e772]: "{}"
+            - generic [ref=e773]:
+              - generic [ref=e774]: Body JSON
+              - textbox "可选" [ref=e775]
+            - button "发送请求" [disabled] [ref=e776]:
+              - img [ref=e777]
+              - text: 发送请求
+        - generic [ref=e779]:
+          - heading "执行结果" [level=3] [ref=e780]
+          - paragraph [ref=e781]: 执行测试后结果将显示在此处
