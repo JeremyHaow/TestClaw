@@ -5,7 +5,7 @@ import api from '../lib/api'
 import StatusBadge from '../components/StatusBadge.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import { useToast } from '../composables/useToast'
-import { ArrowLeft, RotateCcw, XCircle, CheckCircle2, XCircleIcon, Camera, FileText, Zap, Monitor } from 'lucide-vue-next'
+import { ArrowLeft, RotateCcw, XCircle, CheckCircle2, XCircleIcon, Camera, FileText, Zap, Monitor, Terminal } from 'lucide-vue-next'
 
 const route = useRoute()
 const router = useRouter()
@@ -187,6 +187,7 @@ const activeTab = ref('report')
           { key: 'api', label: 'API 测试', icon: Zap },
           { key: 'ui', label: 'UI 测试', icon: Monitor },
           { key: 'cases', label: '测试用例', icon: FileText },
+          { key: 'logs', label: '日志', icon: Terminal },
         ]"
         :key="tab.key"
         @click="activeTab = tab.key"
@@ -376,6 +377,88 @@ const activeTab = ref('report')
       </div>
 
       <div v-if="!run.api_cases?.length && !run.ui_cases?.length" class="text-center py-12 text-gray-400 text-sm">无测试用例</div>
+    </div>
+
+    <!-- Tab: Logs -->
+    <div v-if="activeTab === 'logs'" class="space-y-4">
+      <!-- Workflow Steps Log -->
+      <div v-if="run.workflow_steps?.length" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-2">
+          <Terminal :size="14" /> 工作流日志
+        </h3>
+        <div class="space-y-2">
+          <div
+            v-for="(step, idx) in run.workflow_steps"
+            :key="idx"
+            class="flex items-start gap-3 p-3 rounded-lg border font-mono text-xs"
+            :class="step.status === 'done' ? 'bg-emerald-50 border-emerald-200' : step.status === 'failed' ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200'"
+          >
+            <span class="text-gray-400 shrink-0 w-5 text-right">{{ idx + 1 }}</span>
+            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold shrink-0"
+              :class="step.status === 'done' ? 'bg-emerald-200 text-emerald-800' : step.status === 'failed' ? 'bg-red-200 text-red-800' : 'bg-gray-200 text-gray-600'"
+            >{{ step.node }}</span>
+            <span class="text-gray-600 flex-1">{{ step.detail }}</span>
+            <span class="text-[10px] shrink-0"
+              :class="step.status === 'done' ? 'text-emerald-600' : step.status === 'failed' ? 'text-red-600' : 'text-gray-400'"
+            >{{ step.status }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Execution Result Log -->
+      <div v-if="run.execution_result" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-2">
+          <Terminal :size="14" /> 执行日志
+        </h3>
+        <div class="grid grid-cols-3 gap-3 mb-4">
+          <div class="p-2 bg-gray-50 rounded-lg border border-gray-100 text-center">
+            <div class="text-[10px] font-bold text-gray-400 uppercase">退出码</div>
+            <div class="text-sm font-bold mt-0.5" :class="run.execution_result.status_code === 0 ? 'text-emerald-600' : 'text-red-600'">
+              {{ run.execution_result.status_code }}
+            </div>
+          </div>
+          <div class="p-2 bg-gray-50 rounded-lg border border-gray-100 text-center">
+            <div class="text-[10px] font-bold text-gray-400 uppercase">标准输出</div>
+            <div class="text-sm font-bold text-gray-700 mt-0.5">{{ run.execution_result.stdout?.length || 0 }} chars</div>
+          </div>
+          <div class="p-2 bg-gray-50 rounded-lg border border-gray-100 text-center">
+            <div class="text-[10px] font-bold text-gray-400 uppercase">错误输出</div>
+            <div class="text-sm font-bold mt-0.5" :class="run.execution_result.stderr ? 'text-red-600' : 'text-emerald-600'">
+              {{ run.execution_result.stderr?.length || 0 }} chars
+            </div>
+          </div>
+        </div>
+        <div v-if="run.execution_result.stdout" class="mb-3">
+          <div class="text-[10px] font-bold text-gray-400 uppercase mb-1">标准输出 (stdout)</div>
+          <pre class="bg-gray-900 text-gray-100 rounded-lg p-4 text-[11px] font-mono overflow-auto max-h-60 leading-relaxed">{{ run.execution_result.stdout }}</pre>
+        </div>
+        <div v-if="run.execution_result.stderr">
+          <div class="text-[10px] font-bold text-red-400 uppercase mb-1">错误输出 (stderr)</div>
+          <pre class="bg-gray-900 text-red-300 rounded-lg p-4 text-[11px] font-mono overflow-auto max-h-60 leading-relaxed">{{ run.execution_result.stderr }}</pre>
+        </div>
+        <div v-if="run.execution_result.trace_path" class="mt-3">
+          <div class="text-[10px] font-bold text-gray-400 uppercase mb-1">Trace 路径</div>
+          <div class="text-xs font-mono text-gray-600 bg-gray-50 rounded-lg p-3 border border-gray-100">{{ run.execution_result.trace_path }}</div>
+        </div>
+      </div>
+
+      <!-- Generated Code -->
+      <div v-if="run.generated_code" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-2">
+          <FileText :size="14" /> 生成代码
+        </h3>
+        <pre class="bg-gray-900 text-gray-100 rounded-lg p-4 text-[11px] font-mono overflow-auto max-h-80 leading-relaxed">{{ run.generated_code }}</pre>
+      </div>
+
+      <!-- Raw Execution Log -->
+      <div v-if="run.execution_log" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-2">
+          <Terminal :size="14" /> 原始日志 (JSON)
+        </h3>
+        <pre class="bg-gray-900 text-gray-100 rounded-lg p-4 text-[11px] font-mono overflow-auto max-h-80 leading-relaxed">{{ (() => { try { return JSON.stringify(JSON.parse(run.execution_log), null, 2) } catch { return run.execution_log } })() }}</pre>
+      </div>
+
+      <div v-if="!run.workflow_steps?.length && !run.execution_result && !run.generated_code && !run.execution_log" class="text-center py-12 text-gray-400 text-sm">暂无日志</div>
     </div>
   </div>
 

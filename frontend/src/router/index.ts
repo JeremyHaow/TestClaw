@@ -5,6 +5,11 @@ import RunPage from '../pages/RunPage.vue'
 import RunDetailPage from '../pages/RunDetailPage.vue'
 import HistoryPage from '../pages/HistoryPage.vue'
 import SettingsPage from '../pages/SettingsPage.vue'
+import ProvidersPage from '../pages/ProvidersPage.vue'
+import DocumentsPage from '../pages/DocumentsPage.vue'
+import EnvironmentsPage from '../pages/EnvironmentsPage.vue'
+import TestCasesPage from '../pages/TestCasesPage.vue'
+import KnowledgePage from '../pages/KnowledgePage.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -15,10 +20,16 @@ const router = createRouter({
       component: AdminLayout,
       children: [
         { path: '', redirect: '/run' },
+        { path: 'dashboard', redirect: '/run' },
         { path: 'run', component: RunPage },
         { path: 'runs/:id', component: RunDetailPage },
         { path: 'history', component: HistoryPage },
         { path: 'settings', component: SettingsPage },
+        { path: 'providers', component: ProvidersPage },
+        { path: 'documents', component: DocumentsPage },
+        { path: 'environments', component: EnvironmentsPage },
+        { path: 'test-cases', component: TestCasesPage },
+        { path: 'knowledge', component: KnowledgePage },
       ],
     },
   ],

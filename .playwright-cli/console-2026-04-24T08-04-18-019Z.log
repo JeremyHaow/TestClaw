@@ -1,0 +1,2 @@
+[    1135ms] [VERBOSE] [DOM] Input elements should have autocomplete attributes (suggested: "current-password"): (More info: https://goo.gl/9p2vKq) @ https://testclaw.oceancute.cn/login:0
+[    1193ms] [ERROR] Failed to load resource: the server responded with a status of 404 () @ https://testclaw.oceancute.cn/favicon.ico:0

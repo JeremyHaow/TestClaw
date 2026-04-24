@@ -9,6 +9,14 @@ from app.agent.state import AgentState
 logger = logging.getLogger(__name__)
 
 
+def _parse_status(val) -> int:
+    """Parse response status, handling 'default' and non-numeric values."""
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return 200
+
+
 def _build_test_requests(api_schema: list[dict], base_url: str, headers: dict | None = None) -> list[dict]:
     """Generate test requests from parsed API schema: smoke, param validation, missing required, boundary, unauthorized."""
     requests = []
@@ -29,7 +37,7 @@ def _build_test_requests(api_schema: list[dict], base_url: str, headers: dict | 
             "url": full_url,
             "headers": {**default_headers, **({"Content-Type": endpoint.get("request_body_content_type", "application/json")} if req_body else {})},
             "body": req_body,
-            "expected_status": int(endpoint.get("response_status", "200")),
+            "expected_status": _parse_status(endpoint.get("response_status", "200")),
             "category": "SMOKE",
         })
 

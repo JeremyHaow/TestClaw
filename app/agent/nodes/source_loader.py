@@ -24,6 +24,25 @@ def _looks_like_swagger_url(url: str) -> bool:
     return any(p.search(url) for p in _SWAGGER_URL_PATTERNS)
 
 
+def _extract_base_url(swagger_url: str) -> str:
+    """Extract API base URL from Swagger URL by stripping the document path."""
+    import re
+    # Remove common Swagger doc paths
+    patterns = [
+        r"/swagger\.json$",
+        r"/swagger\.yaml$",
+        r"/openapi\.json$",
+        r"/openapi\.yaml$",
+        r"/api-docs.*$",
+        r"/v[12]/swagger.*$",
+        r"/docs/api.*$",
+    ]
+    url = swagger_url.rstrip("/")
+    for p in patterns:
+        url = re.sub(p, "", url, flags=re.I)
+    return url
+
+
 def _is_json_or_yaml(text: str) -> bool:
     stripped = text.strip()
     if stripped.startswith("{") or stripped.startswith("["):
@@ -120,6 +139,12 @@ async def run(state: AgentState) -> AgentState:
         except Exception as e:
             logger.warning("Failed to parse API document: %s", e)
             state["parsed_api_schema"] = []
+
+    # Fix target_url for Swagger URLs — strip the doc path to get the API base URL
+    if input_type == "swagger_url":
+        base_url = _extract_base_url(source)
+        state["target_url"] = base_url
+        logger.info("Extracted base URL from Swagger: %s", base_url)
 
     if ui_seed_url:
         state["ui_seed_url"] = ui_seed_url

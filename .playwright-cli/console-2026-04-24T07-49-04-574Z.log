@@ -1,0 +1,7 @@
+[    1189ms] [VERBOSE] [DOM] Input elements should have autocomplete attributes (suggested: "current-password"): (More info: https://goo.gl/9p2vKq) @ https://testclaw.oceancute.cn/login:0
+[    1281ms] [ERROR] Failed to load resource: the server responded with a status of 404 () @ https://testclaw.oceancute.cn/favicon.ico:0
+[  176842ms] [WARNING] [Vue Router warn]: No match found for location with path "/dashboard" @ https://testclaw.oceancute.cn/node_modules/.vite/deps/vue-router.js?v=ef91b6ba:51
+[  541518ms] [LOG] [vite] server connection lost. Polling for restart... @ https://testclaw.oceancute.cn/@vite/client:963
+[  541581ms] [ERROR] WebSocket connection to 'wss://testclaw.oceancute.cn/' failed: Error during WebSocket handshake: Unexpected response code: 502 @ https://testclaw.oceancute.cn/@vite/client:1034
+[  542630ms] [ERROR] WebSocket connection to 'wss://testclaw.oceancute.cn/' failed: Error during WebSocket handshake: Unexpected response code: 502 @ https://testclaw.oceancute.cn/@vite/client:1034
+[  543672ms] [ERROR] WebSocket connection to 'wss://testclaw.oceancute.cn/' failed: Error during WebSocket handshake: Unexpected response code: 502 @ https://testclaw.oceancute.cn/@vite/client:1034
