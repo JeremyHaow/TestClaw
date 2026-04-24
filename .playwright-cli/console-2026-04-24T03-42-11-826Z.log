@@ -17,3 +17,18 @@
 [ 3910446ms] [VERBOSE] [DOM] Input elements should have autocomplete attributes (suggested: "current-password"): (More info: https://goo.gl/9p2vKq) @ https://testclaw.oceancute.cn/login:0
 [10670368ms] [LOG] [vite] server connection lost. Polling for restart... @ https://testclaw.oceancute.cn/@vite/client:963
 [10671274ms] [VERBOSE] [DOM] Input elements should have autocomplete attributes (suggested: "current-password"): (More info: https://goo.gl/9p2vKq) @ https://testclaw.oceancute.cn/login:0
+[13862988ms] [LOG] [vite] server connection lost. Polling for restart... @ https://testclaw.oceancute.cn/@vite/client:963
+[13863301ms] [ERROR] WebSocket connection to 'wss://testclaw.oceancute.cn/' failed: Error during WebSocket handshake: Unexpected response code: 502 @ https://testclaw.oceancute.cn/@vite/client:1034
+[13864377ms] [ERROR] WebSocket connection to 'wss://testclaw.oceancute.cn/' failed: Error during WebSocket handshake: Unexpected response code: 502 @ https://testclaw.oceancute.cn/@vite/client:1034
+[13865424ms] [ERROR] WebSocket connection to 'wss://testclaw.oceancute.cn/' failed: Error during WebSocket handshake: Unexpected response code: 502 @ https://testclaw.oceancute.cn/@vite/client:1034
+[13866468ms] [ERROR] WebSocket connection to 'wss://testclaw.oceancute.cn/' failed: Error during WebSocket handshake: Unexpected response code: 502 @ https://testclaw.oceancute.cn/@vite/client:1034
+[13867514ms] [ERROR] WebSocket connection to 'wss://testclaw.oceancute.cn/' failed: Error during WebSocket handshake: Unexpected response code: 502 @ https://testclaw.oceancute.cn/@vite/client:1034
+[13868567ms] [ERROR] WebSocket connection to 'wss://testclaw.oceancute.cn/' failed: Error during WebSocket handshake: Unexpected response code: 502 @ https://testclaw.oceancute.cn/@vite/client:1034
+[13869621ms] [ERROR] WebSocket connection to 'wss://testclaw.oceancute.cn/' failed: Error during WebSocket handshake: Unexpected response code: 502 @ https://testclaw.oceancute.cn/@vite/client:1034
+[13870684ms] [ERROR] WebSocket connection to 'wss://testclaw.oceancute.cn/' failed: Error during WebSocket handshake: Unexpected response code: 502 @ https://testclaw.oceancute.cn/@vite/client:1034
+[13881509ms] [ERROR] Failed to load resource: the server responded with a status of 500 () @ https://testclaw.oceancute.cn/src/pages/HistoryPage.vue:0
+[13976334ms] [LOG] [vite] server connection lost. Polling for restart... @ https://testclaw.oceancute.cn/@vite/client:963
+[13976381ms] [ERROR] WebSocket connection to 'wss://testclaw.oceancute.cn/' failed: Error during WebSocket handshake: Unexpected response code: 502 @ https://testclaw.oceancute.cn/@vite/client:1034
+[13977454ms] [ERROR] WebSocket connection to 'wss://testclaw.oceancute.cn/' failed: Error during WebSocket handshake: Unexpected response code: 502 @ https://testclaw.oceancute.cn/@vite/client:1034
+[13978502ms] [ERROR] WebSocket connection to 'wss://testclaw.oceancute.cn/' failed: Error during WebSocket handshake: Unexpected response code: 502 @ https://testclaw.oceancute.cn/@vite/client:1034
+[13984846ms] [VERBOSE] [DOM] Input elements should have autocomplete attributes (suggested: "current-password"): (More info: https://goo.gl/9p2vKq) @ https://testclaw.oceancute.cn/login:0

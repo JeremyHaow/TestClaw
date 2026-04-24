@@ -88,7 +88,7 @@ onMounted(fetchRuns)
       v-else-if="!runs.length"
       :icon="Filter"
       :title="total ? '没有匹配的记录' : '暂无运行记录'"
-      :description="total ? '请尝试调整筛选条件' : '点击\"开始测试\"创建第一次运行'"
+      :description="total ? '请尝试调整筛选条件' : '点击开始测试创建第一次运行'"
     />
     <div v-else class="space-y-3">
       <div v-for="run in runs" :key="run.id"
