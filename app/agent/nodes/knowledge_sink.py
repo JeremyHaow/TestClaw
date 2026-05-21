@@ -1,5 +1,6 @@
 import json
 import logging
+from typing import Any
 
 from langchain_core.messages import HumanMessage
 
@@ -8,6 +9,22 @@ from app.agent.state import AgentState
 from app.core.llm_gateway import llm_gateway
 
 logger = logging.getLogger(__name__)
+
+
+def _to_text(value: Any, fallback: str = "") -> str:
+    if value is None:
+        return fallback
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        lines = []
+        for index, item in enumerate(value, start=1):
+            text = item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
+            lines.append(f"{index}. {text}")
+        return "\n".join(lines) or fallback
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
 
 
 async def run(state: AgentState) -> AgentState:
@@ -37,10 +54,16 @@ async def run(state: AgentState) -> AgentState:
             parsed = json.loads(text)
             if isinstance(parsed, dict):
                 bug_report = {
-                    "title": parsed.get("title", "Automated test failure detected"),
-                    "root_cause": parsed.get("root_cause", state["last_error"]),
-                    "reproduce_steps": parsed.get("reproduce_steps", "Run the generated script against the target environment."),
-                    "fix_suggestion": parsed.get("fix_suggestion", "Inspect the execution log and target application behavior."),
+                    "title": _to_text(parsed.get("title"), "Automated test failure detected")[:255],
+                    "root_cause": _to_text(parsed.get("root_cause"), state["last_error"]),
+                    "reproduce_steps": _to_text(
+                        parsed.get("reproduce_steps"),
+                        "Run the generated script against the target environment.",
+                    ),
+                    "fix_suggestion": _to_text(
+                        parsed.get("fix_suggestion"),
+                        "Inspect the execution log and target application behavior.",
+                    ),
                 }
         except Exception as e:
             logger.warning("Knowledge sink LLM call failed: %s, using fallback", e)
@@ -62,15 +85,16 @@ async def run(state: AgentState) -> AgentState:
 
             report = BugReportModel(
                 task_id=state.get("task_id", ""),
-                title=bug_report["title"],
-                root_cause=bug_report["root_cause"],
-                reproduce_steps=bug_report["reproduce_steps"],
-                fix_suggestion=bug_report.get("fix_suggestion"),
+                title=_to_text(bug_report.get("title"), "Automated test failure detected")[:255],
+                root_cause=_to_text(bug_report.get("root_cause"), "Unknown root cause"),
+                reproduce_steps=_to_text(bug_report.get("reproduce_steps"), "Run the task again."),
+                fix_suggestion=_to_text(bug_report.get("fix_suggestion"), ""),
                 created_at=datetime.utcnow(),
             )
             db.add(report)
             await db.commit()
         except Exception as e:
+            await db.rollback()
             logger.warning("Failed to persist bug report: %s", e)
 
     state.setdefault("workflow_steps", []).append(
@@ -82,12 +106,17 @@ async def run(state: AgentState) -> AgentState:
         try:
             from app.models.knowledge import KnowledgeEntry
             knowledge = KnowledgeEntry(
-                content=f"Bug: {bug_report['title']}\nRoot Cause: {bug_report['root_cause']}\nFix: {bug_report['fix_suggestion']}",
+                content=(
+                    f"Bug: {_to_text(bug_report.get('title'), 'Automated test failure detected')}\n"
+                    f"Root Cause: {_to_text(bug_report.get('root_cause'), 'Unknown root cause')}\n"
+                    f"Fix: {_to_text(bug_report.get('fix_suggestion'), '')}"
+                ),
                 source_script_id=state.get("task_id"),
             )
             db.add(knowledge)
             await db.commit()
         except Exception as e:
+            await db.rollback()
             logger.warning("Failed to persist knowledge: %s", e)
 
     return state

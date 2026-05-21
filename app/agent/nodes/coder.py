@@ -21,7 +21,7 @@ def test_generated_flow(page: Page):
 async def run(state: AgentState) -> AgentState:
     target_url = state.get("target_url") or "http://localhost"
     objective = state.get("objective", "")
-    test_type = state.get("test_type", "full")
+    test_type = (state.get("test_type") or "full").lower()
     test_plan = state.get("test_plan") or []
     test_cases = state.get("test_cases") or []
     rag_context = state.get("rag_context") or ""

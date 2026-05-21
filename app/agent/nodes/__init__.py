@@ -11,7 +11,9 @@ from app.agent.nodes import (
     reporter,
     source_loader,
     tc_generator,
+    ui_login,
     ui_runner,
+    ui_test_planner,
 )
 
 __all__ = [
@@ -27,5 +29,7 @@ __all__ = [
     "reporter",
     "source_loader",
     "tc_generator",
+    "ui_login",
     "ui_runner",
+    "ui_test_planner",
 ]

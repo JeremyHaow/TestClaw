@@ -23,7 +23,7 @@ class AgentState(TypedDict, total=False):
     ui_seed_url: str | None  # URL for UI testing
 
     # --- Test planning ---
-    test_type: Literal["ui", "api", "auto"]
+    test_type: Literal["ui", "api", "auto", "functional", "full", "suite"]
     api_plan: dict | None  # structured API test plan
     ui_plan: dict | None  # structured UI test plan
     test_plan: list[dict] | None  # legacy combined plan (fallback)
@@ -44,6 +44,28 @@ class AgentState(TypedDict, total=False):
     # --- Report ---
     final_report: dict | None  # aggregated report from reporter
     artifacts: dict | None  # screenshots, traces, logs
+    tool_registry: dict | None  # available automation tools and skills
+    skill_plan: list[dict] | None  # selected skills for this run
+    tool_calls: list[dict] | None  # auditable tool invocations
+    tool_summary: dict | None  # aggregate tool-call counts
+
+    # --- UI Login ---
+    setup_instructions: str | None  # natural language pre-test setup/context from user
+    setup_result: dict | None  # setup execution summary
+    login_instructions: str | None  # deprecated alias for setup_instructions
+    ui_login_snapshot: str | None  # page snapshot after successful login
+    login_playwright_commands: list[str] | None  # commands used for login
+    login_result: dict | None  # login execution summary
+    login_verified: bool | None  # whether login appears successful
+    login_verification_reason: str | None  # human-readable verification reason
+    ui_login_screenshot: str | None  # final login screenshot evidence
+    authenticated_ui_context: dict | None  # post-login/authenticated UI context summary
+    ui_reproducible_script: str | None  # full reproducible playwright-cli script
+    ui_execution_context_plan: list[dict] | None  # per-case execution context decisions
+
+    # --- Analysis context ---
+    scene_hints: list[dict] | None  # detected API/product scenes
+    auth_chain: dict | None  # summarized auth chain for planning/case generation
 
     # --- Agent control ---
     retry_count: int
@@ -53,3 +75,11 @@ class AgentState(TypedDict, total=False):
     bug_report: dict | None
     messages: Annotated[list[BaseMessage], add_messages]
     workflow_steps: list[dict]
+    progress_events: list[dict]
+    current_step: dict | None
+    auth_headers: dict[str, str] | None
+    auth_config: dict[str, Any] | None
+    custom_headers: dict[str, str] | None
+    base_url_override: str | None
+    api_execution_policy: Literal["safe_read_only", "safe_with_auth", "write_allowed"] | None
+    api_path_prefix_rewrite: dict[str, str] | None
