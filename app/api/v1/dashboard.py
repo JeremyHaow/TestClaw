@@ -1,4 +1,3 @@
-import json
 from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
@@ -14,20 +13,25 @@ from app.schemas.dashboard import DashboardSummary
 
 router = APIRouter()
 
+_TASK_TERMINAL_STATES = {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.BUG_FOUND}
+
+
+async def _get_status_counts(db: DbSession) -> dict[str, int]:
+    """Single GROUP BY query for all task status counts."""
+    result = await db.execute(
+        select(Task.status, func.count()).group_by(Task.status)
+    )
+    counts = {s.value: 0 for s in TaskStatus}
+    for status, count in result.all():
+        key = status.value if hasattr(status, "value") else str(status)
+        counts[key] = count
+    return counts
+
 
 @router.get("/summary", response_model=DashboardSummary)
 async def get_dashboard_summary(db: DbSession, _: CurrentUser):
-    total_tasks = (await db.execute(select(func.count()).select_from(Task))).scalar_one()
-    total_documents = (await db.execute(select(func.count()).select_from(ApiDocument))).scalar_one()
-    total_providers = (await db.execute(select(func.count()).select_from(LLMProvider))).scalar_one()
-    total_environments = (await db.execute(select(func.count()).select_from(Environment))).scalar_one()
-
-    status_counts = {}
-    for status in TaskStatus:
-        count = (
-            await db.execute(select(func.count()).select_from(Task).where(Task.status == status))
-        ).scalar_one()
-        status_counts[status.value] = count
+    total_tasks, total_documents, total_providers, total_environments = await _get_counts(db)
+    status_counts = await _get_status_counts(db)
 
     recent_tasks_result = await db.execute(select(Task).order_by(Task.created_at.desc()).limit(10))
     recent_tasks = [
@@ -51,53 +55,74 @@ async def get_dashboard_summary(db: DbSession, _: CurrentUser):
     )
 
 
+async def _get_counts(db: DbSession):
+    """Run count queries sequentially on the request AsyncSession."""
+    tasks_result = await db.execute(select(func.count()).select_from(Task))
+    documents_result = await db.execute(select(func.count()).select_from(ApiDocument))
+    providers_result = await db.execute(select(func.count()).select_from(LLMProvider))
+    environments_result = await db.execute(select(func.count()).select_from(Environment))
+    return (
+        tasks_result.scalar_one(),
+        documents_result.scalar_one(),
+        providers_result.scalar_one(),
+        environments_result.scalar_one(),
+    )
+
+
 @router.get("/stats")
 async def get_dashboard_stats(db: DbSession, _: CurrentUser):
-    total_tasks = (await db.execute(select(func.count()).select_from(Task))).scalar_one()
-    total_cases = (await db.execute(select(func.count()).select_from(TestCase))).scalar_one()
-    total_envs = (await db.execute(select(func.count()).select_from(Environment))).scalar_one()
-    total_docs = (await db.execute(select(func.count()).select_from(ApiDocument))).scalar_one()
+    counts_result = await db.execute(select(func.count()).select_from(Task))
+    cases_result = await db.execute(select(func.count()).select_from(TestCase))
+    envs_result = await db.execute(select(func.count()).select_from(Environment))
+    docs_result = await db.execute(select(func.count()).select_from(ApiDocument))
+    ai_result = await db.execute(select(func.count()).select_from(TestCase).where(TestCase.source.ilike("%ai%")))
+    status_result = await db.execute(select(Task.status, func.count()).group_by(Task.status))
 
-    succeeded = (
-        await db.execute(select(func.count()).select_from(Task).where(Task.status == TaskStatus.SUCCEEDED))
-    ).scalar_one()
-    failed = (
-        await db.execute(select(func.count()).select_from(Task).where(Task.status == TaskStatus.FAILED))
-    ).scalar_one()
-    bug_found = (
-        await db.execute(select(func.count()).select_from(Task).where(Task.status == TaskStatus.BUG_FOUND))
-    ).scalar_one()
+    total_tasks = counts_result.scalar_one()
+    total_cases = cases_result.scalar_one()
+    total_envs = envs_result.scalar_one()
+    total_docs = docs_result.scalar_one()
+    ai_cases = ai_result.scalar_one()
+
+    status_counts = {s.value: 0 for s in TaskStatus}
+    for status, count in status_result.all():
+        key = status.value if hasattr(status, "value") else str(status)
+        status_counts[key] = count
+
+    succeeded = status_counts.get("succeeded", 0)
+    failed = status_counts.get("failed", 0)
+    bug_found = status_counts.get("bug_found", 0)
     completed = succeeded + failed + bug_found
     pass_rate = round(succeeded / completed * 100, 1) if completed > 0 else 0
 
-    # AI generated cases (source == 'ai')
-    ai_cases = (
-        await db.execute(select(func.count()).select_from(TestCase).where(TestCase.source == "ai"))
-    ).scalar_one()
-
-    # Status breakdown
-    status_counts = {}
-    for status in TaskStatus:
-        count = (
-            await db.execute(select(func.count()).select_from(Task).where(Task.status == status))
-        ).scalar_one()
-        status_counts[status.value] = count
-
-    # Recent 7 days task trend
+    # Recent 7 days task trend — single query with date grouping
     now = datetime.utcnow()
+    seven_days_ago = now - timedelta(days=7)
+    trend_result = await db.execute(
+        select(
+            func.date(Task.created_at).label("day"),
+            func.count().label("count"),
+        )
+        .where(Task.created_at >= seven_days_ago)
+        .group_by(func.date(Task.created_at))
+        .order_by(func.date(Task.created_at))
+    )
+    trend_map = {}
+    for row in trend_result.all():
+        day_str = str(row.day) if row.day else ""
+        if day_str:
+            # Extract MM-DD from date string
+            try:
+                dt = datetime.strptime(day_str, "%Y-%m-%d")
+                trend_map[dt.strftime("%m-%d")] = row.count
+            except ValueError:
+                pass
+
     trend = []
     for i in range(6, -1, -1):
         day = now - timedelta(days=i)
-        day_start = day.replace(hour=0, minute=0, second=0, microsecond=0)
-        day_end = day_start + timedelta(days=1)
-        count = (
-            await db.execute(
-                select(func.count()).select_from(Task).where(
-                    Task.created_at >= day_start, Task.created_at < day_end
-                )
-            )
-        ).scalar_one()
-        trend.append({"date": day_start.strftime("%m-%d"), "count": count})
+        label = day.strftime("%m-%d")
+        trend.append({"date": label, "count": trend_map.get(label, 0)})
 
     # Recent tasks
     recent_result = await db.execute(select(Task).order_by(Task.created_at.desc()).limit(5))

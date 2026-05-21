@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from langchain_core.messages import HumanMessage
@@ -15,6 +16,55 @@ from app.schemas.test_case import TestCaseCreate, TestCaseRead
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+_API_CATEGORY_LABELS = {
+    "api",
+    "http",
+    "rest",
+    "graphql",
+    "smoke",
+    "auth",
+    "contract",
+    "param_validation",
+    "security",
+}
+_UI_CATEGORY_LABELS = {
+    "ui",
+    "browser",
+    "e2e",
+    "page_load",
+    "visual",
+    "navigation",
+    "login",
+}
+_REQUEST_TEMPLATE_KEYS = {
+    "method",
+    "url",
+    "path",
+    "endpoint",
+    "base_url",
+    "headers",
+    "body",
+    "json",
+    "query_params",
+    "params",
+    "expected_status",
+}
+_PLAYWRIGHT_COMMAND_PREFIXES = (
+    "open ",
+    "goto ",
+    "click ",
+    "fill ",
+    "type ",
+    "snapshot",
+    "screenshot",
+    "hover ",
+    "press ",
+    "wait ",
+    "sleep ",
+    "assert snapshot",
+    "expect snapshot",
+)
 
 
 def _ensure_array(value) -> list[str]:
@@ -34,6 +84,193 @@ def _normalize_case(case: dict) -> dict:
     case['steps'] = _ensure_array(case.get('steps', []))
     case['expected'] = _ensure_array(case.get('expected', []))
     return case
+
+
+def _normalized_label(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def _request_template_from_mapping(value: Any) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    nested = value.get("request_template")
+    if isinstance(nested, dict):
+        return dict(nested)
+    request = value.get("request")
+    if isinstance(request, dict):
+        return _request_template_from_mapping(request)
+    if any(key in value for key in _REQUEST_TEMPLATE_KEYS):
+        return dict(value)
+    return {}
+
+
+def _extract_request_template(case: dict) -> dict:
+    direct = _request_template_from_mapping(case)
+    if direct:
+        return direct
+
+    test_data = case.get("test_data")
+    from_test_data = _request_template_from_mapping(test_data)
+    if from_test_data:
+        return from_test_data
+
+    for step in case.get("steps") or []:
+        from_step = _request_template_from_mapping(step)
+        if from_step:
+            return from_step
+    return {}
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _extract_playwright_commands(case: dict) -> list[str]:
+    for container in (case, case.get("test_data")):
+        if not isinstance(container, dict):
+            continue
+        for key in ("playwright_commands", "commands"):
+            commands = _string_list(container.get(key))
+            if commands:
+                return commands
+
+    commands: list[str] = []
+    for step in case.get("steps") or []:
+        if isinstance(step, dict):
+            for key in ("playwright_commands", "command"):
+                commands.extend(_string_list(step.get(key)))
+        elif isinstance(step, str):
+            step_text = step.strip()
+            if step_text.lower().startswith(_PLAYWRIGHT_COMMAND_PREFIXES):
+                commands.append(step_text)
+    return commands
+
+
+def _suite_case_kind(case: dict) -> str:
+    category = _normalized_label(case.get("category"))
+    declared_type = _normalized_label(case.get("type") or case.get("case_type"))
+
+    for label in (declared_type, category):
+        if label == "api":
+            return "api"
+        if label == "ui":
+            return "ui"
+
+    if _extract_request_template(case):
+        return "api"
+    if _extract_playwright_commands(case):
+        return "ui"
+
+    for label in (declared_type, category):
+        if label in _UI_CATEGORY_LABELS:
+            return "ui"
+        if label in _API_CATEGORY_LABELS:
+            return "api"
+
+    return "ui"
+
+
+def _case_to_suite_payload(test_case: TestCase) -> dict:
+    test_data = test_case.test_data or {}
+    payload = {
+        "title": test_case.title,
+        "category": getattr(test_case, "category", "api") or "api",
+        "priority": getattr(test_case, "priority", "P1") or "P1",
+        "steps": test_case.steps or [],
+        "expected": test_case.expected or [],
+        "preconditions": test_case.preconditions or {},
+        "test_data": test_data,
+    }
+    request_template = _extract_request_template(payload)
+    if request_template:
+        payload["request_template"] = request_template
+    playwright_commands = _extract_playwright_commands(payload)
+    if playwright_commands:
+        payload["playwright_commands"] = playwright_commands
+    payload["case_type"] = _suite_case_kind(payload)
+    return payload
+
+
+def _build_suite_case_payloads(cases: list[TestCase]) -> tuple[list[dict], list[dict]]:
+    api_cases: list[dict] = []
+    ui_cases: list[dict] = []
+    for test_case in cases:
+        payload = _case_to_suite_payload(test_case)
+        if payload["case_type"] == "api":
+            api_cases.append(payload)
+        else:
+            ui_cases.append(payload)
+    return api_cases, ui_cases
+
+
+def _first_open_command_url(commands: list[str]) -> str:
+    for command in commands:
+        parts = command.strip().split(maxsplit=1)
+        if len(parts) == 2 and parts[0].lower() in {"open", "goto"}:
+            return parts[1].strip().strip("'\"")
+    return ""
+
+
+def _extract_suite_ui_seed_url(ui_cases: list[dict]) -> str:
+    for case in ui_cases:
+        test_data = case.get("test_data") if isinstance(case.get("test_data"), dict) else {}
+        for key in ("target_url", "url", "base_url"):
+            value = str(test_data.get(key) or "").strip()
+            if value.startswith(("http://", "https://")):
+                return value
+        command_url = _first_open_command_url(case.get("playwright_commands") or [])
+        if command_url.startswith(("http://", "https://")):
+            return command_url
+    return ""
+
+
+def _extract_suite_target_url(api_cases: list[dict], ui_cases: list[dict]) -> str:
+    for case in api_cases:
+        template = _extract_request_template(case)
+        for key in ("base_url", "url"):
+            value = str(template.get(key) or "").strip()
+            if value.startswith(("http://", "https://")):
+                return value
+
+    ui_seed_url = _extract_suite_ui_seed_url(ui_cases)
+    if ui_seed_url:
+        return ui_seed_url
+
+    return "suite"
+
+
+def _suite_worker_kwargs(
+    agent_test_type: str,
+    api_cases: list[dict],
+    ui_cases: list[dict],
+) -> dict:
+    kwargs = {
+        "test_type": agent_test_type,
+        "source_input": "suite",
+        "api_cases": api_cases,
+        "ui_cases": ui_cases,
+    }
+    ui_seed_url = _extract_suite_ui_seed_url(ui_cases)
+    if ui_seed_url:
+        kwargs["ui_seed_url"] = ui_seed_url
+        kwargs["input_type"] = "url"
+    return kwargs
+
+
+@router.post("", response_model=TestCaseRead)
+async def create_test_case(payload: TestCaseCreate, db: DbSession, _: CurrentUser):
+    data = payload.model_dump()
+    data["steps"] = _ensure_array(data.get("steps", []))
+    data["expected"] = _ensure_array(data.get("expected", []))
+    test_case = TestCase(**data)
+    db.add(test_case)
+    await db.commit()
+    await db.refresh(test_case)
+    return test_case
 
 
 @router.post("/generate", response_model=TestCaseRead)
@@ -192,51 +429,73 @@ async def run_suite(suite_id: str, db: DbSession, _: CurrentUser):
         if tc:
             cases.append(tc)
 
-    from app.models.task import Task, TaskStatus as TS
+    if not cases:
+        raise HTTPException(status_code=400, detail="No valid test cases found in suite")
+
+    api_cases, ui_cases = _build_suite_case_payloads(cases)
+    has_api = bool(api_cases)
+    has_ui = bool(ui_cases)
+
+    from app.models.task import Task, TaskStatus as TS, TestType
+
+    # Determine test type from normalized case kinds
+    if has_api and has_ui:
+        db_test_type = TestType.FULL
+    elif has_ui:
+        db_test_type = TestType.UI
+    else:
+        db_test_type = TestType.API
+
+    target_url = _extract_suite_target_url(api_cases, ui_cases)
 
     task = Task(
-        objective=f"Run test suite: {suite.name}",
-        target_url="suite",
-        test_type="suite",
-        status=TS.RUNNING,
+        objective=f"执行测试套件: {suite.name}",
+        target_url=target_url,
+        test_type=db_test_type,
+        status=TS.QUEUED,
     )
     db.add(task)
     await db.commit()
     await db.refresh(task)
 
-    results = []
-    passed = 0
-    failed = 0
-    for tc in cases:
-        result = {
-            "test_case_id": tc.id,
-            "title": tc.title,
-            "status": "passed",
-            "steps_count": len(tc.steps) if tc.steps else 0,
-        }
-        results.append(result)
-        passed += 1
+    agent_test_type = "api" if has_api and not has_ui else "ui" if has_ui and not has_api else "auto"
 
-    task.execution_log = json.dumps(
-        {
-            "suite_id": suite_id,
-            "suite_name": suite.name,
-            "total": len(cases),
-            "passed": passed,
-            "failed": failed,
-            "results": results,
-        },
-        ensure_ascii=False,
-    )
-    task.status = TS.SUCCEEDED if failed == 0 else TS.FAILED
-    await db.commit()
+    suite_kwargs = _suite_worker_kwargs(agent_test_type, api_cases, ui_cases)
+
+    try:
+        from app.worker.tasks import run_agent_task
+        run_agent_task.delay(
+            task.id,
+            task.objective,
+            target_url,
+            **suite_kwargs,
+        )
+    except Exception as e:
+        logger.warning("Celery dispatch failed for suite run: %s, running synchronously", e)
+        from app.worker.tasks import run_graph_with_progress
+        from app.agent.progress import determine_final_status, persist_task_state
+        final_state = await run_graph_with_progress(
+            {
+                "task_id": task.id,
+                "objective": task.objective,
+                "target_url": target_url,
+                "retry_count": 0,
+                "messages": [],
+                "workflow_steps": [],
+                "db_session": db,
+                **suite_kwargs,
+            }
+        )
+        await persist_task_state(
+            db, task, final_state,
+            status=determine_final_status(final_state),
+            refresh=True,
+        )
 
     return {
         "suite_id": suite_id,
         "task_id": task.id,
-        "status": "completed",
+        "status": "queued",
         "total": len(cases),
-        "passed": passed,
-        "failed": failed,
-        "results": results,
+        "message": f"已提交 {len(cases)} 个测试用例执行",
     }

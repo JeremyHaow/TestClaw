@@ -15,13 +15,16 @@ class TaskStatus(str, enum.Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     BUG_FOUND = "bug_found"
+    CANCELLED = "cancelled"
 
 
 class TestType(str, enum.Enum):
-    UI = "ui"
-    API = "api"
-    FUNCTIONAL = "functional"
-    FULL = "full"
+    AUTO = "AUTO"
+    UI = "UI"
+    API = "API"
+    FUNCTIONAL = "FUNCTIONAL"
+    FULL = "FULL"
+    SUITE = "SUITE"
 
 
 class Task(Base):

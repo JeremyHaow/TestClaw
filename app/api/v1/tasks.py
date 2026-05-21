@@ -6,13 +6,15 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from starlette.responses import JSONResponse
 
-from app.agent.graph import agent_graph
+from app.agent.progress import determine_final_status, mark_task_cancelled, persist_task_state
 from app.core.dependencies import CurrentUser, DbSession
+from app.core.redaction import redact_json_text, redact_sensitive_data
+from app.database import AsyncSessionLocal
 from app.models.bug_report import BugReport
 from app.models.task import TaskStatus
 from app.schemas.task import TaskCreate, TaskRead, parse_task_detail
-from app.services.task_service import task_service
-from app.worker.tasks import run_agent_task
+from app.services.task_service import normalize_agent_test_type, task_service
+from app.worker.tasks import run_agent_task, run_graph_with_progress
 from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
@@ -36,18 +38,26 @@ async def create_task(payload: TaskCreate, db: DbSession, _: CurrentUser):
             task.id,
             payload.objective,
             payload.target_url,
-            test_type=payload.test_type,
+            test_type=normalize_agent_test_type(payload.test_type),
             api_doc_id=payload.api_doc_id,
             environment_id=payload.environment_id,
         )
     except Exception as e:
         logger.warning("Celery dispatch failed: %s", e)
-        final_state = await agent_graph.ainvoke(
+        # Build source_input from api_doc if available, otherwise use target_url
+        source_input = payload.target_url or ""
+        if payload.api_doc_id:
+            from app.models.api_document import ApiDocument
+            doc = await db.get(ApiDocument, payload.api_doc_id)
+            if doc and doc.raw_content:
+                source_input = doc.raw_content
+        final_state = await run_graph_with_progress(
             {
                 "task_id": task.id,
                 "objective": payload.objective,
                 "target_url": payload.target_url,
-                "test_type": payload.test_type,
+                "test_type": normalize_agent_test_type(payload.test_type),
+                "source_input": source_input,
                 "api_doc_id": payload.api_doc_id,
                 "environment_id": payload.environment_id,
                 "retry_count": 0,
@@ -56,24 +66,13 @@ async def create_task(payload: TaskCreate, db: DbSession, _: CurrentUser):
                 "db_session": db,
             }
         )
-        task.generated_code = final_state.get("generated_code")
-        task.execution_log = json.dumps(
-            {
-                "execution_result": final_state.get("execution_result"),
-                "test_plan": final_state.get("test_plan"),
-                "test_cases": final_state.get("test_cases"),
-                "workflow_steps": final_state.get("workflow_steps", []),
-                "bug_report": final_state.get("bug_report"),
-            },
-            ensure_ascii=False,
-            default=str,
+        await persist_task_state(
+            db,
+            task,
+            final_state,
+            status=determine_final_status(final_state),
+            refresh=True,
         )
-        status_code = (final_state.get("execution_result") or {}).get("status_code")
-        task.status = TaskStatus.SUCCEEDED if status_code == 0 else TaskStatus.FAILED
-        if final_state.get("last_error") and status_code != 0:
-            task.status = TaskStatus.BUG_FOUND
-        await db.commit()
-        await db.refresh(task)
     return task
 
 
@@ -85,9 +84,12 @@ async def list_tasks(
     status: str | None = Query(default=None),
     test_type: str | None = Query(default=None),
 ):
-    items, total = await task_service.list(
-        db, page=page, page_size=page_size, status=status, test_type=test_type
-    )
+    try:
+        items, total = await task_service.list(
+            db, page=page, page_size=page_size, status=status, test_type=test_type
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return JSONResponse(
         content=[TaskRead.model_validate(i).model_dump(mode="json") for i in items],
         headers={"X-Total-Count": str(total)},
@@ -120,7 +122,7 @@ async def rerun_task(task_id: str, db: DbSession, _: CurrentUser):
         db,
         objective=task.objective,
         target_url=task.target_url,
-        test_type=task.test_type if isinstance(task.test_type, str) else task.test_type.value,
+        test_type=task.test_type,
         api_doc_id=task.api_doc_id,
         environment_id=task.environment_id,
         status=TaskStatus.QUEUED,
@@ -130,7 +132,7 @@ async def rerun_task(task_id: str, db: DbSession, _: CurrentUser):
             new_task.id,
             new_task.objective,
             new_task.target_url,
-            test_type=new_task.test_type if isinstance(new_task.test_type, str) else new_task.test_type.value,
+            test_type=normalize_agent_test_type(new_task.test_type),
             api_doc_id=new_task.api_doc_id,
             environment_id=new_task.environment_id,
         )
@@ -152,9 +154,7 @@ async def cancel_task(task_id: str, db: DbSession, _: CurrentUser):
         celery_app.control.revoke(task_id, terminate=True)
     except Exception as e:
         logger.warning("Celery revoke failed for task %s: %s", task_id, e)
-    await task_service.update_status(db, task, TaskStatus.FAILED)
-    task.execution_log = '{"cancelled": true}'
-    await db.commit()
+    await mark_task_cancelled(db, task, "Task cancelled by user")
     return {"message": "Task cancelled"}
 
 
@@ -192,20 +192,27 @@ async def stream_task(task_id: str, db: DbSession, token: str | None = Query(def
         last_status = None
         last_log = ""
         while True:
-            task = await task_service.get(db, task_id)
-            if task is None:
-                yield f"data: {json.dumps({'error': 'Task not found'})}\n\n"
-                break
-
-            current_status = task.status if isinstance(task.status, str) else task.status.value
-            current_log = task.execution_log or ""
+            async with AsyncSessionLocal() as stream_db:
+                task = await task_service.get(stream_db, task_id)
+                if task is None:
+                    yield f"data: {json.dumps({'error': 'Task not found'})}\n\n"
+                    break
+                current_status = task.status if isinstance(task.status, str) else task.status.value
+                current_log = task.execution_log or ""
 
             if current_status != last_status:
                 yield f"data: {json.dumps({'task_id': task_id, 'type': 'status', 'status': current_status})}\n\n"
                 last_status = current_status
 
             if current_log != last_log:
-                yield f"data: {json.dumps({'task_id': task_id, 'type': 'log', 'log': current_log})}\n\n"
+                try:
+                    log_data = json.loads(current_log)
+                    log_data = redact_sensitive_data(log_data)
+                    yield f"data: {json.dumps({'task_id': task_id, 'type': 'snapshot', 'snapshot': log_data})}\n\n"
+                except Exception:
+                    pass
+                safe_log = redact_json_text(current_log) or current_log
+                yield f"data: {json.dumps({'task_id': task_id, 'type': 'log', 'log': safe_log})}\n\n"
                 last_log = current_log
 
             if current_status in ("succeeded", "failed", "bug_found", "cancelled"):

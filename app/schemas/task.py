@@ -1,18 +1,24 @@
 import json
 from datetime import datetime
-from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
+from app.core.redaction import redact_json_text, redact_sensitive_data
 from app.schemas.common import ORMModel
+from app.services.task_service import normalize_test_type
 
 
 class TaskCreate(BaseModel):
     objective: str
     target_url: str
-    test_type: Literal["ui", "api", "functional", "full"] = "full"
+    test_type: str = "full"
     api_doc_id: str | None = None
     environment_id: str | None = None
+
+    @field_validator("test_type")
+    @classmethod
+    def validate_test_type(cls, value: str) -> str:
+        return normalize_test_type(value).value.lower()
 
 
 class WorkflowStep(BaseModel):
@@ -34,6 +40,11 @@ class TaskRead(ORMModel):
     environment_id: str | None = None
     created_at: datetime
 
+    @field_validator("execution_log")
+    @classmethod
+    def redact_execution_log(cls, value: str | None) -> str | None:
+        return redact_json_text(value) if value else value
+
 
 class TaskDetailRead(TaskRead):
     workflow_steps: list[WorkflowStep] = []
@@ -50,6 +61,8 @@ def parse_task_detail(task_orm) -> dict:
         parsed = json.loads(log_str) if log_str else {}
     except Exception:
         parsed = {}
+    parsed = redact_sensitive_data(parsed)
+    safe_execution_log = redact_json_text(log_str) if log_str else task_orm.execution_log
 
     base = {
         "id": task_orm.id,
@@ -59,14 +72,33 @@ def parse_task_detail(task_orm) -> dict:
         "test_type": task_orm.test_type.value if hasattr(task_orm.test_type, "value") else str(task_orm.test_type),
         "retry_count": task_orm.retry_count,
         "generated_code": task_orm.generated_code,
-        "execution_log": task_orm.execution_log,
+        "execution_log": safe_execution_log,
         "api_doc_id": task_orm.api_doc_id,
         "environment_id": task_orm.environment_id,
         "created_at": task_orm.created_at.isoformat() if task_orm.created_at else None,
         "workflow_steps": parsed.get("workflow_steps", []),
+        "current_step": parsed.get("current_step"),
+        "progress_events": parsed.get("progress_events", []),
         "test_plan": parsed.get("test_plan"),
         "test_cases": parsed.get("test_cases"),
         "execution_result": parsed.get("execution_result"),
         "bug_report": parsed.get("bug_report"),
+        "api_plan": parsed.get("api_plan"),
+        "ui_plan": parsed.get("ui_plan"),
+        "api_cases": parsed.get("api_cases"),
+        "ui_cases": parsed.get("ui_cases"),
+        "api_execution_result": parsed.get("api_execution_result"),
+        "ui_execution_result": parsed.get("ui_execution_result"),
+        "final_report": parsed.get("final_report"),
+        "artifacts": parsed.get("artifacts"),
+        "tool_registry": parsed.get("tool_registry"),
+        "skill_plan": parsed.get("skill_plan"),
+        "tool_calls": parsed.get("tool_calls"),
+        "tool_summary": parsed.get("tool_summary"),
+        "input_type": parsed.get("input_type"),
+        "source_input": parsed.get("source_input"),
+        "cancelled": parsed.get("cancelled", False),
+        "cancelled_at": parsed.get("cancelled_at"),
+        "last_error": parsed.get("last_error"),
     }
     return base
