@@ -1,0 +1,16 @@
+.env
+.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.playwright-cli/
+sandbox/
+frontend/node_modules/
+frontend/dist/
+testclaw.db
+.claude/worktrees/
+.trellis/tasks/
+.codex/skills/trellis-*/
