@@ -18,6 +18,21 @@ class ProviderCreate(BaseModel):
     agent_type: str | None = None
 
 
+class ProviderUpdate(BaseModel):
+    name: str
+    type: str
+    api_key: str | None = None
+    model_name: str
+    base_url: str | None = None
+    is_default_coder: bool = False
+    is_default_vision: bool = False
+    is_default_planner: bool = False
+    max_tokens: int = 4096
+    temperature: float = 0.2
+    system_prompt: str | None = None
+    agent_type: str | None = None
+
+
 class ProviderRead(ORMModel):
     id: str
     name: str

@@ -8,7 +8,7 @@ from sqlalchemy import select, update
 from app.core.dependencies import CurrentUser, DbSession
 from app.core.security import decrypt_value, encrypt_value, mask_secret
 from app.models.llm_provider import LLMProvider, ProviderType
-from app.schemas.provider import ProviderCreate, ProviderRead
+from app.schemas.provider import ProviderCreate, ProviderRead, ProviderUpdate
 
 router = APIRouter()
 
@@ -59,13 +59,14 @@ async def list_providers(db: DbSession, _: CurrentUser):
 
 
 @router.put("/{provider_id}", response_model=ProviderRead)
-async def update_provider(provider_id: str, payload: ProviderCreate, db: DbSession, _: CurrentUser):
+async def update_provider(provider_id: str, payload: ProviderUpdate, db: DbSession, _: CurrentUser):
     provider = await db.get(LLMProvider, provider_id)
     if provider is None:
         raise HTTPException(status_code=404, detail="Provider not found")
     provider.name = payload.name
     provider.type = ProviderType(payload.type)
-    provider.api_key_encrypted = encrypt_value(payload.api_key)
+    if payload.api_key:
+        provider.api_key_encrypted = encrypt_value(payload.api_key)
     provider.model_name = payload.model_name
     provider.base_url = payload.base_url
     provider.is_default_coder = payload.is_default_coder
