@@ -38,6 +38,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "structlog>=24.0.0",
     "PyYAML>=6.0.2",
+    "alibabacloud-oss-v2>=1.2.5",
 ]
 
 [tool.pytest.ini_options]
@@ -48,3 +49,8 @@ pythonpath = ["."]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.13",
+]

@@ -28,6 +28,17 @@ class Settings(BaseSettings):
     DEFAULT_MODEL_PLANNER: str = "gpt-4o"
     SANDBOX_TIMEOUT: int = 120
     MAX_RETRY_COUNT: int = 3
+    API_REQUEST_TIMEOUT_SECONDS: float = 30.0
+    API_REQUEST_RETRY_COUNT: int = 0
+    PLAYWRIGHT_CLI_TIMEOUT_SECONDS: int = 30
+    PLAYWRIGHT_SMART_WAIT_MS: int = 1500
+    OSS_ENABLED: bool = False
+    OSS_BUCKET: str = ""
+    OSS_REGION: str = ""
+    OSS_ENDPOINT: str = ""
+    OSS_PUBLIC_BASE_URL: str = ""
+    OSS_PREFIX: str = "testclaw/screenshots"
+    OSS_USE_CNAME: bool = False
     PROJECT_ROOT: Path = Field(default_factory=lambda: Path(__file__).resolve().parents[1])
 
     @field_validator("FERNET_KEY", mode="after")
@@ -37,7 +48,7 @@ class Settings(BaseSettings):
 
     @property
     def sandbox_dir(self) -> Path:
-        return self.PROJECT_ROOT.parent / "sandbox"
+        return self.PROJECT_ROOT / "sandbox"
 
 
 @lru_cache
