@@ -1,12 +1,31 @@
 import json
 import logging
+import re
 import time
+from copy import deepcopy
+from urllib.parse import urljoin
 
 import httpx
+from openapi_schema_validator import validate
 
+from app.agent.progress import persist_progress
 from app.agent.state import AgentState
+from app.agent.tool_registry import install_tool_context, record_tool_call, summarize_tool_calls
+from app.config import settings
+from app.core.redaction import redact_sensitive_data, redact_sensitive_headers
+from app.services.api_auth import coerce_auth_config, has_auth_like_header, resolve_auto_auth_headers
+from app.tools.mock_data import generate_mock_json_body, summarize_mock_body
 
 logger = logging.getLogger(__name__)
+
+SAFE_API_METHODS = {"GET", "HEAD", "OPTIONS"}
+WRITE_API_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+DEFAULT_API_EXECUTION_POLICY = "safe_read_only"
+API_EXECUTION_POLICIES = {
+    "safe_read_only",
+    "safe_with_auth",
+    "write_allowed",
+}
 
 
 def _parse_status(val) -> int:
@@ -17,41 +36,722 @@ def _parse_status(val) -> int:
         return 200
 
 
-def _build_test_requests(api_schema: list[dict], base_url: str, headers: dict | None = None) -> list[dict]:
-    """Generate test requests from parsed API schema: smoke, param validation, missing required, boundary, unauthorized."""
+def _normalize_api_execution_policy(value: str | None) -> str:
+    text = (value or DEFAULT_API_EXECUTION_POLICY).strip().lower()
+    return text if text in API_EXECUTION_POLICIES else DEFAULT_API_EXECUTION_POLICY
+
+
+def _policy_allows_write(policy: str) -> bool:
+    return policy == "write_allowed"
+
+
+def _has_usable_auth_headers(headers: dict | None) -> bool:
+    if not isinstance(headers, dict):
+        return False
+    return any(str(value).strip() for value in headers.values() if value is not None)
+
+
+def _is_endpoint_auth_required(endpoint: dict) -> bool:
+    return bool(endpoint.get("auth_required"))
+
+
+def _make_skipped_result(req: dict, reason: str) -> dict:
+    return {
+        "label": req.get("label", f"{req.get('method', 'GET')} {req.get('url', '')}"),
+        "method": req.get("method", "GET"),
+        "url": req.get("url", ""),
+        "status_code": None,
+        "elapsed_ms": 0,
+        "body": None,
+        "request_headers": redact_sensitive_headers(req.get("headers", {})),
+        "request_body": redact_sensitive_data(req.get("body")),
+        "request_body_source": req.get("request_body_source"),
+        "passed": None,
+        "skipped": True,
+        "skip_reason": reason,
+        "category": req.get("category", "SKIPPED"),
+        "assertion_results": [],
+    }
+
+
+def _resolve_path_params(url: str, endpoint: dict) -> str:
+    """Replace {param} placeholders in URL with example values from schema."""
+    import re
+    path_params = endpoint.get("path_params", [])
+    if not path_params:
+        # Fallback: replace any {param} with a generic value
+        return re.sub(r"\{(\w+)\}", "1", url)
+    for param in path_params:
+        name = param.get("name", "")
+        if not name:
+            continue
+        # Use example value if available, otherwise generate from type
+        example = param.get("example")
+        if example is None:
+            schema_type = param.get("schema", {}).get("type") or param.get("type", "string")
+            if schema_type in ("integer", "int"):
+                example = 1
+            elif schema_type in ("number", "float", "double"):
+                example = 1.0
+            elif schema_type == "boolean":
+                example = True
+            else:
+                example = "1"
+        url = url.replace(f"{{{name}}}", str(example))
+    # Catch any remaining unresolved params
+    url = re.sub(r"\{(\w+)\}", "1", url)
+    return url
+
+
+def _extract_query_params(endpoint: dict) -> dict:
+    """Extract required query params with example values from endpoint schema."""
+    params = {}
+    for qp in endpoint.get("query_params") or []:
+        if not isinstance(qp, dict):
+            continue
+        name = qp.get("name", "")
+        if not name:
+            continue
+        # Use example value, then enum first value, then type-based default
+        val = qp.get("example")
+        if val is None:
+            enum_vals = qp.get("enum") or qp.get("schema", {}).get("enum")
+            if enum_vals:
+                val = enum_vals[0]
+            else:
+                qtype = qp.get("type") or qp.get("schema", {}).get("type", "string")
+                if qtype == "integer":
+                    val = 1
+                elif qtype == "number":
+                    val = 1.0
+                elif qtype == "boolean":
+                    val = True
+                elif qtype == "array":
+                    val = ["test"]
+                else:
+                    val = "test"
+        params[name] = val
+    return params
+
+
+def _is_json_content_type(content_type: str | None) -> bool:
+    text = (content_type or "application/json").lower()
+    return "json" in text or text in {"", "*/*"}
+
+
+def _body_required_fields(endpoint: dict) -> list[str]:
+    schema = endpoint.get("request_body_schema")
+    if isinstance(schema, dict) and isinstance(schema.get("required"), list):
+        return [str(field) for field in schema["required"] if isinstance(field, str)]
+    required = endpoint.get("required_fields") or []
+    if not isinstance(required, list):
+        return []
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if isinstance(properties, dict):
+        return [str(field) for field in required if str(field) in properties]
+    return [str(field) for field in required]
+
+
+def _request_body_from_schema(
+    endpoint: dict,
+    *,
+    method: str,
+    path: str,
+    content_type: str,
+) -> tuple[object, dict | None]:
+    schema = endpoint.get("request_body_schema")
+    example_request = endpoint.get("example_request")
+    if not isinstance(schema, dict) or not _is_json_content_type(content_type):
+        return example_request, None
+
+    required_fields = _body_required_fields(endpoint)
+    generated = generate_mock_json_body(
+        schema,
+        required_fields=required_fields,
+        field_context=f"{method} {path}",
+    )
+    if generated == {} and example_request:
+        return example_request, None
+    if generated is None:
+        return example_request, None
+
+    return generated, {
+        "source": "faker_json_schema",
+        "method": method,
+        "path": path,
+        "content_type": content_type,
+        "required_fields": required_fields,
+        "summary": summarize_mock_body(generated),
+    }
+
+
+def _record_mock_body_generation(state: AgentState, req: dict) -> None:
+    generation = req.get("mock_body_generation")
+    if not isinstance(generation, dict):
+        return
+    record_tool_call(
+        state,
+        tool_name="api.generate_mock_json_body",
+        layer="api",
+        status="success",
+        input_summary={
+            "method": generation.get("method"),
+            "path": generation.get("path"),
+            "content_type": generation.get("content_type"),
+            "required_fields": generation.get("required_fields", []),
+        },
+        output_summary=generation.get("summary", {}),
+    )
+
+
+def _build_request_url(base_url: str, path_or_url: str) -> str:
+    path_or_url = (path_or_url or "").strip()
+    if path_or_url.startswith(("http://", "https://")):
+        return path_or_url
+    base_url = (base_url or "").strip().rstrip("/")
+    if not base_url:
+        return ""
+    if not path_or_url:
+        return base_url
+    if path_or_url.startswith("/"):
+        return f"{base_url}{path_or_url}"
+    return urljoin(f"{base_url}/", path_or_url)
+
+
+def _request_template_from_case(case: dict) -> dict:
+    direct = case.get("request_template")
+    if isinstance(direct, dict):
+        return direct
+
+    test_data = case.get("test_data")
+    if not isinstance(test_data, dict):
+        return {}
+
+    nested = test_data.get("request_template")
+    if isinstance(nested, dict):
+        return nested
+
+    if any(key in test_data for key in ("method", "url", "path", "base_url")):
+        return test_data
+
+    return {}
+
+
+def _payload_status_code(payload) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("code", "status", "status_code"):
+        value = payload.get(key)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _is_auth_failure(resp_status: int, payload) -> bool:
+    payload_status = _payload_status_code(payload)
+    return resp_status in {401, 403} or payload_status in {401, 403}
+
+
+def _status_matches(expected_status, http_status: int, payload) -> bool:
+    payload_status = _payload_status_code(payload)
+    actual_candidates = [http_status]
+    if payload_status is not None:
+        actual_candidates.append(payload_status)
+
+    if isinstance(expected_status, list):
+        expected_values = {_parse_status(value) for value in expected_status}
+        return any(value in expected_values for value in actual_candidates)
+
+    expected = _parse_status(expected_status)
+    if expected == 200:
+        if 200 <= http_status < 300:
+            return payload_status is None or 200 <= payload_status < 300
+        return False
+    return any(value == expected for value in actual_candidates)
+
+
+_JSON_PATH_TOKEN_RE = re.compile(r"([A-Za-z0-9_\-]+)|\[(\d+)\]")
+_PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z0-9_.\-]+)\s*\}\}")
+
+
+def _json_path_get(payload, path_expr: str):
+    path_expr = (path_expr or "").strip()
+    if not path_expr:
+        return payload
+    if path_expr.startswith("$"):
+        path_expr = path_expr[1:]
+    path_expr = path_expr.lstrip(".")
+    if not path_expr:
+        return payload
+
+    current = payload
+    for part in path_expr.split("."):
+        if not part:
+            continue
+        matches = list(_JSON_PATH_TOKEN_RE.finditer(part))
+        if not matches:
+            return None
+        for match in matches:
+            key, index = match.groups()
+            if key is not None:
+                if not isinstance(current, dict):
+                    return None
+                current = current.get(key)
+            else:
+                if not isinstance(current, list):
+                    return None
+                idx = int(index)
+                if idx >= len(current):
+                    return None
+                current = current[idx]
+            if current is None:
+                return None
+    return current
+
+
+def _substitute_context(value, context: dict[str, object]):
+    if isinstance(value, str):
+        return _PLACEHOLDER_RE.sub(lambda match: str(context.get(match.group(1), "")), value)
+    if isinstance(value, list):
+        return [_substitute_context(item, context) for item in value]
+    if isinstance(value, dict):
+        return {key: _substitute_context(item, context) for key, item in value.items()}
+    return value
+
+
+def _extract_specs(value) -> list[dict]:
+    if not value:
+        return []
+    if isinstance(value, dict):
+        return [
+            {"name": name, "path": path}
+            for name, path in value.items()
+            if isinstance(name, str) and isinstance(path, str)
+        ]
+    if isinstance(value, list):
+        specs = []
+        for item in value:
+            if isinstance(item, dict) and item.get("name") and item.get("path"):
+                specs.append({"name": str(item["name"]), "path": str(item["path"])})
+        return specs
+    return []
+
+
+def _missing_dependencies(req: dict, context: dict[str, object]) -> list[str]:
+    depends_on = req.get("depends_on") or []
+    if isinstance(depends_on, str):
+        depends_on = [depends_on]
+    return [str(name) for name in depends_on if str(name) not in context]
+
+
+def _evaluate_status_assertion(assertion: dict, resp_status: int, payload) -> dict:
+    expected = assertion.get("expected", 200)
+    passed = _status_matches(expected, resp_status, payload)
+    payload_status = _payload_status_code(payload)
+    actual = [resp_status] if payload_status is None else [resp_status, payload_status]
+    return {
+        "type": "status_code",
+        "expected": expected,
+        "actual": actual,
+        "passed": passed,
+        "blocking": True,
+    }
+
+
+def _evaluate_json_path_assertion(assertion: dict, payload) -> dict:
+    path_expr = assertion.get("path") or assertion.get("json_path") or "$"
+    actual = _json_path_get(payload, path_expr) if isinstance(payload, (dict, list)) else None
+    operator = assertion.get("operator") or assertion.get("op")
+    expected = assertion.get("expected")
+    if expected == "not_null" and not operator:
+        operator = "not_null"
+    operator = operator or "equals"
+
+    if operator in {"exists", "present"}:
+        passed = actual is not None
+    elif operator in {"not_null", "non_null"}:
+        passed = actual is not None
+    elif operator == "contains":
+        if isinstance(actual, (list, tuple, set)):
+            passed = expected in actual
+        else:
+            passed = str(expected) in str(actual)
+    elif operator in {"not_equals", "!="}:
+        passed = actual != expected
+    else:
+        passed = actual == expected
+
+    return {
+        "type": "json_path",
+        "path": path_expr,
+        "operator": operator,
+        "expected": expected,
+        "actual": actual,
+        "passed": passed,
+        "blocking": assertion.get("blocking", True),
+    }
+
+
+def _evaluate_schema_assertion(assertion: dict, payload, fallback_schema: dict | None = None) -> dict:
+    schema = assertion.get("schema") or fallback_schema
+    blocking = assertion.get("blocking", True)
+    if not schema:
+        return {
+            "type": "schema",
+            "passed": None,
+            "blocking": False,
+            "skipped": True,
+            "reason": "No schema available",
+        }
+    if not isinstance(payload, (dict, list)):
+        return {
+            "type": "schema",
+            "passed": False,
+            "blocking": blocking,
+            "error": "Response body is not JSON",
+        }
+    try:
+        validate(payload, schema)
+        return {"type": "schema", "passed": True, "blocking": blocking}
+    except Exception as exc:
+        return {
+            "type": "schema",
+            "passed": False,
+            "blocking": blocking,
+            "error": str(exc)[:500],
+        }
+
+
+def _evaluate_body_contains_assertion(assertion: dict, payload) -> dict:
+    expected = assertion.get("expected") or assertion.get("text")
+    body_text = json.dumps(payload, ensure_ascii=False, default=str) if isinstance(payload, (dict, list)) else str(payload)
+    return {
+        "type": "body_contains",
+        "expected": expected,
+        "passed": str(expected) in body_text,
+        "blocking": assertion.get("blocking", True),
+    }
+
+
+def _evaluate_assertions(req: dict, resp_status: int, payload) -> list[dict]:
+    assertions = list(req.get("assertions") or [])
+    if not assertions:
+        assertions.append({"type": "status_code", "expected": req.get("expected_status", 200)})
+    elif not any(assertion.get("type") == "status_code" for assertion in assertions):
+        assertions.insert(0, {"type": "status_code", "expected": req.get("expected_status", 200)})
+
+    response_schema = req.get("response_schema")
+    if response_schema and req.get("auto_schema_assertion"):
+        assertions.append(
+            {
+                "type": "schema",
+                "schema": response_schema,
+                "blocking": req.get("schema_assertion_mode") == "blocking",
+                "source": "openapi_response_schema",
+            }
+        )
+
+    results = []
+    for assertion in assertions:
+        atype = str(assertion.get("type") or "").lower()
+        if atype == "status_code":
+            results.append(_evaluate_status_assertion(assertion, resp_status, payload))
+        elif atype in {"json_path", "jsonpath"}:
+            results.append(_evaluate_json_path_assertion(assertion, payload))
+        elif atype in {"schema", "schema_valid", "json_schema"}:
+            results.append(_evaluate_schema_assertion(assertion, payload, response_schema))
+        elif atype in {"body_contains", "contains"}:
+            results.append(_evaluate_body_contains_assertion(assertion, payload))
+    return results
+
+
+def _assertions_pass(assertion_results: list[dict], fallback_passed: bool) -> bool:
+    blocking = [
+        result for result in assertion_results
+        if result.get("blocking", True) and result.get("passed") is not None and not result.get("skipped")
+    ]
+    if not blocking:
+        return fallback_passed
+    return all(result.get("passed") is True for result in blocking)
+
+
+def _classify_api_failure(req: dict, resp_status: int, payload, assertion_results: list[dict]) -> dict | None:
+    payload_status = _payload_status_code(payload)
+    if _is_auth_failure(resp_status, payload):
+        return {
+            "failure_type": "auth_failure",
+            "failure_reason": "请求返回未授权状态，可能是 Token 失效或鉴权头不完整。",
+        }
+
+    category = str(req.get("category") or "").upper()
+    if category == "PARAM_VALIDATION":
+        if resp_status >= 500 or (payload_status is not None and payload_status >= 500):
+            return {
+                "failure_type": "backend_validation_contract",
+                "failure_reason": "无效参数场景返回了服务端错误状态，应由后端校验为明确的 4xx 参数错误。",
+            }
+        if 200 <= resp_status < 300 and payload_status is not None and payload_status >= 400:
+            return {
+                "failure_type": "backend_validation_contract",
+                "failure_reason": "无效参数场景使用 HTTP 200 承载错误响应，和预期的 4xx 参数校验契约不一致。",
+            }
+        if 200 <= resp_status < 300:
+            return {
+                "failure_type": "backend_validation_contract",
+                "failure_reason": "无效参数场景返回成功 HTTP 状态，后端未按契约拒绝非法输入。",
+            }
+        return {
+            "failure_type": "validation_contract",
+            "failure_reason": "参数校验响应与预期状态不一致。",
+        }
+
+    if resp_status >= 500 or (payload_status is not None and payload_status >= 500):
+        return {
+            "failure_type": "backend_error",
+            "failure_reason": "请求触发了服务端错误状态。",
+        }
+
+    if any(
+        result.get("type") == "schema"
+        and result.get("blocking", True)
+        and result.get("passed") is False
+        for result in assertion_results
+    ):
+        return {
+            "failure_type": "schema_contract",
+            "failure_reason": "响应 JSON 结构不符合 OpenAPI Schema。",
+        }
+
+    return {
+        "failure_type": "api_assertion",
+        "failure_reason": "响应未满足本次 API 断言。",
+    }
+
+
+def _record_http_request_call(
+    state: AgentState,
+    req: dict,
+    resp_status: int,
+    attempts: int,
+    elapsed: float,
+    *,
+    auth_refresh_retry: bool = False,
+) -> None:
+    record_tool_call(
+        state,
+        tool_name="api.http_request",
+        layer="api",
+        status="success" if resp_status < 500 else "failed",
+        input_summary={
+            "method": req.get("method"),
+            "url": req.get("url"),
+            "params": bool(req.get("query_params")),
+            "body": req.get("body") is not None,
+            "auth_refresh_retry": auth_refresh_retry,
+        },
+        output_summary={
+            "status_code": resp_status,
+            "attempts": attempts,
+        },
+        elapsed_ms=elapsed,
+    )
+
+
+async def _request_with_retry(client: httpx.AsyncClient, req: dict, retry_count: int):
+    attempts = max(1, retry_count + 1)
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = await client.request(
+                req["method"],
+                req["url"],
+                headers=req.get("headers") or None,
+                json=req.get("body"),
+                params=req.get("query_params"),
+            )
+            if response.status_code < 500 or attempt == attempts:
+                return response, attempt, None
+        except Exception as exc:
+            last_exc = exc
+            if attempt == attempts:
+                return None, attempt, exc
+    return None, attempts, last_exc
+
+
+def _can_refresh_auth(state: AgentState, req: dict) -> bool:
+    config = coerce_auth_config(state.get("auth_config"))
+    if not config.get("enabled"):
+        return False
+    if str(req.get("category") or "").upper() == "AUTH":
+        return False
+    return has_auth_like_header(req.get("headers")) or has_auth_like_header(state.get("auth_headers"))
+
+
+async def _refresh_auth_for_request(
+    state: AgentState,
+    req: dict,
+    endpoints: list[dict] | None,
+) -> dict[str, str] | None:
+    config = coerce_auth_config(state.get("auth_config"))
+    resolution = await resolve_auto_auth_headers(
+        config,
+        source=str(state.get("source_input") or ""),
+        input_type=str(state.get("input_type") or "url"),
+        target_url=str(state.get("base_url_override") or state.get("target_url") or ""),
+        endpoints=endpoints,
+    )
+    record_tool_call(
+        state,
+        tool_name="api.auth_refresh",
+        layer="api",
+        status="success" if resolution.ok else "failed",
+        input_summary={
+            "method": req.get("method"),
+            "url": req.get("url"),
+            "reason": "401/403",
+        },
+        output_summary={
+            "refreshed": resolution.ok,
+            "header_name": resolution.header_name,
+            "detail": resolution.detail,
+        },
+    )
+    if not resolution.ok:
+        return None
+
+    merged_headers = dict(state.get("auth_headers") or {})
+    merged_headers.update(resolution.headers)
+    state["auth_headers"] = merged_headers
+    return resolution.headers
+
+
+def _build_test_requests(
+    api_schema: list[dict],
+    base_url: str,
+    headers: dict | None = None,
+    execution_policy: str = DEFAULT_API_EXECUTION_POLICY,
+) -> list[dict]:
+    """Generate executable requests from parsed API schema."""
     requests = []
     default_headers = headers or {}
+    policy = _normalize_api_execution_policy(execution_policy)
+    auth_available = _has_usable_auth_headers(default_headers)
+    write_allowed = _policy_allows_write(policy)
 
     for endpoint in api_schema:
         path = endpoint.get("path", "")
         method = endpoint.get("method", "GET").upper()
-        full_url = f"{base_url.rstrip('/')}{path}"
-        req_body = endpoint.get("example_request")
-        required_fields = endpoint.get("required_fields", [])
-        auth_required = endpoint.get("auth_required", False)
+        path = _resolve_path_params(path, endpoint)
+        full_url = _build_request_url(base_url, path)
+        if not full_url:
+            continue
+        is_safe_method = method in SAFE_API_METHODS
+        auth_required = _is_endpoint_auth_required(endpoint)
 
-        # 1. Smoke test — use example request as-is
-        requests.append({
+        if method in WRITE_API_METHODS and not write_allowed:
+            requests.append({
+                "label": f"SKIPPED_WRITE {method} {path}",
+                "method": method,
+                "url": full_url,
+                "headers": {},
+                "body": None,
+                "expected_status": None,
+                "category": "SKIPPED",
+                "skip_reason": "当前策略为安全只读，未执行会创建、修改或删除数据的请求",
+            })
+            continue
+
+        required_fields = _body_required_fields(endpoint)
+        query_params = _extract_query_params(endpoint)
+        content_type = endpoint.get("request_body_content_type") or "application/json"
+
+        # Skip file upload endpoints entirely (can't test without real files)
+        is_upload = "multipart" in content_type.lower() or "form-data" in content_type.lower()
+        if is_upload:
+            requests.append({
+                "label": f"SKIPPED_UPLOAD {method} {path}",
+                "method": method,
+                "url": full_url,
+                "headers": {},
+                "body": None,
+                "expected_status": None,
+                "category": "SKIPPED",
+                "skip_reason": "文件上传接口需要真实文件资产，本次未自动执行",
+            })
+            continue
+
+        req_body, body_generation = _request_body_from_schema(
+            endpoint,
+            method=method,
+            path=path,
+            content_type=content_type,
+        )
+
+        if auth_required and not auth_available:
+            if is_safe_method:
+                requests.append({
+                    "label": f"UNAUTHORIZED {method} {path}",
+                    "method": method,
+                    "url": full_url,
+                    "headers": {},
+                    "body": None,
+                    "query_params": query_params,
+                    "expected_status": [401, 403],
+                    "category": "AUTH",
+                })
+            requests.append({
+                "label": f"SKIPPED_AUTH {method} {path}",
+                "method": method,
+                "url": full_url,
+                "headers": {},
+                "body": None,
+                "expected_status": None,
+                "category": "SKIPPED",
+                "skip_reason": "接口声明需要鉴权；未提供 Token/Header，跳过正向业务断言",
+            })
+            continue
+
+        # 1. Smoke test — use example request + required query params
+        smoke_headers = {**default_headers}
+        if req_body is not None and not is_upload:
+            smoke_headers["Content-Type"] = content_type
+        smoke_request = {
             "label": f"SMOKE {method} {path}",
             "method": method,
             "url": full_url,
-            "headers": {**default_headers, **({"Content-Type": endpoint.get("request_body_content_type", "application/json")} if req_body else {})},
-            "body": req_body,
+            "headers": smoke_headers,
+            "body": req_body if not is_upload else None,
+            "query_params": query_params,
             "expected_status": _parse_status(endpoint.get("response_status", "200")),
+            "response_schema": endpoint.get("response_schema"),
+            "auto_schema_assertion": bool(endpoint.get("response_schema")),
+            "schema_assertion_mode": "advisory",
             "category": "SMOKE",
-        })
+            "request_body_source": "faker_json_schema" if body_generation else "example_request",
+        }
+        if body_generation:
+            smoke_request["mock_body_generation"] = body_generation
+        requests.append(smoke_request)
 
         # 2. Missing required fields (POST/PUT/PATCH only)
-        if method in ("POST", "PUT", "PATCH") and required_fields and req_body and isinstance(req_body, dict):
-            for field in required_fields[:3]:  # limit to 3 to avoid explosion
+        if (
+            method in ("POST", "PUT", "PATCH")
+            and required_fields
+            and req_body
+            and isinstance(req_body, dict)
+        ):
+            for field in required_fields[:3]:
                 broken_body = {k: v for k, v in req_body.items() if k != field}
                 requests.append({
                     "label": f"MISSING_FIELD {method} {path} (no {field})",
                     "method": method,
                     "url": full_url,
-                    "headers": {**default_headers, "Content-Type": endpoint.get("request_body_content_type", "application/json")},
+                    "headers": {**default_headers, "Content-Type": content_type},
                     "body": broken_body,
-                    "expected_status": 400,
+                    "expected_status": [400, 422],
+                    "response_schema": endpoint.get("response_schema"),
                     "category": "PARAM_VALIDATION",
                 })
 
@@ -63,7 +763,8 @@ def _build_test_requests(api_schema: list[dict], base_url: str, headers: dict | 
                 "url": full_url,
                 "headers": {**default_headers, "Content-Type": "application/json"},
                 "body": {},
-                "expected_status": 400,
+                "expected_status": [400, 422],
+                "response_schema": endpoint.get("response_schema"),
                 "category": "PARAM_VALIDATION",
             })
 
@@ -73,14 +774,22 @@ def _build_test_requests(api_schema: list[dict], base_url: str, headers: dict | 
                 "label": f"UNAUTHORIZED {method} {path}",
                 "method": method,
                 "url": full_url,
-                "headers": {"Content-Type": "application/json"} if req_body else {},
+                "headers": {"Content-Type": "application/json"} if req_body is not None else {},
                 "body": req_body,
-                "expected_status": 401,
+                "query_params": query_params,
+                "expected_status": [401, 403],
+                "response_schema": endpoint.get("response_schema"),
                 "category": "AUTH",
+                "request_body_source": "faker_json_schema" if body_generation else "example_request",
             })
 
-        # 5. Invalid type for string fields
-        if method in ("POST", "PUT", "PATCH") and req_body and isinstance(req_body, dict):
+        # 5. Invalid type for string fields (skip upload endpoints)
+        if (
+            method in ("POST", "PUT", "PATCH")
+            and req_body
+            and isinstance(req_body, dict)
+            and not is_upload
+        ):
             bad_body = {}
             for k, v in req_body.items():
                 if isinstance(v, str):
@@ -94,121 +803,394 @@ def _build_test_requests(api_schema: list[dict], base_url: str, headers: dict | 
                     "label": f"INVALID_TYPE {method} {path}",
                     "method": method,
                     "url": full_url,
-                    "headers": {**default_headers, "Content-Type": endpoint.get("request_body_content_type", "application/json")},
+                    "headers": {**default_headers, "Content-Type": content_type},
                     "body": bad_body,
-                    "expected_status": 400,
+                    "expected_status": [400, 422],
+                    "response_schema": endpoint.get("response_schema"),
                     "category": "PARAM_VALIDATION",
                 })
 
     return requests
 
 
+def _update_api_execution_state(
+    state: AgentState,
+    results: list[dict],
+    total_requests: int,
+    complete: bool,
+) -> None:
+    safe_results = redact_sensitive_data(results)
+    skipped_count = sum(1 for r in results if r.get("skipped"))
+    executed_count = len(results) - skipped_count
+    passed_count = sum(1 for r in results if r.get("passed") is True)
+    completed = len(results)
+    failed_count = max(executed_count - passed_count, 0)
+    pending_count = max(total_requests - completed, 0)
+    all_passed = complete and total_requests > 0 and completed == total_requests and failed_count == 0
+    stderr = ""
+    if complete and total_requests == 0:
+        stderr = "No executable API requests were built"
+    elif complete and failed_count:
+        stderr = f"{failed_count} API test(s) failed"
+
+    state["api_execution_result"] = {
+        "total": total_requests,
+        "completed": completed,
+        "executed": executed_count,
+        "passed": passed_count,
+        "failed": failed_count,
+        "skipped": skipped_count,
+        "pending": pending_count,
+        "pass_rate": f"{round(passed_count / executed_count * 100, 1)}%" if executed_count else "0%",
+        "results": results,
+        "all_passed": all_passed,
+        "complete": complete,
+    }
+
+    state["execution_result"] = {
+        "status_code": 0 if all_passed or not complete else 1,
+        "stdout": json.dumps(safe_results, ensure_ascii=False, default=str)[:3000],
+        "stderr": stderr,
+        "trace_path": None,
+        "api_results": safe_results,
+    }
+
+
 async def run(state: AgentState) -> AgentState:
+    install_tool_context(state)
     api_schema = state.get("parsed_api_schema") or []
     api_cases = state.get("api_cases") or []
-    api_plan = state.get("api_plan")
     target_url = state.get("target_url", "")
-    base_url = target_url.rstrip("/")
+    base_url_override = state.get("base_url_override")
+    base_url = (base_url_override or target_url).rstrip("/")
+    auth_headers = state.get("auth_headers") or {}
+    execution_policy = _normalize_api_execution_policy(state.get("api_execution_policy"))
+    state["api_execution_policy"] = execution_policy
+    write_allowed = _policy_allows_write(execution_policy)
+    retry_count = max(0, int(getattr(settings, "API_REQUEST_RETRY_COUNT", 0) or 0))
+    timeout_seconds = float(getattr(settings, "API_REQUEST_TIMEOUT_SECONDS", 30.0) or 30.0)
+    dependency_context: dict[str, object] = {}
 
     results = []
 
     # If we have API schema, generate requests from it
     if api_schema:
-        test_requests = _build_test_requests(api_schema, base_url)
+        test_requests = _build_test_requests(api_schema, base_url, auth_headers, execution_policy)
     elif api_cases:
         # Generate from api_cases (from case_generator)
         test_requests = []
         for case in api_cases:
-            tmpl = case.get("request_template", {})
+            tmpl = _request_template_from_case(case)
             if tmpl:
                 method = tmpl.get("method", "GET").upper()
-                url = tmpl.get("url", "")
-                if url and not url.startswith("http"):
-                    url = f"{base_url}{url}"
-                test_requests.append({
+                url = tmpl.get("url") or tmpl.get("path") or tmpl.get("endpoint") or ""
+                url = _build_request_url(base_url, url)
+                url = _resolve_path_params(url, {"path_params": tmpl.get("path_params", [])})
+                if not url:
+                    continue
+                if method in WRITE_API_METHODS and not write_allowed:
+                    test_requests.append({
+                        "label": case.get("title", f"SKIPPED_WRITE {method} {url}"),
+                        "method": method,
+                        "url": url,
+                        "headers": {},
+                        "body": None,
+                        "expected_status": None,
+                        "category": "SKIPPED",
+                        "skip_reason": "当前策略为安全只读，未执行会创建、修改或删除数据的请求",
+                    })
+                    continue
+                content_type = (
+                    tmpl.get("content_type")
+                    or tmpl.get("request_body_content_type")
+                    or case.get("request_body_content_type")
+                    or "application/json"
+                )
+                body = tmpl.get("body", tmpl.get("json"))
+                body_generation = None
+                request_body_schema = tmpl.get("request_body_schema") or case.get("request_body_schema")
+                if body is None and isinstance(request_body_schema, dict) and _is_json_content_type(content_type):
+                    body = generate_mock_json_body(
+                        request_body_schema,
+                        required_fields=case.get("required_fields") or [],
+                        field_context=f"{method} {tmpl.get('path') or tmpl.get('url') or ''}",
+                    )
+                    if body is not None:
+                        body_generation = {
+                            "source": "faker_json_schema",
+                            "method": method,
+                            "path": tmpl.get("path") or tmpl.get("url") or "",
+                            "content_type": content_type,
+                            "required_fields": case.get("required_fields") or [],
+                            "summary": summarize_mock_body(body),
+                        }
+                request_headers = {**auth_headers, **(tmpl.get("headers") or {})}
+                if body is not None:
+                    request_headers.setdefault("Content-Type", content_type)
+                request = {
                     "label": case.get("title", f"{method} {url}"),
                     "method": method,
                     "url": url or target_url,
-                    "headers": tmpl.get("headers", {}),
-                    "body": tmpl.get("body"),
-                    "query_params": tmpl.get("query_params", {}),
-                    "expected_status": 200,
+                    "headers": request_headers,
+                    "body": body,
+                    "query_params": tmpl.get("query_params") or tmpl.get("params") or {},
+                    "expected_status": tmpl.get("expected_status", case.get("expected_status", 200)),
+                    "response_schema": tmpl.get("response_schema") or case.get("response_schema"),
+                    "auto_schema_assertion": bool(tmpl.get("response_schema") or case.get("response_schema")),
+                    "schema_assertion_mode": tmpl.get(
+                        "schema_assertion_mode",
+                        case.get("schema_assertion_mode", "blocking"),
+                    ),
+                    "depends_on": tmpl.get("depends_on") or case.get("depends_on"),
+                    "extract": tmpl.get("extract") or case.get("extract"),
                     "category": case.get("category", "SMOKE"),
-                    "assertions": case.get("assertions", []),
-                })
+                    "assertions": case.get("assertions") or tmpl.get("assertions") or [],
+                    "request_body_source": "faker_json_schema" if body_generation else "case_template",
+                }
+                if body_generation:
+                    request["mock_body_generation"] = body_generation
+                test_requests.append(request)
     else:
         # Fallback: just hit the target URL
-        test_requests = [{
-            "label": f"GET {target_url}",
-            "method": "GET",
-            "url": target_url,
-            "headers": {},
-            "body": None,
-            "expected_status": 200,
-            "category": "SMOKE",
-        }]
+        fallback_url = _build_request_url("", base_url or target_url)
+        test_requests = []
+        if fallback_url:
+            test_requests.append({
+                "label": f"GET {fallback_url}",
+                "method": "GET",
+                "url": fallback_url,
+                "headers": auth_headers,
+                "body": None,
+                "expected_status": 200,
+                "category": "SMOKE",
+            })
+
+    total_requests = len(test_requests)
+    state["tool_summary"] = None
+    artifacts = state.get("artifacts") or {}
+    artifacts["execution_config"] = {
+        "api_timeout_seconds": timeout_seconds,
+        "api_retry_count": retry_count,
+        "api_execution_policy": execution_policy,
+    }
+    state["artifacts"] = artifacts
+    _update_api_execution_state(state, results, total_requests, complete=False)
+    await persist_progress(
+        state,
+        "api_runner",
+        "running",
+        f"Executing {total_requests} API request(s)",
+    )
 
     # Execute all test requests
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True) as client:
         for req in test_requests:
+            if req.get("skip_reason"):
+                record_tool_call(
+                    state,
+                    tool_name="api.safe_write_gate",
+                    layer="api",
+                    status="skipped",
+                    input_summary={
+                        "method": req.get("method"),
+                        "url": req.get("url"),
+                        "policy": execution_policy,
+                    },
+                    output_summary={"reason": req.get("skip_reason")},
+                )
+                results.append(_make_skipped_result(req, str(req.get("skip_reason"))))
+                _update_api_execution_state(state, results, total_requests, complete=False)
+                await persist_progress(
+                    state,
+                    "api_runner",
+                    "running",
+                    (
+                        f"Skipped {len(results)}/{total_requests}: "
+                        f"{req.get('label', req.get('url', 'request'))}"
+                    ),
+                )
+                continue
+            missing_dependencies = _missing_dependencies(req, dependency_context)
+            if missing_dependencies:
+                reason = f"缺少上游提取变量：{', '.join(missing_dependencies)}"
+                record_tool_call(
+                    state,
+                    tool_name="api.inject_dependency",
+                    layer="api",
+                    status="skipped",
+                    input_summary={
+                        "method": req.get("method"),
+                        "url": req.get("url"),
+                        "depends_on": missing_dependencies,
+                    },
+                    output_summary={"reason": reason},
+                )
+                results.append(_make_skipped_result(req, reason))
+                _update_api_execution_state(state, results, total_requests, complete=False)
+                await persist_progress(
+                    state,
+                    "api_runner",
+                    "running",
+                    f"Skipped {len(results)}/{total_requests}: {req.get('label', req.get('url', 'request'))}",
+                )
+                continue
+
+            if dependency_context:
+                req = deepcopy(req)
+                req["url"] = _substitute_context(req.get("url"), dependency_context)
+                req["headers"] = _substitute_context(req.get("headers") or {}, dependency_context)
+                req["body"] = _substitute_context(req.get("body"), dependency_context)
+                req["query_params"] = _substitute_context(req.get("query_params") or {}, dependency_context)
+                record_tool_call(
+                    state,
+                    tool_name="api.inject_dependency",
+                    layer="api",
+                    status="success",
+                    input_summary={
+                        "label": req.get("label"),
+                        "variables_available": sorted(dependency_context.keys()),
+                    },
+                    output_summary={"resolved": True},
+                )
+            latest_auth_headers = state.get("auth_headers") or {}
+            if (
+                latest_auth_headers
+                and str(req.get("category") or "").upper() != "AUTH"
+                and has_auth_like_header(req.get("headers"))
+            ):
+                req = deepcopy(req)
+                req["headers"] = {**(req.get("headers") or {}), **latest_auth_headers}
+            _record_mock_body_generation(state, req)
             try:
                 start = time.perf_counter()
-                resp = await client.request(
-                    req["method"],
-                    req["url"],
-                    headers=req.get("headers") or None,
-                    json=req.get("body"),
-                    params=req.get("query_params"),
-                )
+                resp, attempts, request_error = await _request_with_retry(client, req, retry_count)
                 elapsed = round((time.perf_counter() - start) * 1000, 2)
+                if request_error is not None or resp is None:
+                    raise request_error or RuntimeError("HTTP request failed")
+                _record_http_request_call(state, req, resp.status_code, attempts, elapsed)
 
                 try:
                     payload = resp.json()
                 except Exception:
                     payload = resp.text[:500]
 
+                auth_refreshed = False
+                if _is_auth_failure(resp.status_code, payload) and _can_refresh_auth(state, req):
+                    refreshed_headers = await _refresh_auth_for_request(state, req, api_schema or None)
+                    if refreshed_headers:
+                        req = deepcopy(req)
+                        req["headers"] = {**(req.get("headers") or {}), **refreshed_headers}
+                        auth_refreshed = True
+                        start = time.perf_counter()
+                        resp, attempts, request_error = await _request_with_retry(client, req, retry_count)
+                        elapsed = round((time.perf_counter() - start) * 1000, 2)
+                        if request_error is not None or resp is None:
+                            raise request_error or RuntimeError("HTTP request failed after auth refresh")
+                        _record_http_request_call(
+                            state,
+                            req,
+                            resp.status_code,
+                            attempts,
+                            elapsed,
+                            auth_refresh_retry=True,
+                        )
+                        try:
+                            payload = resp.json()
+                        except Exception:
+                            payload = resp.text[:500]
+
                 expected_status = req.get("expected_status", 200)
-                passed = resp.status_code == expected_status
+                category = req.get("category", "SMOKE")
 
-                # Run assertions if present
-                assertion_results = []
-                for assertion in req.get("assertions", []):
-                    atype = assertion.get("type", "")
-                    if atype == "status_code":
-                        a_passed = resp.status_code == assertion.get("expected", 200)
-                        assertion_results.append({"type": atype, "passed": a_passed})
-                    elif atype == "json_path" and isinstance(payload, dict):
-                        path_expr = assertion.get("path", "")
-                        # Simple $.key resolution
-                        parts = path_expr.lstrip("$.").split(".")
-                        val = payload
-                        for p in parts:
-                            if isinstance(val, dict):
-                                val = val.get(p)
-                            else:
-                                val = None
-                                break
-                        if assertion.get("expected") == "not_null":
-                            a_passed = val is not None
-                        else:
-                            a_passed = val == assertion.get("expected")
-                        assertion_results.append({"type": atype, "passed": a_passed, "actual": val})
+                # Determine pass/fail
+                if category == "SMOKE":
+                    passed = _status_matches(200, resp.status_code, payload)
+                else:
+                    passed = _status_matches(expected_status, resp.status_code, payload)
 
-                if assertion_results:
-                    passed = all(a.get("passed") for a in assertion_results)
+                assertion_results = _evaluate_assertions(req, resp.status_code, payload)
+                for assertion_result in assertion_results:
+                    assertion_tool = {
+                        "status_code": "api.status_assert",
+                        "json_path": "api.json_path_assert",
+                        "schema": "api.schema_assert",
+                    }.get(assertion_result.get("type"), "api.json_path_assert")
+                    record_tool_call(
+                        state,
+                        tool_name=assertion_tool,
+                        layer="api",
+                        status="success" if assertion_result.get("passed") in {True, None} else "failed",
+                        input_summary={
+                            "label": req.get("label"),
+                            "type": assertion_result.get("type"),
+                            "path": assertion_result.get("path"),
+                            "blocking": assertion_result.get("blocking", True),
+                        },
+                        output_summary={
+                            "passed": assertion_result.get("passed"),
+                            "skipped": assertion_result.get("skipped", False),
+                            "error": assertion_result.get("error"),
+                        },
+                    )
 
-                results.append({
+                passed = _assertions_pass(assertion_results, passed)
+                failure_classification = None if passed else _classify_api_failure(
+                    req,
+                    resp.status_code,
+                    payload,
+                    assertion_results,
+                )
+
+                extractions = []
+                for spec in _extract_specs(req.get("extract")):
+                    actual = _json_path_get(payload, spec["path"]) if isinstance(payload, (dict, list)) else None
+                    extracted = actual is not None
+                    if extracted:
+                        dependency_context[spec["name"]] = actual
+                    extraction_entry = {
+                        "name": spec["name"],
+                        "path": spec["path"],
+                        "extracted": extracted,
+                    }
+                    extractions.append(extraction_entry)
+                    record_tool_call(
+                        state,
+                        tool_name="api.extract_value",
+                        layer="api",
+                        status="success" if extracted else "failed",
+                        input_summary={"label": req.get("label"), "name": spec["name"], "path": spec["path"]},
+                        output_summary={"extracted": extracted},
+                    )
+
+                result_entry = {
                     "label": req["label"],
                     "method": req["method"],
                     "url": req["url"],
                     "status_code": resp.status_code,
+                    "envelope_status_code": _payload_status_code(payload),
                     "elapsed_ms": elapsed,
                     "body": payload if isinstance(payload, (dict, list)) else str(payload)[:500],
+                    "request_headers": redact_sensitive_headers(req.get("headers", {})),
+                    "request_body": redact_sensitive_data(req.get("body")),
+                    "request_body_source": req.get("request_body_source"),
                     "passed": passed,
                     "category": req.get("category", "SMOKE"),
                     "assertion_results": assertion_results,
-                })
+                    "extractions": extractions,
+                    "auth_refreshed": auth_refreshed,
+                }
+                if failure_classification:
+                    result_entry.update(failure_classification)
+                results.append(result_entry)
             except Exception as e:
+                record_tool_call(
+                    state,
+                    tool_name="api.http_request",
+                    layer="api",
+                    status="failed",
+                    input_summary={"method": req.get("method"), "url": req.get("url")},
+                    output_summary={"error": str(e)[:300]},
+                )
                 results.append({
                     "label": req.get("label", f"{req['method']} {req['url']}"),
                     "method": req["method"],
@@ -216,39 +1198,45 @@ async def run(state: AgentState) -> AgentState:
                     "status_code": 0,
                     "elapsed_ms": 0,
                     "body": None,
+                    "request_headers": redact_sensitive_headers(req.get("headers", {})),
+                    "request_body": redact_sensitive_data(req.get("body")),
+                    "request_body_source": req.get("request_body_source"),
                     "passed": False,
                     "category": req.get("category", "SMOKE"),
                     "error": str(e),
                 })
+            _update_api_execution_state(state, results, total_requests, complete=False)
+            await persist_progress(
+                state,
+                "api_runner",
+                "running",
+                (
+                    f"Executed {len(results)}/{total_requests}: "
+                    f"{req.get('label', req.get('url', 'request'))}"
+                ),
+            )
 
     total = len(results)
-    passed_count = sum(1 for r in results if r.get("passed"))
-    all_passed = passed_count == total
+    skipped_count = sum(1 for r in results if r.get("skipped"))
+    executed_count = total - skipped_count
+    passed_count = sum(1 for r in results if r.get("passed") is True)
+    failed_count = max(executed_count - passed_count, 0)
+    all_passed = total > 0 and failed_count == 0
 
-    state["api_execution_result"] = {
-        "total": total,
-        "passed": passed_count,
-        "failed": total - passed_count,
-        "pass_rate": f"{round(passed_count / total * 100, 1)}%" if total else "0%",
-        "results": results,
-        "all_passed": all_passed,
-    }
-
-    # Also set legacy execution_result for backward compat
-    state["execution_result"] = {
-        "status_code": 0 if all_passed else 1,
-        "stdout": json.dumps(results, ensure_ascii=False, default=str)[:3000],
-        "stderr": "" if all_passed else f"{total - passed_count} API test(s) failed",
-        "trace_path": None,
-        "api_results": results,
-    }
+    _update_api_execution_state(state, results, total, complete=True)
+    state["tool_summary"] = summarize_tool_calls(state.get("tool_calls"))
+    artifacts = state.get("artifacts") or {}
+    artifacts["tool_calls"] = state.get("tool_calls", [])
+    artifacts["tool_summary"] = state["tool_summary"]
+    state["artifacts"] = artifacts
 
     status = "done" if all_passed else "failed"
-    state.setdefault("workflow_steps", []).append(
-        {
-            "node": "api_runner",
-            "status": status,
-            "detail": f"Executed {total} API test(s): {passed_count} passed, {total - passed_count} failed",
-        }
+    detail = (
+        f"Executed {executed_count} API request(s): "
+        f"{passed_count} passed, {failed_count} failed, {skipped_count} skipped"
     )
+    state.setdefault("workflow_steps", []).append(
+        {"node": "api_runner", "status": status, "detail": detail}
+    )
+    await persist_progress(state, "api_runner", status, detail)
     return state

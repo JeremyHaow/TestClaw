@@ -4,6 +4,8 @@ from typing import Any
 import yaml
 from langchain_core.tools import tool
 
+from app.tools.mock_data import generate_mock_json_body, resolve_json_schema
+
 
 def _extract_parameters(operation: dict, path_item: dict) -> dict:
     """Extract path, query, header params from operation + path-level parameters."""
@@ -19,12 +21,16 @@ def _extract_parameters(operation: dict, path_item: dict) -> dict:
         if key in seen:
             continue
         seen.add(key)
+        param_schema = p.get("schema") or {}
         entry = {
             "name": name,
             "in": loc,
             "required": p.get("required", False),
-            "type": p.get("type") or (p.get("schema", {}) or {}).get("type", "string"),
+            "type": p.get("type") or param_schema.get("type", "string"),
             "description": p.get("description", ""),
+            "enum": p.get("enum") or param_schema.get("enum") or [],
+            "default": p.get("default") if p.get("default") is not None else param_schema.get("default"),
+            "example": p.get("example") or param_schema.get("example"),
         }
         if loc == "path":
             path_params.append(entry)
@@ -61,6 +67,21 @@ def _extract_request_body_v2(operation: dict) -> dict | None:
                 "schema": p.get("schema", {}),
                 "required": p.get("required", False),
             }
+    # Check for formData parameters (file uploads)
+    form_params = [
+        p for p in operation.get("parameters", [])
+        if isinstance(p, dict) and p.get("in") == "formData"
+    ]
+    if form_params:
+        has_file = any(p.get("type") == "file" for p in form_params)
+        consumes = operation.get("consumes", [])
+        ct = "multipart/form-data" if has_file or "multipart/form-data" in consumes else "application/x-www-form-urlencoded"
+        schema = {p.get("name", ""): p.get("type", "string") for p in form_params if p.get("name")}
+        return {
+            "content_type": ct,
+            "schema": schema,
+            "required": any(p.get("required") for p in form_params),
+        }
     return None
 
 
@@ -97,54 +118,7 @@ def _has_auth(operation: dict, document: dict) -> bool:
 
 def _generate_example(schema: dict, document: dict | None = None, depth: int = 0) -> Any:
     """Generate a simple example value from a JSON schema."""
-    if depth > 5:
-        return None
-    if not isinstance(schema, dict):
-        return None
-
-    # Handle $ref
-    ref = schema.get("$ref")
-    if ref and document:
-        parts = ref.lstrip("#/").split("/")
-        resolved = document
-        for p in parts:
-            if isinstance(resolved, dict):
-                resolved = resolved.get(p, {})
-        if isinstance(resolved, dict):
-            return _generate_example(resolved, document, depth + 1)
-
-    schema_type = schema.get("type", "object")
-
-    if schema_type == "string":
-        fmt = schema.get("format", "")
-        if fmt == "date-time":
-            return "2024-01-01T00:00:00Z"
-        if fmt == "date":
-            return "2024-01-01"
-        if fmt == "email":
-            return "user@example.com"
-        enum = schema.get("enum")
-        if enum:
-            return enum[0]
-        return "string"
-    if schema_type == "integer":
-        return schema.get("minimum", 1)
-    if schema_type == "number":
-        return schema.get("minimum", 1.0)
-    if schema_type == "boolean":
-        return True
-    if schema_type == "array":
-        items = schema.get("items", {})
-        example = _generate_example(items, document, depth + 1)
-        return [example] if example is not None else []
-    if schema_type == "object" or "properties" in schema:
-        props = schema.get("properties", {})
-        result = {}
-        for name, prop in props.items():
-            if isinstance(prop, dict):
-                result[name] = _generate_example(prop, document, depth + 1)
-        return result
-    return None
+    return generate_mock_json_body(schema, document=document)
 
 
 def _extract_required_fields(schema: dict) -> list[str]:
@@ -169,6 +143,8 @@ def _normalize_openapi_document_v3(document: dict[str, Any]) -> list[dict[str, A
             params = _extract_parameters(operation, path_item)
             request_body = _extract_request_body_v3(operation)
             response = _extract_responses(operation)
+            req_schema = resolve_json_schema(request_body["schema"], document) if request_body else None
+            resp_schema = resolve_json_schema(response["schema"], document) if response else None
 
             endpoint = {
                 "path": path,
@@ -179,19 +155,19 @@ def _normalize_openapi_document_v3(document: dict[str, Any]) -> list[dict[str, A
                 "path_params": params["path_params"],
                 "query_params": params["query_params"],
                 "header_params": params["header_params"],
-                "request_body_schema": request_body["schema"] if request_body else None,
+                "request_body_schema": req_schema,
                 "request_body_content_type": request_body["content_type"] if request_body else None,
-                "response_schema": response["schema"] if response else None,
+                "response_schema": resp_schema,
                 "response_status": response["status_code"] if response else "200",
                 "required_fields": (
-                    _extract_required_fields(request_body["schema"]) if request_body else []
+                    _extract_required_fields(req_schema) if req_schema else []
                 ) + [p["name"] for p in params["path_params"] if p.get("required")],
                 "auth_required": _has_auth(operation, document),
                 "example_request": (
-                    _generate_example(request_body["schema"], document) if request_body else None
+                    _generate_example(req_schema, document) if req_schema else None
                 ),
                 "example_response": (
-                    _generate_example(response["schema"], document) if response else None
+                    _generate_example(resp_schema, document) if resp_schema else None
                 ),
             }
             endpoints.append(endpoint)
@@ -201,17 +177,6 @@ def _normalize_openapi_document_v3(document: dict[str, Any]) -> list[dict[str, A
 def _normalize_openapi_document_v2(document: dict[str, Any]) -> list[dict[str, Any]]:
     """Parse Swagger 2.0 document into rich endpoint descriptors."""
     endpoints: list[dict[str, Any]] = []
-    definitions = document.get("definitions", {})
-
-    def resolve_ref(ref: str) -> dict:
-        if not ref.startswith("#/"):
-            return {}
-        parts = ref.lstrip("#/").split("/")
-        node = document
-        for p in parts:
-            if isinstance(node, dict):
-                node = node.get(p, {})
-        return node if isinstance(node, dict) else {}
 
     for path, path_item in document.get("paths", {}).items():
         if not isinstance(path_item, dict):
@@ -228,13 +193,13 @@ def _normalize_openapi_document_v2(document: dict[str, Any]) -> list[dict[str, A
 
             # Resolve schema refs for request body
             req_schema = request_body["schema"] if request_body else None
-            if req_schema and "$ref" in req_schema:
-                req_schema = resolve_ref(req_schema["$ref"])
+            if req_schema:
+                req_schema = resolve_json_schema(req_schema, document)
 
             # Resolve schema refs for response
             resp_schema = response["schema"] if response else None
-            if resp_schema and "$ref" in resp_schema:
-                resp_schema = resolve_ref(resp_schema["$ref"])
+            if resp_schema:
+                resp_schema = resolve_json_schema(resp_schema, document)
 
             endpoint = {
                 "path": path,
