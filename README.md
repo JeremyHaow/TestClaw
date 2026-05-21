@@ -88,7 +88,7 @@ cd frontend && npm run dev -- --host 0.0.0.0
 如果你已经准备好 `.env`，可以直接运行：
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d
+docker compose --env-file .env -f docker/docker-compose.yml up -d
 ```
 
 这会启动：
@@ -98,6 +98,9 @@ docker compose -f docker/docker-compose.yml up -d
 - `api`
 - `worker`
 - `frontend`
+- `nginx`
+
+生产部署路径会将前端构建为静态文件，并通过 nginx 为 `testclaw.oceancute.cn` 提供入口，同时把 `/api/` 反向代理到 FastAPI。服务器部署步骤见 [`docs/production-deployment.md`](docs/production-deployment.md)。
 
 ## 目录说明
 

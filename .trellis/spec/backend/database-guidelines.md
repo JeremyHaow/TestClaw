@@ -69,8 +69,695 @@ await db.commit()
 - Foreign keys: `{referenced_table_singular}_id` (e.g., `task_id`, `api_doc_id`)
 - Enums: `str, enum.Enum` subclass (e.g., `TaskStatus`, `TestType`)
 
+## Scenario: Task Execution Progress Contract
+
+### 1. Scope / Trigger
+
+- Trigger: test runs are long-running Celery/LangGraph workflows and must show live progress in the Vue UI through `/api/v1/runs/{id}/stream`.
+- Storage source of truth: `Task.execution_log` JSON in the `tasks` table.
+- Writers: `app/worker/tasks.py`, `app/agent/progress.py`, and selected agent nodes through `persist_progress(...)`.
+- Readers: `app/api/v1/runs.py`, `app/api/v1/tasks.py`, and `frontend/src/pages/RunDetailPage.vue`.
+
+### 2. Signatures
+
+- DB model: `Task.execution_log: Text | None`
+- DB status enum: `TaskStatus = pending | queued | running | succeeded | failed | bug_found | cancelled`
+- DB test type enum: `TestType = AUTO | UI | API | FUNCTIONAL | FULL | SUITE`
+- Progress helper:
+  ```python
+  await persist_progress(state, node, status, detail, task_status=None)
+  await persist_task_state(db, task, state, status=TaskStatus.RUNNING)
+  ```
+- SSE payload:
+  ```json
+  {"type": "snapshot", "snapshot": {"workflow_steps": [], "progress_events": []}}
+  ```
+
+### 3. Contracts
+
+`execution_log` is a JSON object. Preserve existing keys when appending progress. Known keys:
+
+- `workflow_steps`: coarse agent node steps, each with `node`, `status`, `detail`
+- `progress_events`: fine-grained live events, each with `node`, `status`, `detail`, `timestamp`
+- `current_step`: latest progress event
+- `api_execution_result`, `ui_execution_result`, `final_report`, `artifacts`
+- `input_type`, `source_input`, `last_error`
+- `cancelled`, `cancelled_at`
+
+API routes must normalize user-facing lowercase test types into DB enum values through `normalize_test_type(...)`, and pass lowercase agent modes through `normalize_agent_test_type(...)`.
+
+### 4. Validation & Error Matrix
+
+- Empty run source -> `400 {"detail": "source is required"}`
+- Unsupported `test_type` -> `400` with allowed values
+- Unsupported status/test type filter -> `400` with allowed values
+- Unknown run/task id -> `404`
+- Cancel non-active run/task -> `400`
+- SSE without query `token` -> `401`
+- Cancelled task detected during persistence -> keep `TaskStatus.CANCELLED` and do not overwrite it with success/failure
+
+### 5. Good/Base/Bad Cases
+
+- Good: worker calls `run_graph_with_progress(...)`, persists a snapshot after every graph update, and SSE emits `snapshot` events while status is `running`.
+- Base: synchronous fallback uses the same progress helper path so local dev without Celery still writes compatible `execution_log` JSON.
+- Bad: writing `task.execution_log = '{"cancelled": true}'` directly, because it destroys prior workflow steps and logs.
+
+### 6. Tests Required
+
+- Unit: `normalize_test_type("api") == TestType.API`
+- Unit: `normalize_agent_test_type(TestType.UI) == "ui"`
+- Unit: `determine_final_status({"cancelled": True}) == TaskStatus.CANCELLED`
+- Integration: creating a run stores an uppercase DB enum but returns a usable response schema
+- Integration: cancelling a queued/running run sets status `cancelled` and preserves previous `execution_log` keys
+- Frontend build: `RunDetailPage.vue` must compile after consuming `snapshot`, `progress_events`, and `current_step`
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+task.status = TaskStatus.FAILED
+task.execution_log = '{"cancelled": true}'
+await db.commit()
+```
+
+#### Correct
+
+```python
+await mark_task_cancelled(db, task, "Run cancelled by user")
+```
+
+#### Wrong
+
+```python
+run_agent_task.delay(task.id, objective, target_url, test_type=payload.test_type)
+```
+
+#### Correct
+
+```python
+db_test_type = normalize_test_type(payload.test_type, default=TestType.AUTO)
+agent_test_type = normalize_agent_test_type(db_test_type, default="auto")
+run_agent_task.delay(task.id, objective, target_url, test_type=agent_test_type)
+```
+
+## Scenario: UI/API Evidence and Final Report Contract
+
+### 1. Scope / Trigger
+
+- Trigger: agent runs generate browser/API evidence that is persisted into `Task.execution_log` and rendered by the run detail page.
+- Applies to `app.agent.nodes.ui_runner`, `app.tools.playwright_commands`, `app.agent.nodes.api_runner`, `app.agent.graph`, and `app.agent.nodes.reporter`.
+- Purpose: prevent product reports from reflecting generated script dialect failures or reused screenshot paths instead of actual test execution.
+
+### 2. Signatures
+
+- Command normalizer:
+  ```python
+  normalize_playwright_commands(commands: list[str], include_unsupported: bool = False) -> list[dict]
+  ```
+- UI execution result payload:
+  ```json
+  {
+    "total": 2,
+    "completed": 2,
+    "passed": 2,
+    "failed": 0,
+    "case_total": 2,
+    "command_total": 8,
+    "cases": [],
+    "commands": [],
+    "screenshots": [],
+    "normalization_warnings": []
+  }
+  ```
+- Final report payload:
+  ```json
+  {
+    "api_test_summary": {"total": 1, "passed": 1, "failed": 0, "planned_cases": 1},
+    "ui_test_summary": {"total": 2, "passed": 2, "failed": 0, "planned_cases": 2},
+    "overall_verdict": "PASS"
+  }
+  ```
+
+### 3. Contracts
+
+- `ui_execution_result.total` is the UI case count. Use `command_total` for command count.
+- Every UI case must run independently and write screenshots to a run-scoped, case-scoped path:
+  `screenshots/{task_id}/case_{case_index}_step_{step_index}_shot_{n}.png`.
+- Do not reuse generated screenshot filenames such as `step1.png`; the runner owns evidence paths.
+- Generated pseudo-commands `wait`, `sleep`, `pause`, `assert`, and `expect` must be normalized before execution or skipped without being counted as playwright syntax failures.
+- `assert snapshot contains "text"` becomes a `snapshot` execution plus an in-process text check.
+- Auto runs must execute API first when an API schema, API cases, or `base_url_override` is available, then continue to UI when a UI URL is available.
+- The reporter must build result counts from `api_execution_result` and `ui_execution_result`, not from draft plans or LLM-generated summaries.
+
+### 4. Validation & Error Matrix
+
+- Generated `wait 2000` -> normalize to `snapshot`; no syntax failure.
+- Generated `assert snapshot contains "Dashboard"` -> execute `snapshot`, fail only if actual snapshot text is missing `Dashboard`.
+- Generated `screenshot shared.png` -> save to the runner-owned case evidence path.
+- API schema/base URL available but no API execution -> final report recommendation: verify schema/base URL.
+- No API schema/base URL supplied -> API execution is not applicable, not a product failure.
+
+### 5. Good/Base/Bad Cases
+
+- Good: UI case screenshots have distinct paths and the report says `UI passed 3/3` for three passing cases.
+- Base: a generated wait command is normalized and recorded in `normalization_warnings`.
+- Bad: all UI evidence points to the same file or final report says failures were caused by unsupported generated commands.
+
+### 6. Tests Required
+
+- Unit: command normalizer converts `wait`, `assert snapshot contains`, and `screenshot <name>`.
+- Unit: auto graph routing sends URL + `base_url_override` runs through API before UI.
+- Async unit: UI runner writes different screenshot paths for different cases.
+- Unit: reporter uses actual API/UI execution counts and does not report draft-only API plans as execution.
+- Frontend build: run detail page compiles with UI case/count fields.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+screenshots.append("step1.png")
+ui_result["total"] = len(commands)
+```
+
+#### Correct
+
+```python
+screenshots.append(str(screenshot_dir / "case_000_step_002_shot_001.png"))
+ui_result["total"] = len(case_results)
+ui_result["command_total"] = len(command_results)
+```
+
+### Scenario: Optional OSS Screenshot Storage
+
+### 1. Scope / Trigger
+
+- Trigger: UI runs persist screenshots as test evidence, and the project may store those screenshots in Aliyun OSS when credentials and bucket settings are present.
+- Applies to `app.services.screenshot_storage`, `app.agent.nodes.ui_runner`, `app.config`, and the run detail page that renders screenshot evidence.
+- Purpose: keep screenshot evidence available even when OSS is not configured, while exposing a stable remote URL when upload succeeds.
+
+### 2. Signatures
+
+- Screenshot storage helper:
+  ```python
+  async def store_screenshot(path: Path, run_id: str) -> dict
+  ```
+- OSS configuration keys:
+  ```text
+  OSS_ENABLED
+  OSS_BUCKET
+  OSS_REGION
+  OSS_ENDPOINT
+  OSS_PUBLIC_BASE_URL
+  OSS_PREFIX
+  OSS_USE_CNAME
+  OSS_ACCESS_KEY_ID
+  OSS_ACCESS_KEY_SECRET
+  ```
+- Screenshot evidence payload:
+  ```json
+  {
+    "path": "sandbox/screenshots/run-1/case_000_step_001_shot_001.png",
+    "label": "点击操作后",
+    "detail": "click e12",
+    "storage": {
+      "backend": "oss",
+      "bucket": "qunsun",
+      "key": "testclaw/screenshots/run-1/case_000_step_001_shot_001.png",
+      "url": "https://qunsun.oss-cn-hangzhou.aliyuncs.com/testclaw/screenshots/run-1/case_000_step_001_shot_001.png"
+    }
+  }
+  ```
+
+### 3. Contracts
+
+- Screenshots are written locally first; OSS upload is an optional second step.
+- `store_screenshot(...)` must return a structured dict with `backend` set to `local`, `oss`, or `missing`.
+- When OSS is configured and upload succeeds, the result should include `bucket`, `key`, `url`, and request metadata such as `etag` / `request_id` when available.
+- When OSS is not configured or upload fails, the run must continue and preserve the local `path` so the run detail page can still render evidence.
+- The run detail page should prefer `storage.url` or `url` when present, and fall back to the local screenshot route when remote storage is unavailable.
+
+### 4. Validation & Error Matrix
+
+- OSS disabled or missing bucket/region -> return `backend=local`; do not fail the run.
+- OSS upload succeeds -> return `backend=oss` with a stable remote URL.
+- OSS upload fails -> return `backend=local` with `oss_error`; do not discard the local file path.
+- Screenshot file missing on disk -> return `backend=missing`.
+
+### 5. Good/Base/Bad Cases
+
+- Good: the UI result contains both local screenshot paths and OSS URLs when the bucket is configured.
+- Base: local-only runs still persist evidence and the detail page can load images through the backend route.
+- Bad: a failed OSS upload aborts the UI run or leaves the report without any screenshot path.
+
+### 6. Tests Required
+
+- Unit: `store_screenshot(...)` returns `backend=local` when OSS is not configured.
+- Smoke: a configured OSS environment uploads a file and returns `backend=oss` with a non-empty `url`.
+- Frontend build: the run detail page can render screenshot evidence with `url`, `storage`, and local fallback fields.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+upload_to_oss(path)
+return {"url": remote_url}
+```
+
+#### Correct
+
+```python
+storage = await store_screenshot(path, task_id)
+evidence = {
+    "path": str(path),
+    "label": label,
+    "detail": detail,
+    "storage": storage,
+    "url": storage.get("url"),
+}
+```
+
+## Scenario: Sensitive Header Redaction and Suite Routing
+
+### 1. Scope / Trigger
+
+- Trigger: API execution results and suite-selected API cases can include user-supplied auth/custom headers.
+- Applies to `app.core.redaction`, `app.agent.progress`, `app.agent.nodes.api_runner`, `app.schemas.task`, `app.api.v1.runs`, and `app.api.v1.test_cases`.
+- Purpose: prevent credentials from being persisted in `Task.execution_log` or rendered in run detail/SSE payloads.
+
+### 2. Signatures
+
+- Redaction helpers:
+  ```python
+  redact_sensitive_headers(headers: Any) -> Any
+  redact_sensitive_data(value: Any) -> Any
+  redact_json_text(text: str | None) -> str | None
+  ```
+- Suite worker kwargs:
+  ```python
+  _suite_worker_kwargs(agent_test_type: str, api_cases: list[dict], ui_cases: list[dict]) -> dict
+  ```
+
+### 3. Contracts
+
+- Redact `Authorization`, `Proxy-Authorization`, `X-API-Key`, `Api-Key`, and any header name containing `token` or `cookie`, case-insensitively.
+- Redaction must happen before writing `Task.execution_log` via `build_execution_log_payload(...)`.
+- Run detail and stream readers must redact parsed execution logs again so older unredacted rows are not rendered.
+- `api_runner` may send real headers to `httpx`, but stored `request_headers` in `api_execution_result.results[]` must be redacted.
+- Suite runs must normalize selected case kind before routing:
+  - explicit `API`/`api` -> API
+  - explicit `UI`/`ui` and UI labels such as `PAGE_LOAD` -> UI
+  - request templates imply API
+  - playwright commands imply UI
+- Suite API case payloads must hoist `test_data.request_template` to top-level `request_template`.
+- Production Celery dispatch for suite runs must pass both `api_cases` and `ui_cases`; synchronous fallback must use the same payloads.
+
+### 4. Validation & Error Matrix
+
+- Sensitive header in API request template -> persisted value is `[REDACTED]`.
+- Sensitive header in API execution result -> run detail returns `[REDACTED]`.
+- Suite case category `API` with request template -> routed to `api_cases`.
+- Suite case category `SMOKE` with request template -> routed to `api_cases`.
+- Suite case category `PAGE_LOAD` with playwright commands -> routed to `ui_cases`.
+- Suite with no valid case ids -> `400 {"detail": "No valid test cases found in suite"}`.
+
+### 5. Good/Base/Bad Cases
+
+- Good: API request executes with the real `Authorization` header, but persisted/rendered `request_headers.Authorization` is `[REDACTED]`.
+- Base: a suite with one API case and one UI case dispatches `test_type="auto"` plus both case lists.
+- Bad: Celery `.delay(...)` receives only `source_input="suite"` and regenerates cases, losing selected suite request templates.
+
+### 6. Tests Required
+
+- Unit: imported modules for new agent/progress/playwright files are importable.
+- Unit: API runner uses nested suite request templates and redacts stored request headers.
+- Unit: `build_execution_log_payload(...)` and `parse_task_detail(...)` redact sensitive headers.
+- Unit: suite case payload builder normalizes `API`, `SMOKE`, and `PAGE_LOAD` cases and hoists request templates.
+- Unit: suite worker kwargs include both `api_cases` and `ui_cases` for the production delay path.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+run_agent_task.delay(task.id, task.objective, target_url, test_type=agent_test_type)
+```
+
+#### Correct
+
+```python
+run_agent_task.delay(
+    task.id,
+    task.objective,
+    target_url,
+    test_type=agent_test_type,
+    source_input="suite",
+    api_cases=api_cases,
+    ui_cases=ui_cases,
+)
+```
+
+## Scenario: Authenticated UI Login Verification, Modality Gating, and Honest Run Progress
+
+### 1. Scope / Trigger
+
+- Trigger: a run starts from a login page or authenticated admin entry and the agent must decide whether authentication actually succeeded before planning or executing authenticated UI coverage.
+- Applies to `app/agent/nodes/ui_login.py`, `app/agent/graph.py`, `app/agent/nodes/ui_test_planner.py`, `app/agent/nodes/ui_runner.py`, `app/agent/nodes/reporter.py`, `app/agent/nodes/planner.py`, `app/agent/nodes/tc_generator.py`, and `frontend/src/pages/RunDetailPage.vue`.
+- Why code-spec depth is required: this is a cross-layer contract between agent state, workflow routing, persisted execution snapshots, and the run detail UI. If any layer treats the login page as authenticated success, the product generates false UI coverage, blank reports, and misleading progress.
+
+### 2. Signatures
+
+- Agent state fields:
+  ```python
+  login_result: dict | None
+  login_verified: bool | None
+  login_verification_reason: str | None
+  authenticated_ui_context: dict | None
+  ui_reproducible_script: str | None
+  ```
+- Graph routing:
+  ```python
+  def _after_ui_login(state: AgentState) -> str:
+      login_required = bool((state.get("login_instructions") or "").strip())
+      login_verified = state.get("login_verified")
+      if login_required and login_verified is False:
+          return "reporter"
+      return "ui_test_planner"
+  ```
+- Reporter verdict contract:
+  ```python
+  if total_executed == 0:
+      verdict = "FAIL" if login_failed else "NOT_EXECUTED"
+  ```
+- Run detail progress inputs:
+  ```json
+  {
+    "workflow_steps": [],
+    "progress_events": [],
+    "current_step": {"node": "ui_login", "status": "running", "detail": "..."}
+  }
+  ```
+
+### 3. Contracts
+
+- `ui_login.py` must preserve the existing LLM-assisted login flow, then verify the post-login snapshot conservatively before treating the session as authenticated.
+- Missing `login_instructions` means login is not required for the current run; this is not a failure.
+- Required login + `login_verified == False` must short-circuit from `ui_login` to `reporter`; it must not continue to authenticated exploration or UI execution.
+- `ui_test_planner.py` may explore the authenticated surface only when login is either not required or has been verified.
+- `ui_runner.py` must preserve per-case execution and evidence capture, but when required login is unverified it must emit a clear skipped/failed `ui_execution_result` instead of pretending cases ran.
+- `planner.py` and `tc_generator.py` must respect explicit modality selection:
+  - `test_type == "ui"` -> no `api_plan`, no `api_cases`, no API entries in combined plan/case payloads.
+  - `test_type == "api"` -> no `ui_plan`, no `ui_cases`, no UI entries in combined plan/case payloads.
+- `reporter.py` must use executed results plus login verification state to build the final verdict. UI-only runs mark API as not applicable; failed required login produces a non-empty `FAIL` summary and recommendations.
+- `RunDetailPage.vue` must derive in-flight progress from `workflow_steps`, `progress_events`, and `current_step`/snapshot data. Running state must not jump near completion before the workflow actually reaches late nodes.
+
+### 4. Validation & Error Matrix
+
+- `login_instructions` provided, post-login snapshot still contains login-form markers, and no authenticated markers -> `login_verified = False`, reporter verdict `FAIL`, authenticated UI planning/execution skipped.
+- `login_instructions` missing -> `login_result.required = False`, `ui_login` step is skipped, downstream UI planning may continue from the current page.
+- `test_type == "ui"` with API schema present -> API planning/case generation remains empty; report says API not applicable instead of implying execution.
+- `test_type == "api"` with URL present -> UI planning/case generation remains empty.
+- `workflow_steps` only show early nodes running -> run detail progress stays in an early/mid range rather than inflating to ~95%.
+
+### 5. Good/Base/Bad Cases
+
+- Good: login succeeds, graph continues `ui_login -> ui_test_planner -> ui_runner`, explored admin pages produce UI cases, screenshots, and an actionable reproducible script.
+- Base: login is not required, `ui_login` records a skipped step, UI planning starts from the opened page, and report remains meaningful.
+- Bad: the agent stays on the login page, still generates authenticated UI cases, and the report/progress imply broad coverage.
+
+### 6. Tests Required
+
+- Unit: graph routing sends failed required login from `ui_login` to `reporter`, and successful/non-required login to `ui_test_planner`.
+- Unit: planner/tc_generator enforce UI-only and API-only gating even when both URL and API schema are present.
+- Unit/async: `ui_runner` emits a clear skipped/failed result when required login verification fails.
+- Unit: reporter marks UI-only API summary as not applicable and failed required login as `FAIL` with non-empty summary/recommendations.
+- Frontend build: `RunDetailPage.vue` compiles after consuming snapshot-driven `workflow_steps`, `progress_events`, and `current_step`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+graph.add_edge("ui_login", "ui_test_planner")
+```
+
+#### Correct
+
+```python
+graph.add_conditional_edges(
+    "ui_login",
+    _after_ui_login,
+    {
+        "ui_test_planner": "ui_test_planner",
+        "reporter": "reporter",
+    },
+)
+```
+
+#### Wrong
+
+```python
+if test_type == "ui":
+    api_plan = parsed.get("api_plan")
+```
+
+#### Correct
+
+```python
+if test_type == "ui":
+    api_plan = None
+```
+
+#### Wrong
+
+```python
+if run.status == "running":
+    progress = 95
+```
+
+#### Correct
+
+```python
+progress = derive_from(workflow_steps, progress_events, current_step)
+```
+
+## Scenario: Run URL Roles and Rerun Context Rehydration
+
+### 1. Scope / Trigger
+
+- Trigger: a run may include both a browser page URL and an API base URL override, or may be re-run from a stored `Task.execution_log`.
+- Applies to `app/api/v1/runs.py`, `app/api/v1/test_cases.py`, `app/worker/tasks.py`, `app/agent/nodes/source_loader.py`, `app/agent/nodes/tc_generator.py`, and `app/agent/progress.py`.
+- Why code-spec depth is required: page URL, API base URL, selected suite cases, auth/custom headers, and setup instructions cross the API -> DB -> worker -> agent boundary. Losing any field can silently skip UI execution or rerun a different target.
+
+### 2. Signatures
+
+- Run creation:
+  ```python
+  RunCreate(source: str, base_url: str | None, headers: dict | None, token: str | None)
+  ```
+- Worker dispatch fields:
+  ```python
+  run_agent_task.delay(
+      task_id,
+      objective,
+      target_url,
+      source_input=source,
+      ui_seed_url=page_url,
+      input_type=input_type,
+      base_url_override=api_base_url,
+      auth_headers=headers,
+      custom_headers=headers,
+      api_cases=api_cases,
+      ui_cases=ui_cases,
+  )
+  ```
+- Persisted rerun context keys:
+  `source_input`, `input_type`, `ui_seed_url`, `base_url_override`, `auth_headers`, `custom_headers`, `api_cases`, `ui_cases`, `setup_instructions`, `login_instructions`.
+
+### 3. Contracts
+
+- For normal `input_type == "url"` page runs, `Task.target_url` remains the user page URL even when `base_url` is supplied. The API base host is stored only as `base_url_override`.
+- `source_loader.py` must not overwrite a URL page `target_url` with `base_url_override`; API runners read `base_url_override` separately.
+- Mixed suites with both API and UI cases dispatch as `test_type="auto"`/DB `FULL`, execute API first, then UI.
+- Suite dispatch must preserve selected `api_cases` and `ui_cases`; `tc_generator.py` must not replace them with generated cases.
+- Suite UI cases must carry a UI seed URL or equivalent `input_type="url"` metadata so `_after_api_runner(...)` can continue to the UI path.
+- Rerun must rebuild worker kwargs from `execution_log`, not only from the task row, because the task row does not store selected cases, setup/login instructions, safe custom headers, or URL role metadata.
+- Rerun header rehydration must drop sensitive header names and `[REDACTED]` placeholder values. It may preserve non-sensitive plain headers such as `X-Tenant` or `X-Trace-ID`, but must never replay `Authorization`, `Cookie`, `X-API-Key`, token-like headers, or redacted placeholders from stored logs.
+
+### 4. Validation & Error Matrix
+
+- URL page run with `base_url` override -> stored `target_url` is the page URL; worker receives `ui_seed_url=page_url` and `base_url_override=api_base_url`.
+- Swagger/OpenAPI run with `base_url` override -> source loader may set `target_url` to the API base override.
+- Mixed suite with API and UI cases -> graph routes `tc_generator -> api_runner -> ui_login`.
+- Rerun with stored `api_cases`/`ui_cases` -> new worker task receives those exact cases.
+- Missing stored `source_input` but stored `ui_seed_url` -> rerun uses `ui_seed_url` as the source input fallback.
+- Rerun with stored `auth_headers.Authorization="[REDACTED]"` or old unredacted sensitive headers -> worker kwargs omit those headers.
+
+### 5. Good/Base/Bad Cases
+
+- Good: a user enters `source=https://web/login` and `base_url=https://api`; UI login opens the web page while API tests use the API base.
+- Base: API-only Swagger rerun has no UI seed and executes only API paths.
+- Bad: `target_url` is replaced with the API base during run creation, so login/planning opens `https://api` instead of the page URL.
+
+### 6. Tests Required
+
+- Unit: run target resolver preserves page URL when `base_url` is present for URL input.
+- Unit: `source_loader` keeps URL page `target_url` while preserving `base_url_override`.
+- Unit: suite worker kwargs include selected API/UI cases plus UI seed metadata.
+- Unit: rerun context rehydrates source, cases, setup/login instructions, base URL override, safe custom headers, UI seed, and input type from stored `execution_log`; sensitive or redacted headers are filtered.
+- Unit: tc generator preserves suite-selected cases instead of replacing them.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+if payload.base_url:
+    target_url = payload.base_url
+```
+
+#### Correct
+
+```python
+target_url = source if input_type == "url" else (payload.base_url or source)
+```
+
+#### Wrong
+
+```python
+run_agent_task.delay(new_task.id, objective, target_url, source_input=source_input)
+```
+
+#### Correct
+
+```python
+run_agent_task.delay(new_task.id, objective, target_url, **rerun_context_from_execution_log)
+```
+
+#### Wrong
+
+```python
+headers = json.loads(task.execution_log)["auth_headers"]
+run_agent_task.delay(new_task.id, objective, target_url, auth_headers=headers)
+```
+
+#### Correct
+
+```python
+headers = filter_rehydratable_headers(json.loads(task.execution_log).get("auth_headers"))
+run_agent_task.delay(new_task.id, objective, target_url, auth_headers=headers or None)
+```
+
+## Scenario: Agent-Analyzed UI Execution Context and Bounded Browser Tools
+
+### 1. Scope / Trigger
+
+- Trigger: UI runs start from an entry page plus optional setup instructions, then execute generated or selected Playwright CLI cases.
+- Applies to `app/agent/nodes/ui_test_planner.py`, `app/agent/nodes/ui_runner.py`, `app/tools/playwright_tool.py`, `app/agent/tool_registry.py`, `app/agent/progress.py`, and Run Detail tool rendering.
+- Why code-spec depth is required: setup state, LLM context analysis, browser command execution, persisted evidence, and UI reporting cross agent, tool, storage, and frontend boundaries.
+
+### 2. Signatures
+
+- Tool registry entry:
+  ```python
+  "planner.analyze_ui_execution_context"
+  ```
+- Agent state / execution log field:
+  ```python
+  ui_execution_context_plan: list[dict] | None
+  ```
+- Context decision shape:
+  ```json
+  {
+    "case_index": 0,
+    "use_prepared_context": true,
+    "strip_preparation_steps": true,
+    "intent": "prepared_context_flow",
+    "reason": "Use verified setup state and remove repeated setup commands",
+    "source": "llm"
+  }
+  ```
+- Browser command helper:
+  ```python
+  async def run_playwright_cli_command(command: str, session: str = "default") -> dict
+  ```
+
+### 3. Contracts
+
+- UI runners must analyze each case before execution when verified setup/auth context is available.
+- The analysis must use the case payload, setup instructions, post-setup URL, and post-setup snapshot; it must not depend on a hardcoded site, menu, account, URL, or domain-specific text.
+- `use_prepared_context=true` means the runner restores browser state and opens the post-setup URL before executing the case.
+- `strip_preparation_steps=true` means generated `open entry`, form fill, submit, and setup screenshots are removed so the case starts from the prepared business context.
+- Login/setup validation cases must remain fresh-entry cases so negative login, empty credential, forgotten-password, captcha, or unauthorized checks still exercise the entry flow.
+- Suite-selected UI cases preserve user intent unless the case explicitly requests prepared context.
+- `playwright-cli` subprocess timeouts must kill the subprocess and drain output before returning a timeout result.
+- Tool calls must record context analysis and browser execution so Run Detail can show selected skills, tool counts, and per-case tool history.
+
+### 4. Validation & Error Matrix
+
+- Verified setup + generated business case with repeated setup commands -> restore setup state, strip repeated setup, execute business action.
+- Verified setup + login failure validation case -> do not restore setup state; execute from entry page.
+- Suite-selected UI case without explicit prepared context -> keep original command semantics.
+- LLM context analysis unavailable -> fallback to generic metadata-only rules and record a failed `planner.analyze_ui_execution_context` tool call.
+- `playwright-cli` command exceeds `PLAYWRIGHT_CLI_TIMEOUT_SECONDS` -> kill process, return `status_code=-1`, and continue/fail the case without leaving orphan node/chrome processes.
+
+### 5. Good/Base/Bad Cases
+
+- Good: a login-page run first verifies setup, then the agent plans cases from the authenticated snapshot, records context decisions, and passes UI cases using browser tools.
+- Base: LLM context analysis fails; generic fallback still prevents replaying setup for obvious prepared-context cases and keeps selected suites unchanged.
+- Bad: all legacy cases blindly reuse authenticated context, causing login-form refs to be filled on a dashboard page.
+- Bad: `asyncio.wait_for(proc.communicate())` times out but does not kill the subprocess, leaving `playwright-cli go-back` or Chrome processes running.
+
+### 6. Tests Required
+
+- Unit: tool registry does not include API chain skills for UI-only setup runs.
+- Unit: UI runner keeps login validation cases on the entry page even when setup context exists.
+- Unit: UI runner strips repeated setup commands for authenticated business cases.
+- Integration: historical UI rerun records `ui_execution_context_plan`, `tool_summary`, screenshots, and succeeds when all executed cases pass.
+- Regression: `run_playwright_cli_command` timeout behavior must not leave long-lived command processes.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+if authenticated_setup_commands:
+    raw_commands = [*authenticated_setup_commands, *_strip_leading_navigation(raw_commands)]
+```
+
+#### Correct
+
+```python
+context_decisions = await _analyze_ui_execution_context(state, ui_cases)
+ui_cases = _apply_ui_execution_context_plan(ui_cases, context_decisions)
+```
+
+#### Wrong
+
+```python
+stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+```
+
+#### Correct
+
+```python
+try:
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+except asyncio.TimeoutError:
+    proc.kill()
+    stdout, stderr = await proc.communicate()
+```
+
 ## Common Mistakes
 
 - Don't forget `await` on all DB operations
 - Don't use `session.expire_on_commit=True` (default) — use `expire_on_commit=False`
 - Don't mix sync and async SQLAlchemy patterns
+- Don't overwrite `Task.execution_log` directly during cancellation or progress updates; merge through `app.agent.progress` helpers.
+- Don't pass UI lowercase test types directly into SQLAlchemy enum columns; normalize them first.
+- Don't persist API request headers directly; redact sensitive auth/custom headers before writing or rendering execution logs.
+- Don't collapse page URL and API base URL into one field; keep `target_url`/`ui_seed_url` for browser execution and `base_url_override` for API execution.
+- Don't hardcode UI execution context from a specific website; use `planner.analyze_ui_execution_context` and current snapshots.
+- Don't let timed-out `playwright-cli` subprocesses keep running after returning a timeout result.
