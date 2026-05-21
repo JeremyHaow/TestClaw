@@ -1,21 +1,21 @@
-version: '3.9'
 services:
   db:
     image: pgvector/pgvector:pg16
-    environment:
-      POSTGRES_DB: testclaw
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
+    restart: unless-stopped
+    env_file:
+      - ../.env
     volumes:
       - pgdata:/var/lib/postgresql/data
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
 
   api:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    restart: unless-stopped
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     env_file:
       - ../.env
@@ -31,6 +31,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    restart: unless-stopped
     command: celery -A app.worker.celery_app worker --loglevel=info
     env_file:
       - ../.env
@@ -46,10 +47,24 @@ services:
       dockerfile: frontend/Dockerfile
       args:
         VITE_API_BASE_URL: /api/v1
+    restart: unless-stopped
     depends_on:
       - api
     ports:
-      - '127.0.0.1:15173:5173'
+      - '127.0.0.1:15173:80'
+
+  nginx:
+    image: nginx:1.27-alpine
+    profiles:
+      - edge
+    restart: unless-stopped
+    depends_on:
+      - api
+      - frontend
+    ports:
+      - '${HTTP_PORT:-80}:80'
+    volumes:
+      - ./nginx/testclaw.conf:/etc/nginx/conf.d/default.conf:ro
 
 volumes:
   pgdata:

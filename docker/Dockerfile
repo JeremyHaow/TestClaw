@@ -25,6 +25,11 @@ RUN playwright install chromium --with-deps
 RUN npm install -g @playwright/cli@latest
 RUN playwright-cli install
 
+# Symlink Chromium so playwright-cli can find it as "chrome"
+RUN CHROME_BIN=$(find /root/.cache/ms-playwright -name "chrome" -type f -executable | head -1) && \
+    mkdir -p /opt/google/chrome && \
+    ln -sf "$CHROME_BIN" /opt/google/chrome/chrome
+
 COPY . .
 RUN mkdir -p sandbox
 
