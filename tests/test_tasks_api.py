@@ -9,7 +9,8 @@ def _token(client: TestClient) -> str:
     return login.json()['access_token']
 
 
-def test_create_and_list_tasks():
+def test_create_and_list_tasks(monkeypatch):
+    monkeypatch.setattr("app.api.v1.tasks.run_agent_task.delay", lambda *args, **kwargs: None)
     with TestClient(app) as client:
         token = _token(client)
         headers = {'Authorization': f'Bearer {token}'}
