@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
-  Play, History, Settings2, ChevronLeft, ChevronRight
+  Bot, History, Settings2, ChevronLeft, ChevronRight, LayoutDashboard
 } from 'lucide-vue-next'
 import { useSidebar } from '../composables/useSidebar'
 
@@ -12,8 +12,9 @@ const collapsed = ref(false)
 const { mobileOpen, isMobile, closeMobile } = useSidebar()
 
 const navItems = [
-  { path: '/run', label: '开始测试', icon: Play },
-  { path: '/history', label: '历史记录', icon: History },
+  { path: '/run', label: '测试智能体', icon: Bot },
+  { path: '/history', label: '运行历史', icon: History },
+  { path: '/dashboard', label: '质量仪表盘', icon: LayoutDashboard },
   { path: '/settings', label: '系统设置', icon: Settings2 },
 ]
 
@@ -49,7 +50,10 @@ function navigate(path: string) {
         <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shrink-0">
           <div class="w-4 h-4 border-2 border-white rounded-sm"></div>
         </div>
-        <span class="font-bold text-lg tracking-tight text-gray-900 truncate">TestClaw</span>
+        <div class="min-w-0">
+          <span class="block truncate text-lg font-bold tracking-tight text-gray-900">TestClaw</span>
+          <span class="block truncate text-[10px] font-bold uppercase tracking-widest text-gray-400">Testing Agent</span>
+        </div>
       </div>
       <div v-if="collapsed && !isMobile" class="mx-auto w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shrink-0">
         <div class="w-4 h-4 border-2 border-white rounded-sm"></div>
@@ -64,13 +68,16 @@ function navigate(path: string) {
     </div>
 
     <!-- Main Nav -->
-    <nav class="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+    <nav class="flex-1 px-3 py-4 space-y-1 overflow-y-auto overflow-x-hidden">
       <button
         v-for="item in navItems"
         :key="item.path"
         @click="navigate(item.path)"
-        class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-200 group relative"
-        :class="isActive(item.path) ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'"
+        class="w-full flex items-center rounded-lg transition-all duration-200 group relative"
+        :class="[
+          isActive(item.path) ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900',
+          collapsed && !isMobile ? 'justify-center px-0 py-2.5' : 'gap-3 px-3 py-2.5',
+        ]"
       >
         <component
           :is="item.icon"
@@ -81,7 +88,7 @@ function navigate(path: string) {
         <span v-if="!collapsed || isMobile" class="truncate">{{ item.label }}</span>
         <div
           v-if="collapsed && !isMobile"
-          class="absolute left-full ml-4 px-2 py-1 bg-gray-900 text-white text-[10px] rounded opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-50"
+          class="pointer-events-none fixed left-20 z-50 rounded bg-gray-900 px-2 py-1 text-[10px] text-white opacity-0 transition-opacity group-hover:opacity-100"
         >
           {{ item.label }}
         </div>

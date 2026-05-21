@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import api from '../lib/api'
 import { useToast } from '../composables/useToast'
 import { BookOpen, Plus, Trash2, Search, X } from 'lucide-vue-next'
@@ -16,6 +16,15 @@ const searching = ref(false)
 const newContent = ref('')
 const adding = ref(false)
 const deleteTarget = ref<any>(null)
+
+let searchTimer: ReturnType<typeof setTimeout> | null = null
+
+function debouncedSearch() {
+  if (searchTimer) clearTimeout(searchTimer)
+  searchTimer = setTimeout(doSearch, 300)
+}
+
+onUnmounted(() => { if (searchTimer) clearTimeout(searchTimer) })
 
 async function fetchItems() {
   loading.value = true
@@ -106,7 +115,7 @@ onMounted(fetchItems)
           <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">搜索知识</h3>
           <div class="relative">
             <Search :size="16" class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-            <input v-model="searchQuery" @input="doSearch" placeholder="搜索知识内容..."
+            <input v-model="searchQuery" @input="debouncedSearch" placeholder="搜索知识内容..."
               class="w-full pl-9 pr-8 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:bg-white transition-all" />
             <button v-if="searchQuery" @click="clearSearch"
               class="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-gray-200 text-gray-400">

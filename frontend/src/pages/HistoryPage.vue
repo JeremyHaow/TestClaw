@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, computed } from 'vue'
+import { onMounted, onUnmounted, ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '../lib/api'
 import StatusBadge from '../components/StatusBadge.vue'
@@ -47,7 +47,29 @@ async function deleteRun(id: string, e: Event) {
   }
 }
 
-onMounted(fetchRuns)
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
+function startPolling() {
+  stopPolling()
+  // Auto-refresh if there are running/queued tasks
+  pollTimer = setInterval(() => {
+    const hasActive = runs.value.some((r: any) => ['queued', 'running'].includes(r.status))
+    if (hasActive) fetchRuns()
+  }, 5000)
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+onMounted(() => {
+  fetchRuns()
+  startPolling()
+})
+onUnmounted(() => stopPolling())
 </script>
 
 <template>
@@ -75,9 +97,9 @@ onMounted(fetchRuns)
       <select v-model="filterType" @change="page = 1; fetchRuns()"
         class="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:border-blue-500">
         <option value="">全部类型</option>
-        <option value="auto">自动</option>
-        <option value="api">API</option>
-        <option value="ui">UI</option>
+        <option value="AUTO">自动</option>
+        <option value="API">API</option>
+        <option value="UI">UI</option>
       </select>
       <span class="text-xs text-gray-400 ml-auto">{{ total }} 条记录</span>
     </div>

@@ -7,7 +7,7 @@ import Pagination from '../components/Pagination.vue'
 import EmptyState from '../components/EmptyState.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { FileCode, Pencil, Trash2, X, Check, Square, CheckSquare, MinusSquare } from 'lucide-vue-next'
+import { FileCode, Pencil, Trash2, X, Check, Square, CheckSquare, MinusSquare, Plus } from 'lucide-vue-next'
 
 const toast = useToast()
 
@@ -25,6 +25,17 @@ const confirmDelete = ref<string | null>(null)
 const confirmBulkDelete = ref(false)
 const filterPriority = ref('')
 const filterCategory = ref('')
+
+// Create form state
+const showCreate = ref(false)
+const createForm = reactive({
+  title: '',
+  category: 'FUNCTIONAL',
+  priority: 'P1',
+  steps: [''],
+  expected: [''],
+})
+const creating = ref(false)
 
 // --- Computed ---
 const allSelected = computed(() => items.value.length > 0 && items.value.every((i) => selectedIds.value.has(i.id)))
@@ -132,6 +143,45 @@ function saveEdit(id: string) {
   })
 }
 
+// --- Create ---
+function openCreate() {
+  createForm.title = ''
+  createForm.category = 'FUNCTIONAL'
+  createForm.priority = 'P1'
+  createForm.steps = ['']
+  createForm.expected = ['']
+  showCreate.value = true
+}
+
+function addStep() { createForm.steps.push('') }
+function removeStep(i: number) { createForm.steps.splice(i, 1) }
+function addExpected() { createForm.expected.push('') }
+function removeExpected(i: number) { createForm.expected.splice(i, 1) }
+
+async function submitCreate() {
+  if (!createForm.title.trim()) { toast.warning('标题不能为空'); return }
+  const steps = createForm.steps.map(s => s.trim()).filter(Boolean)
+  const expected = createForm.expected.map(s => s.trim()).filter(Boolean)
+  if (!steps.length) { toast.warning('至少需要一个测试步骤'); return }
+  creating.value = true
+  try {
+    await api.post('/test-cases', {
+      title: createForm.title.trim(),
+      category: createForm.category,
+      priority: createForm.priority,
+      steps,
+      expected,
+    })
+    toast.success('用例创建成功')
+    showCreate.value = false
+    await fetchItems()
+  } catch (e: any) {
+    toast.error('创建失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    creating.value = false
+  }
+}
+
 // --- Watchers ---
 watch([search, filterPriority, filterCategory], () => {
   page.value = 1
@@ -153,7 +203,13 @@ onMounted(fetchItems)
         <h2 class="text-2xl font-bold tracking-tight text-gray-900">用例库</h2>
         <p class="text-gray-500 text-sm">管理和生成测试用例，支持手动创建与 AI 自动生成。</p>
       </div>
-      <span class="text-xs text-gray-400 font-mono">{{ total }} 条</span>
+      <div class="flex items-center gap-3">
+        <span class="text-xs text-gray-400 font-mono">{{ total }} 条</span>
+        <button @click="openCreate"
+          class="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-bold transition-all shadow-md shadow-blue-600/10">
+          <Plus :size="16" /> 创建用例
+        </button>
+      </div>
     </div>
 
     <!-- Filters -->
@@ -387,5 +443,76 @@ onMounted(fetchItems)
       @confirm="bulkDelete"
       @cancel="confirmBulkDelete = false"
     />
+
+    <!-- Create Modal -->
+    <Teleport to="body">
+      <div v-if="showCreate" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" @click.self="showCreate = false">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[85vh] overflow-y-auto">
+          <div class="sticky top-0 bg-white border-b border-gray-100 px-6 py-4 flex items-center justify-between rounded-t-2xl">
+            <h3 class="text-lg font-bold text-gray-900">创建测试用例</h3>
+            <button @click="showCreate = false" class="p-1 text-gray-400 hover:text-gray-600 transition-colors"><X :size="20" /></button>
+          </div>
+          <div class="p-6 space-y-4">
+            <div>
+              <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">标题 *</label>
+              <input v-model="createForm.title" placeholder="用例标题"
+                class="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:bg-white transition-all" />
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">分类</label>
+                <select v-model="createForm.category" class="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 transition-all">
+                  <option value="FUNCTIONAL">FUNCTIONAL</option>
+                  <option value="UI">UI</option>
+                  <option value="API">API</option>
+                  <option value="PERFORMANCE">PERFORMANCE</option>
+                  <option value="SECURITY">SECURITY</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">优先级</label>
+                <select v-model="createForm.priority" class="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 transition-all">
+                  <option value="P0">P0 - 阻塞</option>
+                  <option value="P1">P1 - 严重</option>
+                  <option value="P2">P2 - 一般</option>
+                  <option value="P3">P3 - 轻微</option>
+                </select>
+              </div>
+            </div>
+            <div>
+              <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">测试步骤 *</label>
+              <div class="space-y-2">
+                <div v-for="(step, i) in createForm.steps" :key="i" class="flex items-center gap-2">
+                  <span class="text-xs text-gray-400 font-mono w-5">{{ i + 1 }}</span>
+                  <input v-model="createForm.steps[i]" :placeholder="`步骤 ${i + 1}`"
+                    class="flex-1 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:bg-white transition-all" />
+                  <button v-if="createForm.steps.length > 1" @click="removeStep(i)" class="p-1 text-gray-400 hover:text-red-500 transition-colors"><X :size="14" /></button>
+                </div>
+                <button @click="addStep" class="text-xs text-blue-600 hover:text-blue-800 font-bold transition-colors">+ 添加步骤</button>
+              </div>
+            </div>
+            <div>
+              <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">预期结果</label>
+              <div class="space-y-2">
+                <div v-for="(exp, i) in createForm.expected" :key="i" class="flex items-center gap-2">
+                  <span class="text-xs text-gray-400 font-mono w-5">{{ i + 1 }}</span>
+                  <input v-model="createForm.expected[i]" :placeholder="`预期结果 ${i + 1}`"
+                    class="flex-1 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:bg-white transition-all" />
+                  <button v-if="createForm.expected.length > 1" @click="removeExpected(i)" class="p-1 text-gray-400 hover:text-red-500 transition-colors"><X :size="14" /></button>
+                </div>
+                <button @click="addExpected" class="text-xs text-blue-600 hover:text-blue-800 font-bold transition-colors">+ 添加预期结果</button>
+              </div>
+            </div>
+          </div>
+          <div class="sticky bottom-0 bg-white border-t border-gray-100 px-6 py-4 flex justify-end gap-3 rounded-b-2xl">
+            <button @click="showCreate = false" class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg text-sm font-bold transition-all">取消</button>
+            <button @click="submitCreate" :disabled="creating"
+              class="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-sm font-bold transition-all shadow-md shadow-blue-600/10">
+              {{ creating ? '创建中...' : '创建' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>

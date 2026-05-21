@@ -118,7 +118,7 @@ const statCards = [
     <div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
       <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
         <h3 class="font-semibold text-gray-900">最近执行记录</h3>
-        <button @click="router.push('/reports')" class="text-xs font-bold text-blue-600 hover:underline px-3 py-1">
+        <button @click="router.push('/history')" class="text-xs font-bold text-blue-600 hover:underline px-3 py-1">
           查看全部
         </button>
       </div>
@@ -136,7 +136,7 @@ const statCards = [
             <tr
               v-for="task in stats.recent_tasks"
               :key="task.id"
-              @click="router.push(`/tasks/${task.id}`)"
+              @click="router.push(`/runs/${task.id}`)"
               class="hover:bg-gray-50 transition-colors cursor-pointer"
             >
               <td class="px-6 py-4">

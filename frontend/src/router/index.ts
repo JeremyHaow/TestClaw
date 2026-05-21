@@ -10,6 +10,7 @@ import DocumentsPage from '../pages/DocumentsPage.vue'
 import EnvironmentsPage from '../pages/EnvironmentsPage.vue'
 import TestCasesPage from '../pages/TestCasesPage.vue'
 import KnowledgePage from '../pages/KnowledgePage.vue'
+import DashboardPage from '../pages/DashboardPage.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -20,7 +21,7 @@ const router = createRouter({
       component: AdminLayout,
       children: [
         { path: '', redirect: '/run' },
-        { path: 'dashboard', redirect: '/run' },
+        { path: 'dashboard', component: DashboardPage },
         { path: 'run', component: RunPage },
         { path: 'runs/:id', component: RunDetailPage },
         { path: 'history', component: HistoryPage },

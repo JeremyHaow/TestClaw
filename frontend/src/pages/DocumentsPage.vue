@@ -14,6 +14,7 @@ const loading = ref(true)
 const form = reactive({ name: '', raw_content: '', format: 'openapi' })
 const uploading = ref(false)
 const dragOver = ref(false)
+const fileInput = ref<HTMLInputElement | null>(null)
 
 // Inline edit state
 const editingId = ref<string | null>(null)
@@ -158,7 +159,7 @@ onMounted(fetchItems)
           @drop.prevent="handleDrop"
           class="border-2 border-dashed rounded-xl p-8 text-center transition-all cursor-pointer"
           :class="dragOver ? 'border-blue-400 bg-blue-50' : 'border-gray-300 hover:border-blue-300'"
-          @click="($refs.fileInput as HTMLInputElement)?.click()"
+          @click="fileInput?.click()"
         >
           <Upload :size="32" class="mx-auto mb-3" :class="dragOver ? 'text-blue-500' : 'text-gray-400'" />
           <p class="text-sm font-bold" :class="dragOver ? 'text-blue-700' : 'text-gray-600'">
