@@ -1,12 +1,11 @@
-import json
-import time
 import logging
+import time
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.core.dependencies import CurrentUser, DbSession
+from app.core.dependencies import CurrentUser
 
 logger = logging.getLogger(__name__)
 router = APIRouter()

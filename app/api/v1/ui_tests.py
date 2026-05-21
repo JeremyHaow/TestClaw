@@ -6,7 +6,6 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
-from app.agent.prompts import CODER_PROMPT
 from app.core.dependencies import CurrentUser, DbSession
 from app.core.llm_gateway import llm_gateway
 from app.tools.playwright_tool import (
@@ -31,16 +30,14 @@ PLAYWRIGHT_CLI_PROMPT = """你是 Playwright CLI 测试专家。根据用户的�
 - playwright-cli snapshot                            # 获取页面快照
 - playwright-cli goto <url>                          # 导航到 URL
 - playwright-cli select <selector> <value>           # 下拉选择
-- playwright-cli check <selector>                    # 勾选
-- playwright-cli uncheck <selector>                  # 取消勾选
 - playwright-cli hover <selector>                    # 悬停
-- playwright-cli eval <expression>                   # 执行 JS
 
 严格要求：
 1. 每行一个命令，不要输出 Markdown 标记
 2. 第一行必须是 playwright-cli open <url>
 3. 用 snapshot 查看页面结构后再操作
 4. 用 screenshot 记录关键步骤
+5. 禁止使用 wait、sleep、pause、assert、expect、eval 等伪命令或非支持命令
 
 测试需求：{test_plan}
 """
@@ -101,7 +98,11 @@ async def run_cli(payload: RunCliRequest, _: CurrentUser):
 async def run_cli_stream(payload: RunCliRequest, _: CurrentUser):
     if not payload.script.strip():
         raise HTTPException(status_code=400, detail="Script cannot be empty")
-    lines = [l.strip() for l in payload.script.strip().split("\n") if l.strip() and not l.strip().startswith("#")]
+    lines = [
+        line.strip()
+        for line in payload.script.strip().split("\n")
+        if line.strip() and not line.strip().startswith("#")
+    ]
 
     async def event_generator():
         async for chunk in run_playwright_cli_stream(lines):

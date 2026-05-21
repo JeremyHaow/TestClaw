@@ -1,6 +1,5 @@
 import httpx
 from fastapi import APIRouter, HTTPException, UploadFile, File as FastAPIFile
-from sqlalchemy import select
 
 from app.core.dependencies import CurrentUser, DbSession
 from app.schemas.document import DocumentCreate, DocumentRead, DocumentUpdate
