@@ -620,6 +620,27 @@ const ragRetrieval = computed(() => run.value?.rag_retrieval || null)
 const ragSources = computed(() => ensureList(ragRetrieval.value?.sources))
 const ragDisplayStatus = computed(() => ragRetrieval.value?.status || 'metadata_unavailable')
 const ragDisplayMode = computed(() => ragRetrieval.value?.mode || 'unavailable')
+const ragBadgeLabel = computed(() => {
+  const mode = String(ragDisplayMode.value || '').toLowerCase()
+  const status = String(ragDisplayStatus.value || '').toLowerCase()
+  if (!ragRetrieval.value && run.value?.rag_context) return 'RAG context-only'
+  if (mode === 'vector') {
+    if (status === 'matched') return `Vector RAG ${ragSources.value.length} source(s)`
+    if (status === 'empty') return 'Vector RAG no match'
+    return `Vector RAG ${ragDisplayStatus.value}`
+  }
+  if (mode === 'lexical_fallback') return `Lexical fallback ${ragSources.value.length} source(s)`
+  if (status === 'metadata_unavailable') return 'RAG metadata unavailable'
+  return `RAG ${ragDisplayStatus.value}`
+})
+const ragBadgeClass = computed(() => {
+  const mode = String(ragDisplayMode.value || '').toLowerCase()
+  const status = String(ragDisplayStatus.value || '').toLowerCase()
+  if (mode === 'vector' && status === 'matched') return 'bg-emerald-50 text-emerald-700 border-emerald-100'
+  if (mode === 'vector') return 'bg-blue-50 text-blue-700 border-blue-100'
+  if (mode === 'lexical_fallback') return 'bg-amber-50 text-amber-700 border-amber-100'
+  return 'bg-gray-50 text-gray-600 border-gray-200'
+})
 const ragPanelTitle = computed(() => {
   const mode = String(ragDisplayMode.value || '').toLowerCase()
   if (mode === 'vector') return 'Vector RAG Retrieval'
@@ -896,8 +917,8 @@ watch(visibleTabs, (tabs) => {
       <span v-if="run.input_type" class="px-2 py-1 bg-blue-50 text-blue-600 rounded-lg text-[10px] font-bold border border-blue-100">
         {{ run.input_type }}
       </span>
-      <span v-if="hasRagSurface" class="px-2 py-1 bg-emerald-50 text-emerald-700 rounded-lg text-[10px] font-bold border border-emerald-100">
-        RAG {{ ragSources.length ? `${ragSources.length} sources` : ragDisplayStatus }}
+      <span v-if="hasRagSurface" class="px-2 py-1 rounded-lg text-[10px] font-bold border" :class="ragBadgeClass">
+        {{ ragBadgeLabel }}
       </span>
       <span v-if="run.created_at" class="px-2 py-1 bg-gray-50 text-gray-500 rounded-lg text-[10px] font-mono">
         {{ new Date(run.created_at).toLocaleString('zh-CN') }}

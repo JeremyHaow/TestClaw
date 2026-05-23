@@ -436,10 +436,15 @@ onMounted(fetchItems)
         </section>
 
         <section
+          role="button"
+          tabindex="0"
+          aria-label="上传接口文档文件"
           @dragover.prevent="dragOver = true"
           @dragleave="dragOver = false"
           @drop.prevent="handleDrop"
           @click="fileInput?.click()"
+          @keydown.enter.prevent="fileInput?.click()"
+          @keydown.space.prevent="fileInput?.click()"
           class="cursor-pointer rounded-lg border-2 border-dashed p-5 text-center transition-all"
           :class="dragOver ? 'border-blue-400 bg-blue-50' : 'border-gray-300 bg-white hover:border-blue-300'"
         >
@@ -603,6 +608,7 @@ onMounted(fetchItems)
                 <div class="flex items-center gap-1">
                   <button
                     type="button"
+                    aria-label="上一页端点"
                     @click="previousEndpointPage"
                     :disabled="endpointPage <= 1"
                     class="rounded-lg p-1.5 text-gray-500 transition-all hover:bg-gray-100 disabled:opacity-30"
@@ -612,6 +618,7 @@ onMounted(fetchItems)
                   <span class="px-2 text-xs font-mono text-gray-400">{{ endpointPage }} / {{ endpointTotalPages }}</span>
                   <button
                     type="button"
+                    aria-label="下一页端点"
                     @click="nextEndpointPage"
                     :disabled="endpointPage >= endpointTotalPages"
                     class="rounded-lg p-1.5 text-gray-500 transition-all hover:bg-gray-100 disabled:opacity-30"

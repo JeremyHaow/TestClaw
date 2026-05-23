@@ -36,6 +36,8 @@ function logout() {
     <div class="flex min-w-0 items-center gap-3">
       <button
         v-if="isMobile"
+        type="button"
+        aria-label="打开导航菜单"
         @click="toggleMobile"
         class="p-2 -ml-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
       >
@@ -50,6 +52,7 @@ function logout() {
     <div class="flex shrink-0 items-center gap-2">
       <button
         v-if="showRunAction"
+        type="button"
         @click="goTo('/run')"
         class="hidden items-center justify-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-bold text-gray-700 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 sm:inline-flex"
       >
@@ -57,6 +60,7 @@ function logout() {
       </button>
       <button
         v-if="showHistoryAction"
+        type="button"
         @click="goTo('/history')"
         class="hidden items-center justify-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-bold text-gray-700 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 md:inline-flex"
       >
@@ -69,6 +73,8 @@ function logout() {
         </span>
         <span v-if="auth.user" class="hidden max-w-32 truncate text-xs font-bold text-gray-500 md:inline">{{ auth.user.username }}</span>
         <button
+          type="button"
+          aria-label="退出登录"
           @click="logout"
           class="inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg bg-gray-900 px-3 py-1.5 text-xs font-bold text-white transition-colors hover:bg-black lg:px-4"
         >

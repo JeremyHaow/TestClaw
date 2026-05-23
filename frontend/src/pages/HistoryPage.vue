@@ -168,10 +168,20 @@ onUnmounted(() => stopPolling())
             <div class="text-xs font-mono text-gray-400 mt-0.5 truncate">{{ run.target_url }}</div>
           </div>
           <div class="flex shrink-0 items-center gap-1 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
-            <button @click="deleteRun(run.id, $event)" class="p-2 text-gray-400 hover:text-red-600 transition-colors">
+            <button
+              type="button"
+              :aria-label="`删除运行 ${run.objective || run.id}`"
+              @click="deleteRun(run.id, $event)"
+              class="p-2 text-gray-400 hover:text-red-600 transition-colors"
+            >
               <Trash2 :size="14" />
             </button>
-            <button class="p-2 text-gray-400 group-hover:text-blue-600 transition-colors">
+            <button
+              type="button"
+              :aria-label="`查看运行 ${run.objective || run.id}`"
+              @click.stop="router.push(`/runs/${run.id}`)"
+              class="p-2 text-gray-400 group-hover:text-blue-600 transition-colors"
+            >
               <Eye :size="16" />
             </button>
           </div>
