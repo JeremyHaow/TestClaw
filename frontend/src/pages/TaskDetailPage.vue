@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import api from '../lib/api'
+import api, { apiUrl } from '../lib/api'
 import { useTaskStore } from '../stores/tasks'
 import StatusBadge from '../components/StatusBadge.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
@@ -19,8 +19,7 @@ let eventSource: EventSource | null = null
 function connectSSE(taskId: string) {
   disconnectSSE()
   const token = localStorage.getItem('testclaw_token')
-  const url = `/api/v1/tasks/${taskId}/stream`
-  eventSource = new EventSource(token ? `${url}?token=${token}` : url)
+  eventSource = new EventSource(apiUrl(`/tasks/${taskId}/stream`, { token }))
   eventSource.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data)

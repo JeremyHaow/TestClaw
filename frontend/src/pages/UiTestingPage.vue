@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, nextTick } from 'vue'
-import api from '../lib/api'
+import api, { apiUrl } from '../lib/api'
 import { Sparkles, Play, Terminal, Loader2, Camera, Globe, RotateCcw } from 'lucide-vue-next'
 
 const url = ref('')
@@ -42,7 +42,7 @@ async function executeScript() {
   logLines.value = []
 
   try {
-    const response = await fetch('/api/v1/ui-tests/run-cli/stream', {
+    const response = await fetch(apiUrl('/ui-tests/run-cli/stream'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
