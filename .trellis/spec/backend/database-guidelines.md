@@ -828,7 +828,7 @@ except asyncio.TimeoutError:
 
 - Trigger: agent runs should make the knowledge base visibly affect planning instead of leaving RAG as an isolated settings page.
 - Applies to `app/agent/graph.py`, `app/agent/nodes/knowledge_retriever.py`, `app/agent/nodes/planner.py`, `app/agent/nodes/tc_generator.py`, `app/agent/progress.py`, run detail parsing, and the Run Detail tools/RAG surface.
-- Purpose: retrieve safe historical test knowledge before planning, inject it into LangChain prompts, persist a redacted retrieval summary, and show testers what context influenced the run.
+- Purpose: vector-retrieve safe historical test knowledge before planning, inject it into LangChain prompts, persist a redacted retrieval summary, and show testers what context influenced the run without mislabeling lexical fallback as vector RAG.
 
 ### 2. Signatures
 
@@ -841,6 +841,13 @@ except asyncio.TimeoutError:
   rag_context: str | None
   rag_retrieval: dict | None
   ```
+- Knowledge storage:
+  ```python
+  KnowledgeEntry.embedding: JSON | None  # list[float] generated from redacted content
+  DEFAULT_EMBEDDING_MODEL=text-embedding-3-small
+  await llm_gateway.get_embeddings(db)
+  await embedding_service.embed_document(db, content)
+  ```
 - Tool capability:
   ```text
   memory.retrieve_rag_context
@@ -852,10 +859,14 @@ except asyncio.TimeoutError:
 
 ### 3. Contracts
 
-- `knowledge_retriever` reads recent `KnowledgeEntry` rows, scores them against objective, target, source input, input type, test type, and parsed endpoint hints.
+- `knowledge_service.create(...)` and `knowledge_sink` attempt to generate and store embeddings for new knowledge entries through the configured OpenAI-compatible provider path. Content must be redacted before it is sent to an embedding provider.
+- `knowledge_retriever` builds a redacted query from objective, target, source input, input type, test type, and parsed endpoint hints, computes a query embedding, and scores recent `KnowledgeEntry.embedding` vectors with cosine similarity.
+- If an embedding provider is available, `knowledge_retriever` may backfill missing entry embeddings for the bounded candidate set before scoring.
+- Lexical token overlap is not the primary RAG implementation. It may run only as an explicit fallback with `mode="lexical_fallback"` and `status="fallback_lexical"` when vector retrieval cannot be configured or no usable vectors are available.
 - Retrieval runs after source loading so parsed API paths can influence matching, and before planner/case generation so prompts can receive `rag_context`.
-- `rag_retrieval` is a JSON object with at least `status`, `query`, `match_count`, `sources`, and `effect`.
-- `sources[]` may include safe identifiers, score, snippet, source run id, and created timestamp. Snippets must be redacted before persistence.
+- `rag_retrieval` is a JSON object with at least `status`, `mode`, `query`, `match_count`, `vector_source_count`, `fallback_reason`, `sources`, and `effect`. It may include `embedding_backfill_count`.
+- `status="matched"` is valid only for vector matches when `mode="vector"`. Fallback must be labeled `status="fallback_lexical"` or `status="unavailable"`.
+- `sources[]` may include safe identifiers, score/similarity, retrieval mode, snippet, source run id, and created timestamp. Snippets must be redacted before persistence.
 - Prompt templates for planner and case generation must accept `rag_context`; fallback text is required when no relevant knowledge exists.
 - Run detail and SSE snapshots may expose `rag_retrieval` and `rag_context` only after existing redaction helpers have processed execution logs.
 - Tool/skill surfaces should include `rag-knowledge-retrieval` only when a run has retrieval state or injected context.
@@ -863,22 +874,26 @@ except asyncio.TimeoutError:
 ### 4. Validation & Error Matrix
 
 - No DB session -> `rag_retrieval.status="skipped"`, graph continues.
-- DB session but no matching entries -> `status="empty"`, planner receives fallback context.
-- Matching entries found -> `status="matched"`, `rag_context` contains bounded redacted snippets.
+- DB session but no entries -> `status="empty"`, `mode="vector"` if the embedding provider is usable; planner receives fallback context.
+- Matching vector entries found -> `status="matched"`, `mode="vector"`, `rag_context` contains bounded redacted snippets.
+- No OpenAI-compatible embedding provider / empty query vector -> `status="unavailable"` when nothing matches fallback, or `status="fallback_lexical"` when explicit lexical fallback context is used.
+- Legacy entries without embeddings -> backfill embeddings when the provider is available; if backfill fails, expose `fallback_reason` and do not claim vector retrieval.
 - Retrieval exception -> `status="error"`, graph continues without blocking the run.
-- Legacy unredacted knowledge content -> persisted snippets/context contain `[REDACTED]` for credentials and secret-looking values.
+- Legacy unredacted knowledge content -> embedding input, persisted snippets, and context contain `[REDACTED]` for credentials and secret-looking values.
 
 ### 5. Good/Base/Bad Cases
 
-- Good: a checkout regression run retrieves a prior checkout failure note, planner/case generator receive that note, and Run Detail shows RAG source count and snippets.
-- Base: a new target has no matching knowledge; the run still plans from live input and the UI says no relevant prior knowledge matched.
-- Bad: RAG page text claims runtime influence but no graph node injects context into prompts.
+- Good: a checkout regression run vector-matches a prior checkout failure note, planner/case generator receive that note, and Run Detail shows mode, vector source count, source snippets, and similarity scores.
+- Base: a new target has no similar vector knowledge; the run still plans from live input and the UI says vector retrieval found no similar prior knowledge.
+- Base: no embedding provider is configured; Run Detail says vector retrieval is unavailable or explicitly shows lexical fallback with the reason.
+- Bad: RAG page text claims vector runtime influence while the graph uses only keyword matching.
 - Bad: raw passwords, tokens, cookies, Playwright fill/type values, or auth headers appear in `rag_context`, `rag_retrieval.sources[]`, SSE, or Run Detail.
 
 ### 6. Tests Required
 
-- Unit: `knowledge_retriever.run(...)` sets `rag_context` and `rag_retrieval.status="matched"` for relevant knowledge.
-- Unit: retrieved context/snippets redact secret-looking values.
+- Unit: `knowledge_retriever.run(...)` chooses the highest cosine-similarity knowledge vector and sets `rag_retrieval.status="matched"` with `mode="vector"`.
+- Unit: embedding input and retrieved context/snippets redact secret-looking values.
+- Unit: embedding-provider unavailability sets `status="fallback_lexical"` or `status="unavailable"` with `fallback_reason` and `vector_source_count=0`.
 - Unit: skill selection includes `rag-knowledge-retrieval` only when retrieval/context exists.
 - Unit: graph imports and compiles with `knowledge_retriever` between source loading and planning.
 - Frontend build: Run Page and Run Detail compile with RAG architecture and retrieval surfaces.
@@ -889,7 +904,9 @@ except asyncio.TimeoutError:
 
 ```python
 graph.add_edge("source_loader", "planner")
-prompt = PLANNER_PROMPT.format(..., rag_context="No additional context")
+scored = lexical_overlap(query, recent_knowledge)
+state["rag_retrieval"] = {"status": "matched", "sources": scored}
+prompt = PLANNER_PROMPT.format(..., rag_context=context)
 ```
 
 #### Correct
@@ -897,6 +914,8 @@ prompt = PLANNER_PROMPT.format(..., rag_context="No additional context")
 ```python
 graph.add_edge("source_loader", "knowledge_retriever")
 graph.add_edge("knowledge_retriever", "planner")
+query_vector = await embedding_service.embed_query_with_client(client, query)
+sources = cosine_similarity(query_vector, stored_knowledge_embeddings)
 prompt = PLANNER_PROMPT.format(..., rag_context=state.get("rag_context") or "No relevant prior testing knowledge")
 ```
 
@@ -912,3 +931,4 @@ prompt = PLANNER_PROMPT.format(..., rag_context=state.get("rag_context") or "No 
 - Don't hardcode UI execution context from a specific website; use `planner.analyze_ui_execution_context` and current snapshots.
 - Don't let timed-out `playwright-cli` subprocesses keep running after returning a timeout result.
 - Don't describe RAG as runtime behavior unless `knowledge_retriever` persists `rag_retrieval` and injects `rag_context` before planning.
+- Don't describe keyword overlap as vector RAG. If embeddings are unavailable, expose `mode="lexical_fallback"` or `mode="unavailable"` with `fallback_reason`.

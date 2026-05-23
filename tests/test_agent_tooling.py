@@ -8,6 +8,7 @@ from app.agent.nodes.ui_runner import _build_ui_case_batches
 from app.agent.tool_registry import build_tool_registry, select_skills_for_state
 from app.core.redaction import REDACTED_VALUE
 from app.services.api_auth import AuthResolution
+from app.services.embedding_service import EmbeddingService, EmbeddingUnavailableError
 from app.tools.mock_data import generate_mock_json_body
 
 
@@ -123,7 +124,37 @@ def test_tool_registry_selects_rag_skill_after_retrieval() -> None:
 
 
 @pytest.mark.asyncio
-async def test_knowledge_retriever_sets_redacted_rag_context() -> None:
+async def test_embedding_service_redacts_text_before_provider() -> None:
+    class FakeClient:
+        embedded_texts: list[str]
+
+        async def aembed_documents(self, texts):
+            self.embedded_texts = texts
+            return [[1.0, 0.0]]
+
+    client = FakeClient()
+    vectors = await EmbeddingService().embed_documents_with_client(
+        client,
+        ["Checkout failed with password=secret-token"],
+    )
+
+    assert vectors == [[1.0, 0.0]]
+    assert "secret-token" not in client.embedded_texts[0]
+    assert "[REDACTED]" in client.embedded_texts[0]
+
+
+@pytest.mark.asyncio
+async def test_knowledge_retriever_uses_vector_similarity_and_redacts_context(monkeypatch) -> None:
+    class FakeEmbeddingService:
+        async def get_client(self, _db):
+            return object()
+
+        async def embed_query_with_client(self, _client, _query):
+            return [1.0, 0.0]
+
+        async def embed_documents_with_client(self, _client, _texts):
+            raise AssertionError("stored embeddings should be used")
+
     class FakeResult:
         def scalars(self):
             return [
@@ -131,12 +162,14 @@ async def test_knowledge_retriever_sets_redacted_rag_context() -> None:
                     id="knowledge-1",
                     source_script_id="run-1",
                     content="Checkout failure root cause password=secret-token",
+                    embedding=[1.0, 0.0],
                     created_at=datetime(2026, 5, 23),
                 ),
                 SimpleNamespace(
                     id="knowledge-2",
                     source_script_id=None,
                     content="Unrelated profile note",
+                    embedding=[0.0, 1.0],
                     created_at=datetime(2026, 5, 22),
                 ),
             ]
@@ -144,6 +177,8 @@ async def test_knowledge_retriever_sets_redacted_rag_context() -> None:
     class FakeDb:
         async def execute(self, _stmt):
             return FakeResult()
+
+    monkeypatch.setattr(knowledge_retriever, "embedding_service", FakeEmbeddingService())
 
     state = await knowledge_retriever.run(
         {
@@ -158,10 +193,58 @@ async def test_knowledge_retriever_sets_redacted_rag_context() -> None:
     )
 
     assert state["rag_retrieval"]["status"] == "matched"
+    assert state["rag_retrieval"]["mode"] == "vector"
+    assert state["rag_retrieval"]["vector_source_count"] == 2
     assert state["rag_retrieval"]["sources"][0]["id"] == "knowledge-1"
+    assert state["rag_retrieval"]["sources"][0]["mode"] == "vector"
     assert "secret-token" not in state["rag_context"]
     assert "[REDACTED]" in state["rag_context"]
     assert "rag-knowledge-retrieval" in {skill["name"] for skill in state["skill_plan"]}
+
+
+@pytest.mark.asyncio
+async def test_knowledge_retriever_marks_lexical_fallback_when_embeddings_unavailable(
+    monkeypatch,
+) -> None:
+    class FakeEmbeddingService:
+        async def get_client(self, _db):
+            raise EmbeddingUnavailableError("No active OpenAI-compatible embedding provider configured")
+
+    class FakeResult:
+        def scalars(self):
+            return [
+                SimpleNamespace(
+                    id="knowledge-1",
+                    source_script_id="run-1",
+                    content="Checkout regression failed on cart total",
+                    embedding=None,
+                    created_at=datetime(2026, 5, 23),
+                )
+            ]
+
+    class FakeDb:
+        async def execute(self, _stmt):
+            return FakeResult()
+
+    monkeypatch.setattr(knowledge_retriever, "embedding_service", FakeEmbeddingService())
+
+    state = await knowledge_retriever.run(
+        {
+            "db_session": FakeDb(),
+            "objective": "checkout regression",
+            "target_url": "https://shop.example.test/checkout",
+            "source_input": "https://shop.example.test/checkout",
+            "test_type": "ui",
+            "input_type": "url",
+            "workflow_steps": [],
+        }
+    )
+
+    assert state["rag_retrieval"]["status"] == "fallback_lexical"
+    assert state["rag_retrieval"]["mode"] == "lexical_fallback"
+    assert state["rag_retrieval"]["vector_source_count"] == 0
+    assert "embedding provider" in state["rag_retrieval"]["fallback_reason"]
+    assert state["rag_retrieval"]["sources"][0]["mode"] == "lexical_fallback"
 
 
 def test_ui_runner_adds_smart_waits_after_actions() -> None:

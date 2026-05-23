@@ -4,12 +4,21 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.knowledge import KnowledgeEntry
+from app.services.embedding_service import EmbeddingUnavailableError, embedding_service
 
 logger = logging.getLogger(__name__)
 
 class KnowledgeService:
     async def create(self, db: AsyncSession, content: str, source_script_id: str | None = None) -> KnowledgeEntry:
-        entry = KnowledgeEntry(content=content, source_script_id=source_script_id)
+        embedding: list[float] | None = None
+        try:
+            embedding = await embedding_service.embed_document(db, content)
+        except EmbeddingUnavailableError as exc:
+            logger.info("Knowledge embedding skipped: %s", exc)
+        except Exception as exc:
+            logger.warning("Knowledge embedding failed: %s", exc)
+
+        entry = KnowledgeEntry(content=content, embedding=embedding, source_script_id=source_script_id)
         db.add(entry)
         await db.commit()
         await db.refresh(entry)
@@ -31,7 +40,7 @@ class KnowledgeService:
         return True
 
     async def search(self, db: AsyncSession, query: str, limit: int = 10) -> list[KnowledgeEntry]:
-        """Simple text search - searches content field for the query string."""
+        """Management UI text search; runtime RAG uses vector retrieval."""
         stmt = select(KnowledgeEntry).where(
             KnowledgeEntry.content.ilike(f"%{query}%")
         ).order_by(KnowledgeEntry.created_at.desc()).limit(limit)

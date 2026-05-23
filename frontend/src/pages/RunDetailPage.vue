@@ -618,6 +618,39 @@ const skillPlan = computed(() => ensureList(run.value?.skill_plan || run.value?.
 const toolSummary = computed(() => run.value?.tool_summary || run.value?.final_report?.tool_summary || run.value?.artifacts?.tool_summary || null)
 const ragRetrieval = computed(() => run.value?.rag_retrieval || null)
 const ragSources = computed(() => ensureList(ragRetrieval.value?.sources))
+function ragModeLabel(mode: string) {
+  const value = String(mode || '').toLowerCase()
+  if (value === 'vector') return 'Vector'
+  if (value === 'lexical_fallback') return 'Lexical fallback'
+  if (value === 'unavailable') return 'Unavailable'
+  if (value === 'skipped') return 'Skipped'
+  if (value === 'error') return 'Error'
+  return value || 'Unknown'
+}
+function ragStatusClass(status: string) {
+  const value = String(status || '').toLowerCase()
+  if (value === 'matched') return 'bg-emerald-100 text-emerald-700'
+  if (['fallback_lexical', 'empty', 'skipped', 'unavailable'].includes(value)) return 'bg-amber-100 text-amber-700'
+  if (value === 'error') return 'bg-red-100 text-red-700'
+  return 'bg-gray-100 text-gray-600'
+}
+function ragEffectClass(mode: string) {
+  const value = String(mode || '').toLowerCase()
+  if (value === 'vector') return 'border-emerald-100 bg-emerald-50 text-emerald-900'
+  if (['lexical_fallback', 'unavailable', 'skipped'].includes(value)) return 'border-amber-100 bg-amber-50 text-amber-900'
+  if (value === 'error') return 'border-red-100 bg-red-50 text-red-900'
+  return 'border-gray-200 bg-gray-50 text-gray-700'
+}
+function ragQueryClass(mode: string) {
+  const value = String(mode || '').toLowerCase()
+  if (value === 'vector') return 'text-emerald-700'
+  if (['lexical_fallback', 'unavailable', 'skipped'].includes(value)) return 'text-amber-700'
+  if (value === 'error') return 'text-red-700'
+  return 'text-gray-500'
+}
+function ragScoreLabel(source: any) {
+  return source?.mode === 'vector' ? `sim ${source.score}` : `score ${source?.score ?? 0}`
+}
 const hasRagSurface = computed(() => Boolean(ragRetrieval.value || run.value?.rag_context))
 const hasToolSurface = computed(() => toolCalls.value.length > 0 || skillPlan.value.length > 0 || Boolean(toolSummary.value) || hasRagSurface.value)
 const triageSummary = computed(() => run.value?.triage_summary || null)
@@ -1632,22 +1665,29 @@ watch(visibleTabs, (tabs) => {
       <div v-if="hasRagSurface" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
         <div class="mb-4 flex items-center justify-between gap-3">
           <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
-            <BookOpen :size="14" /> RAG / LangChain Context
+            <BookOpen :size="14" /> Vector RAG Retrieval
           </h3>
-          <span class="rounded bg-emerald-100 px-2 py-1 text-[10px] font-bold text-emerald-700">
+          <span class="rounded px-2 py-1 text-[10px] font-bold" :class="ragStatusClass(ragRetrieval?.status)">
             {{ ragRetrieval?.status || 'available' }}
           </span>
         </div>
 
-        <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px]">
-          <div class="rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3">
-            <div class="text-xs font-bold text-emerald-900">{{ ragRetrieval?.effect || 'Retrieved context was injected into planner prompts.' }}</div>
-            <div v-if="ragRetrieval?.query" class="mt-2 truncate font-mono text-[11px] text-emerald-700">{{ ragRetrieval.query }}</div>
+        <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_300px]">
+          <div class="rounded-lg border px-4 py-3" :class="ragEffectClass(ragRetrieval?.mode)">
+            <div class="text-xs font-bold">{{ ragRetrieval?.effect || 'Vector context was injected into planner prompts.' }}</div>
+            <div v-if="ragRetrieval?.query" class="mt-2 truncate font-mono text-[11px]" :class="ragQueryClass(ragRetrieval?.mode)">{{ ragRetrieval.query }}</div>
+            <div v-if="ragRetrieval?.fallback_reason" class="mt-2 text-[11px] font-semibold">
+              {{ ragRetrieval.fallback_reason }}
+            </div>
           </div>
-          <div class="grid grid-cols-2 gap-2">
+          <div class="grid grid-cols-3 gap-2">
             <div class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
-              <div class="text-[10px] font-bold text-gray-400">匹配</div>
-              <div class="mt-1 text-sm font-bold text-gray-900">{{ ragRetrieval?.match_count || 0 }}</div>
+              <div class="text-[10px] font-bold text-gray-400">模式</div>
+              <div class="mt-1 truncate text-xs font-bold text-gray-900">{{ ragModeLabel(ragRetrieval?.mode) }}</div>
+            </div>
+            <div class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+              <div class="text-[10px] font-bold text-gray-400">向量源</div>
+              <div class="mt-1 text-sm font-bold text-gray-900">{{ ragRetrieval?.vector_source_count || 0 }}</div>
             </div>
             <div class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
               <div class="text-[10px] font-bold text-gray-400">注入片段</div>
@@ -1664,7 +1704,7 @@ watch(visibleTabs, (tabs) => {
           >
             <div class="mb-2 flex items-center justify-between gap-2">
               <span class="truncate font-mono text-[10px] font-bold text-gray-500">{{ source.source_script_id || source.id }}</span>
-              <span class="shrink-0 rounded bg-white px-2 py-0.5 text-[10px] font-bold text-gray-500">score {{ source.score }}</span>
+              <span class="shrink-0 rounded bg-white px-2 py-0.5 text-[10px] font-bold text-gray-500">{{ ragScoreLabel(source) }}</span>
             </div>
             <p class="line-clamp-3 text-xs leading-5 text-gray-600">{{ source.snippet }}</p>
           </div>

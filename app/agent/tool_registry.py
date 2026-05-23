@@ -50,10 +50,17 @@ TOOL_CAPABILITIES: tuple[ToolCapability, ...] = (
         name="memory.retrieve_rag_context",
         layer="memory",
         skill="rag-knowledge-retrieval",
-        description="Retrieve redacted historical testing knowledge and feed the most relevant snippets into planning and case generation.",
+        description="Retrieve redacted historical testing knowledge by vector similarity and feed the most relevant snippets into planning and case generation.",
         risk="read_only",
         input_schema={"objective": "string", "target": "string", "schema_paths": "array"},
-        output_schema={"rag_context": "string", "sources": "array", "match_count": "number"},
+        output_schema={
+            "rag_context": "string",
+            "sources": "array",
+            "match_count": "number",
+            "mode": "vector|lexical_fallback|unavailable",
+            "vector_source_count": "number",
+            "fallback_reason": "string|null",
+        },
     ),
     ToolCapability(
         name="planner.analyze_ui_execution_context",
@@ -190,7 +197,7 @@ AUTOMATION_SKILLS: tuple[AutomationSkill, ...] = (
     AutomationSkill(
         name="rag-knowledge-retrieval",
         layer="memory",
-        description="Search prior bug knowledge and tester notes, then inject relevant context into LangChain planner/case-generator prompts.",
+        description="Vector-retrieve prior bug knowledge and tester notes, then inject relevant context into LangChain planner/case-generator prompts.",
         triggers=["any run with matching knowledge", "re-run on known target", "historical failure themes"],
         tools=["memory.retrieve_rag_context"],
     ),

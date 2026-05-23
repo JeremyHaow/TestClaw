@@ -7,6 +7,8 @@ from langchain_core.messages import HumanMessage
 from app.agent.prompts import RCA_PROMPT
 from app.agent.state import AgentState
 from app.core.llm_gateway import llm_gateway
+from app.core.redaction import redact_sensitive_text
+from app.services.knowledge_service import knowledge_service
 
 logger = logging.getLogger(__name__)
 
@@ -104,17 +106,16 @@ async def run(state: AgentState) -> AgentState:
     # After persisting bug report, also store knowledge
     if db and bug_report:
         try:
-            from app.models.knowledge import KnowledgeEntry
-            knowledge = KnowledgeEntry(
-                content=(
-                    f"Bug: {_to_text(bug_report.get('title'), 'Automated test failure detected')}\n"
-                    f"Root Cause: {_to_text(bug_report.get('root_cause'), 'Unknown root cause')}\n"
-                    f"Fix: {_to_text(bug_report.get('fix_suggestion'), '')}"
-                ),
+            content = redact_sensitive_text(
+                f"Bug: {_to_text(bug_report.get('title'), 'Automated test failure detected')}\n"
+                f"Root Cause: {_to_text(bug_report.get('root_cause'), 'Unknown root cause')}\n"
+                f"Fix: {_to_text(bug_report.get('fix_suggestion'), '')}"
+            )
+            await knowledge_service.create(
+                db,
+                content=content,
                 source_script_id=state.get("task_id"),
             )
-            db.add(knowledge)
-            await db.commit()
         except Exception as e:
             await db.rollback()
             logger.warning("Failed to persist knowledge: %s", e)
