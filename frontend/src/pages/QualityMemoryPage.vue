@@ -109,31 +109,31 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="space-y-6 pb-12">
-    <div class="flex flex-col gap-1">
-      <h2 class="text-2xl font-bold text-gray-900">质量记忆</h2>
+  <div class="mx-auto max-w-7xl space-y-4 pb-10">
+    <div class="flex flex-col gap-1 border-b border-gray-200 pb-4">
+      <h2 class="text-xl font-semibold tracking-tight text-gray-950">质量记忆</h2>
       <p class="text-gray-500 text-sm">近期趋势、反复问题、影响面和可复用证据。</p>
     </div>
 
     <div
       v-if="loading && !hasLoaded"
-      class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 flex items-center gap-3 text-sm text-gray-500"
+      class="bg-white border border-gray-200 rounded-lg shadow-sm p-4 flex items-center gap-3 text-sm text-gray-500"
     >
       <div class="w-4 h-4 border-2 border-gray-200 border-t-blue-600 rounded-full animate-spin shrink-0"></div>
       <span>正在加载质量记忆...</span>
     </div>
     <div
       v-else-if="error && !insights"
-      class="bg-amber-50 border border-amber-100 rounded-xl shadow-sm p-5 text-sm text-amber-700"
+      class="bg-amber-50 border border-amber-100 rounded-lg shadow-sm p-4 text-sm text-amber-700"
     >
       质量记忆暂不可用，运行历史可继续查看。
     </div>
     <template v-else>
-      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
         <div
           v-for="card in qualityCards"
           :key="card.label"
-          class="bg-white border border-gray-200 rounded-xl shadow-sm p-5"
+          class="bg-white border border-gray-200 rounded-lg shadow-sm p-4"
         >
           <div class="flex items-start justify-between gap-4">
             <div>
@@ -149,7 +149,7 @@ onMounted(() => {
       </div>
 
       <div class="grid grid-cols-1 xl:grid-cols-3 gap-4">
-        <div class="xl:col-span-2 bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <div class="xl:col-span-2 bg-white border border-gray-200 rounded-lg shadow-sm p-4">
           <div class="flex flex-wrap items-start justify-between gap-3 mb-5">
             <div>
               <h3 class="font-semibold text-gray-900">质量趋势</h3>
@@ -195,7 +195,7 @@ onMounted(() => {
           <div v-else class="h-36 flex items-center justify-center text-gray-400 text-sm">暂无趋势数据</div>
         </div>
 
-        <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-4">
           <div class="flex items-center justify-between mb-4">
             <h3 class="font-semibold text-gray-900">证据与复现</h3>
             <FileCheck2 :size="16" class="text-gray-400" />
@@ -228,7 +228,7 @@ onMounted(() => {
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-4">
           <div class="flex items-center justify-between mb-4">
             <h3 class="font-semibold text-gray-900">受影响目标</h3>
             <Target :size="16" class="text-gray-400" />
@@ -245,7 +245,7 @@ onMounted(() => {
           <p v-else class="text-sm text-gray-400 py-6 text-center">暂无高频受影响目标</p>
         </div>
 
-        <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-4">
           <div class="flex items-center justify-between mb-4">
             <h3 class="font-semibold text-gray-900">反复问题</h3>
             <BrainCircuit :size="16" class="text-gray-400" />
@@ -269,7 +269,7 @@ onMounted(() => {
           <p v-else class="text-sm text-gray-400 py-6 text-center">暂无可归并的反复问题</p>
         </div>
 
-        <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-4">
           <div class="flex items-center justify-between mb-4">
             <h3 class="font-semibold text-gray-900">测试面记忆</h3>
             <AlertTriangle :size="16" class="text-gray-400" />

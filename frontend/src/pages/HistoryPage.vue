@@ -93,14 +93,14 @@ onUnmounted(() => stopPolling())
 </script>
 
 <template>
-  <div class="space-y-6 pb-12">
-    <div class="flex flex-col gap-1">
-      <h2 class="text-2xl font-bold text-gray-900">运行历史</h2>
+  <div class="mx-auto max-w-7xl space-y-4 pb-10">
+    <div class="flex flex-col gap-1 border-b border-gray-200 pb-4">
+      <h2 class="text-xl font-semibold tracking-tight text-gray-950">运行历史</h2>
       <p class="text-gray-500 text-sm">筛选、查看和管理测试智能体的历史运行。</p>
     </div>
 
     <!-- Filters -->
-    <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-4 flex flex-wrap gap-4 items-center">
+    <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-3 flex flex-wrap gap-3 items-center">
       <div class="flex items-center gap-2">
         <Filter :size="14" class="text-gray-400" />
         <span class="text-xs text-gray-500 font-bold">筛选</span>
@@ -150,24 +150,24 @@ onUnmounted(() => stopPolling())
       :title="total ? '没有匹配的记录' : '暂无运行记录'"
       :description="total ? '请尝试调整筛选条件' : '点击开始测试创建第一次运行'"
     />
-    <div v-else class="space-y-3">
+    <div v-else class="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
       <div
         v-for="run in runs"
         :key="run.id"
         @click="router.push(`/runs/${run.id}`)"
-        class="bg-white border border-gray-200 rounded-xl p-5 shadow-sm hover:border-blue-200 transition-all cursor-pointer group"
+        class="cursor-pointer border-b border-gray-100 p-4 transition-colors last:border-b-0 hover:bg-blue-50/40 group"
       >
-        <div class="flex items-start justify-between">
-          <div class="flex-1 min-w-0">
-            <div class="flex items-center gap-3 mb-2">
+        <div class="flex items-start justify-between gap-4">
+          <div class="min-w-0 flex-1">
+            <div class="mb-2 flex flex-wrap items-center gap-2">
               <StatusBadge :status="run.status" />
               <span class="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px] font-bold uppercase">{{ run.test_type }}</span>
+              <span class="text-[11px] text-gray-400">{{ formatTime(run.created_at) }}</span>
             </div>
             <div class="font-bold text-gray-900 text-sm truncate">{{ run.objective }}</div>
             <div class="text-xs font-mono text-gray-400 mt-0.5 truncate">{{ run.target_url }}</div>
-            <div class="text-xs text-gray-400 mt-1">{{ formatTime(run.created_at) }}</div>
           </div>
-          <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          <div class="flex shrink-0 items-center gap-1 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
             <button @click="deleteRun(run.id, $event)" class="p-2 text-gray-400 hover:text-red-600 transition-colors">
               <Trash2 :size="14" />
             </button>

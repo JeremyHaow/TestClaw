@@ -4,3 +4,18 @@
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
 }
+
+@layer utilities {
+  .shadow-sm {
+    box-shadow: 0 1px 2px 0 rgb(15 23 42 / 0.04);
+  }
+
+  .shadow-md {
+    box-shadow: 0 4px 10px -8px rgb(15 23 42 / 0.22);
+  }
+
+  .shadow-xl,
+  .shadow-2xl {
+    box-shadow: 0 18px 45px -28px rgb(15 23 42 / 0.45);
+  }
+}

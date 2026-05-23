@@ -174,16 +174,16 @@ onMounted(fetchItems)
 </script>
 
 <template>
-  <div class="space-y-5 pb-10">
-    <div class="flex flex-wrap items-start justify-between gap-3">
+  <div class="mx-auto max-w-7xl space-y-4 pb-10">
+    <div class="flex flex-wrap items-start justify-between gap-3 border-b border-gray-200 pb-4">
       <div class="flex flex-col gap-1">
-        <h2 class="text-2xl font-bold tracking-tight text-gray-900">测试环境</h2>
+        <h2 class="text-xl font-semibold tracking-tight text-gray-950">测试环境</h2>
         <p class="max-w-3xl text-sm text-gray-500">维护可运行 Base URL 和变量。列表只展示脱敏变量，具体运行入口放在每个环境上。</p>
       </div>
     </div>
 
-    <div class="grid grid-cols-1 gap-4 lg:grid-cols-[380px_minmax(0,1fr)] lg:items-start">
-      <section class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+    <div class="grid grid-cols-1 gap-4 lg:grid-cols-[340px_minmax(0,1fr)] lg:items-start">
+      <section class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm lg:sticky lg:top-4">
         <div class="mb-4 flex items-center justify-between">
           <h3 class="text-xs font-bold uppercase tracking-widest text-gray-400">
             {{ editingId ? '编辑环境' : '创建环境' }}
@@ -235,13 +235,13 @@ onMounted(fetchItems)
           </label>
 
           <button type="submit" :disabled="submitting"
-            class="w-full rounded-lg bg-blue-600 py-2.5 text-sm font-bold text-white shadow-md shadow-blue-600/10 transition-all hover:bg-blue-700 disabled:opacity-50">
+            class="w-full rounded-lg bg-blue-600 py-2.5 text-sm font-bold text-white transition-colors hover:bg-blue-700 disabled:opacity-50">
             {{ submitting ? '保存中...' : (editingId ? '更新环境' : '保存环境') }}
           </button>
         </form>
       </section>
 
-      <section class="min-w-0 rounded-xl border border-gray-200 bg-white shadow-sm">
+      <section class="min-w-0 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm lg:max-h-[calc(100vh-9rem)]">
         <div class="flex items-center justify-between border-b border-gray-100 px-5 py-4">
           <h3 class="text-sm font-bold text-gray-900">环境列表</h3>
           <span class="text-xs font-mono text-gray-400">{{ items.length }} 个</span>

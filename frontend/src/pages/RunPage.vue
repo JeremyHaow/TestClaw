@@ -5,7 +5,6 @@ import api from '../lib/api'
 import { useToast } from '../composables/useToast'
 import {
   AlertTriangle,
-  BookOpen,
   Bot,
   CheckCircle2,
   FileJson,
@@ -191,14 +190,6 @@ const apiPolicies = [
 const authModes = [
   { value: 'auto', label: '自动获取 Token', desc: '填写登录凭据，运行前自动换取鉴权 Header。', icon: RefreshCw },
   { value: 'manual', label: '手动提供 Token/Header', desc: '直接粘贴当前 Token 或自定义 Header。', icon: KeyRound },
-]
-
-const architectureCards = [
-  { label: 'LangGraph', value: '状态图编排', desc: 'input -> source -> RAG -> planner -> cases -> API/UI runner -> reporter -> memory', icon: Route, tone: 'bg-blue-50 text-blue-700 border-blue-100' },
-  { label: 'RAG', value: '运行前检索', desc: '命中历史缺陷/测试知识后注入 Planner 和用例生成提示词', icon: BookOpen, tone: 'bg-emerald-50 text-emerald-700 border-emerald-100' },
-  { label: 'ReAct-style', value: '工具调用轨迹', desc: 'API/浏览器动作会记录 tool call、输入摘要、输出摘要和证据', icon: Terminal, tone: 'bg-amber-50 text-amber-700 border-amber-100' },
-  { label: 'Plan-Executor', value: '计划后执行', desc: 'Planner 产出策略，用例生成器和 API/UI Runner 分工执行', icon: Bot, tone: 'bg-violet-50 text-violet-700 border-violet-100' },
-  { label: 'Multi-Agent', value: '角色化编排', desc: 'Planner/Coder/Vision 默认模型接入，规划、生成、执行、报告和记忆节点依序流转', icon: SlidersHorizontal, tone: 'bg-cyan-50 text-cyan-700 border-cyan-100' },
 ]
 
 const advancedAuthInputs = new Set(['base_url', 'login_url', 'login_body', 'login_headers', 'token_path', 'method', 'content_type'])
@@ -530,15 +521,15 @@ onMounted(applyRoutePrefill)
 </script>
 
 <template>
-  <div class="mx-auto max-w-7xl space-y-6 pb-12">
-    <section class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+  <div class="mx-auto max-w-7xl space-y-4 pb-10">
+    <section class="border-b border-gray-200 pb-4">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div class="flex min-w-0 items-start gap-4">
           <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-gray-900 text-white">
             <Bot :size="22" />
           </div>
           <div class="min-w-0">
-            <h2 class="text-2xl font-bold tracking-tight text-gray-900">Testing Agent Workspace</h2>
+            <h2 class="text-xl font-semibold tracking-tight text-gray-950">Testing Agent Workspace</h2>
             <p class="mt-1 max-w-3xl text-sm leading-6 text-gray-500">
               像分配测试任务一样描述目标、上下文和安全边界。TestClaw 会先预检，再自动规划 API/UI 路径、执行并沉淀证据。
             </p>
@@ -556,27 +547,20 @@ onMounted(applyRoutePrefill)
           </button>
         </div>
       </div>
-    </section>
-
-    <section class="grid gap-3 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-      <div
-        v-for="card in architectureCards"
-        :key="card.label"
-        class="rounded-xl border bg-white p-4 shadow-sm"
-        :class="card.tone"
-      >
-        <div class="mb-3 flex items-center justify-between gap-3">
-          <span class="text-xs font-bold">{{ card.label }}</span>
-          <component :is="card.icon" :size="16" />
-        </div>
-        <div class="text-sm font-bold text-gray-900">{{ card.value }}</div>
-        <p class="mt-1 text-xs leading-5 text-gray-600">{{ card.desc }}</p>
+      <div class="mt-4 flex flex-wrap gap-2 text-[11px] font-bold text-gray-500">
+        <span
+          v-for="(step, index) in flow.slice(0, 5)"
+          :key="`${step}-${index}`"
+          class="rounded-lg border border-gray-200 bg-white px-2.5 py-1"
+        >
+          {{ index + 1 }}. {{ step }}
+        </span>
       </div>
     </section>
 
-    <div class="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
-      <section class="space-y-5">
-        <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+    <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
+      <section class="space-y-4">
+        <div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
           <div class="mb-5 flex items-center justify-between gap-3">
             <div>
               <h3 class="text-sm font-bold text-gray-900">任务委派</h3>
@@ -662,8 +646,8 @@ onMounted(applyRoutePrefill)
           </div>
         </div>
 
-        <div class="grid gap-5 lg:grid-cols-2">
-          <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+        <div class="grid gap-4 lg:grid-cols-2">
+          <div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
             <div class="mb-4 flex items-center gap-2">
               <Target :size="17" class="text-gray-500" />
               <h3 class="text-sm font-bold text-gray-900">目标上下文</h3>
@@ -688,7 +672,7 @@ onMounted(applyRoutePrefill)
             </div>
           </div>
 
-          <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+          <div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
             <div class="mb-4 flex items-center gap-2">
               <ShieldCheck :size="17" class="text-gray-500" />
               <h3 class="text-sm font-bold text-gray-900">安全边界</h3>
@@ -713,7 +697,7 @@ onMounted(applyRoutePrefill)
           </div>
         </div>
 
-        <div v-if="isApiMode" class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+        <div v-if="isApiMode" class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
           <div class="mb-4 flex items-start gap-3">
             <div class="flex items-center gap-2">
               <KeyRound :size="17" class="text-gray-500" />
@@ -984,7 +968,7 @@ onMounted(applyRoutePrefill)
           </div>
         </div>
 
-        <div class="sticky bottom-0 z-20 flex flex-col gap-3 rounded-xl border border-gray-200 bg-white/95 p-4 shadow-sm backdrop-blur sm:flex-row sm:items-center sm:justify-between lg:static lg:bg-white">
+        <div class="sticky bottom-0 z-20 flex flex-col gap-3 rounded-lg border border-gray-200 bg-white/95 p-4 shadow-sm backdrop-blur sm:flex-row sm:items-center sm:justify-between lg:static lg:bg-white">
           <div class="min-w-0 text-sm text-gray-600">
             <span class="font-bold text-gray-900">启动后</span>
             智能体会进入 Agent Cockpit，持续展示计划、当前动作、日志和证据。
@@ -1012,8 +996,8 @@ onMounted(applyRoutePrefill)
         </div>
       </section>
 
-      <aside class="space-y-5">
-        <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+      <aside class="space-y-4 xl:sticky xl:top-4 xl:max-h-[calc(100vh-7rem)] xl:overflow-y-auto xl:pr-1">
+        <div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
           <div class="mb-4 flex items-center justify-between gap-3">
             <div>
               <h3 class="text-sm font-bold text-gray-900">预检状态</h3>
@@ -1062,7 +1046,7 @@ onMounted(applyRoutePrefill)
           </div>
         </div>
 
-        <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+        <div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
           <div class="mb-4 flex items-center justify-between gap-3">
             <div class="flex items-center gap-2">
               <Bot :size="16" class="text-gray-500" />
@@ -1155,7 +1139,7 @@ onMounted(applyRoutePrefill)
           </div>
         </div>
 
-        <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+        <div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
           <div class="mb-4 flex items-center gap-2">
             <Terminal :size="16" class="text-gray-500" />
             <h3 class="text-sm font-bold text-gray-900">智能体执行流</h3>
@@ -1177,7 +1161,7 @@ onMounted(applyRoutePrefill)
           </div>
         </div>
 
-        <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+        <div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
           <div class="mb-4 flex items-center justify-between gap-3">
             <div class="flex items-center gap-2">
               <Settings2 :size="16" class="text-gray-500" />

@@ -320,22 +320,22 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="space-y-5 pb-10">
-    <div class="flex flex-wrap items-start justify-between gap-3">
+  <div class="mx-auto max-w-7xl space-y-4 pb-10">
+    <div class="flex flex-wrap items-start justify-between gap-3 border-b border-gray-200 pb-4">
       <div class="flex flex-col gap-1">
-        <h2 class="text-2xl font-bold tracking-tight text-gray-900">用例资产</h2>
+        <h2 class="text-xl font-semibold tracking-tight text-gray-950">用例资产</h2>
         <p class="max-w-3xl text-sm text-gray-500">按来源、运行、套件和分类管理可复用用例；长步骤和预期结果在详情面板中查看和编辑。</p>
       </div>
       <div class="flex items-center gap-3">
         <span class="font-mono text-xs text-gray-400">{{ total }} 条</span>
         <button @click="openCreate"
-          class="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white shadow-md shadow-blue-600/10 transition-all hover:bg-blue-700">
+          class="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-blue-700">
           <Plus :size="16" /> 创建用例
         </button>
       </div>
     </div>
 
-    <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+    <div class="rounded-lg border border-gray-200 bg-white p-3 shadow-sm">
       <div class="flex flex-wrap items-center gap-3">
         <div class="min-w-[220px] flex-1">
           <SearchInput v-model="search" placeholder="搜索标题、分类或来源..." />
@@ -363,20 +363,20 @@ onMounted(async () => {
           {{ suiteRunning ? '提交中...' : `运行选中 (${selectedIds.size})` }}
         </button>
         <button v-if="selectedIds.size > 0" @click="confirmBulkDelete = true"
-          class="flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-xs font-bold text-white shadow-md shadow-red-600/10 transition-all hover:bg-red-700">
+          class="flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-red-700">
           <Trash2 :size="14" />
           删除选中 ({{ selectedIds.size }})
         </button>
       </div>
     </div>
 
-    <div class="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+    <div class="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
       <LoadingSpinner v-if="loading" text="加载中..." />
       <template v-else-if="items.length === 0">
         <EmptyState :icon="FileCode" title="暂无用例" description="还没有任何测试用例，请稍后再试或调整筛选条件。" />
       </template>
       <template v-else>
-        <div class="overflow-x-auto">
+        <div class="max-h-[calc(100vh-18rem)] overflow-auto">
           <table class="w-full text-left text-sm">
             <thead>
               <tr class="border-b border-gray-100 bg-gray-50 text-gray-500">
@@ -588,7 +588,7 @@ onMounted(async () => {
 
     <Teleport to="body">
       <div v-if="showCreate" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" @click.self="showCreate = false">
-        <div class="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white shadow-2xl">
+        <div class="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-lg bg-white shadow-2xl">
           <div class="sticky top-0 flex items-center justify-between border-b border-gray-100 bg-white px-6 py-4">
             <h3 class="text-lg font-bold text-gray-900">创建测试用例</h3>
             <button @click="showCreate = false" class="p-1 text-gray-400 transition-colors hover:text-gray-600"><X :size="20" /></button>
@@ -648,7 +648,7 @@ onMounted(async () => {
           <div class="sticky bottom-0 flex justify-end gap-3 border-t border-gray-100 bg-white px-6 py-4">
             <button @click="showCreate = false" class="rounded-lg px-4 py-2 text-sm font-bold text-gray-600 transition-all hover:bg-gray-100">取消</button>
             <button @click="submitCreate" :disabled="creating"
-              class="rounded-lg bg-blue-600 px-6 py-2 text-sm font-bold text-white shadow-md shadow-blue-600/10 transition-all hover:bg-blue-700 disabled:opacity-50">
+              class="rounded-lg bg-blue-600 px-6 py-2 text-sm font-bold text-white transition-colors hover:bg-blue-700 disabled:opacity-50">
               {{ creating ? '创建中...' : '创建' }}
             </button>
           </div>

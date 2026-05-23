@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import api from '../lib/api'
 import { useToast } from '../composables/useToast'
-import { BookOpen, Check, Edit3, GitBranch, Plus, Search, Trash2, X } from 'lucide-vue-next'
+import { BookOpen, Check, Edit3, Plus, Search, Trash2, X } from 'lucide-vue-next'
 import EmptyState from '../components/EmptyState.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
@@ -149,40 +149,31 @@ onMounted(fetchItems)
 </script>
 
 <template>
-  <div class="space-y-5 pb-10">
-    <div class="flex flex-col gap-1">
-      <h2 class="text-2xl font-bold tracking-tight text-gray-900">RAG 知识库</h2>
-      <p class="max-w-3xl text-sm text-gray-500">管理测试经验、缺陷根因和修复建议。运行时会优先走向量检索；不可用时运行详情会明确标记降级状态。</p>
-    </div>
-
-    <div class="rounded-xl border border-emerald-100 bg-emerald-50 p-4 shadow-sm">
-      <div class="flex items-start gap-3">
-        <div class="rounded-lg bg-white p-2 text-emerald-700">
-          <GitBranch :size="18" />
-        </div>
-        <div class="min-w-0">
-          <div class="text-sm font-bold text-emerald-900">Vector RAG: knowledge_retriever -> planner -> tc_generator</div>
-          <p class="mt-1 text-xs leading-5 text-emerald-800">
-            有可用 embedding provider 时按向量相似度检索；无向量或 provider 不可用时会显示 unavailable 或 lexical fallback，不会把关键词搜索标成向量结果。
-          </p>
-        </div>
+  <div class="mx-auto max-w-7xl space-y-4 pb-10">
+    <div class="flex flex-col gap-3 border-b border-gray-200 pb-4 lg:flex-row lg:items-end lg:justify-between">
+      <div class="min-w-0">
+        <h2 class="text-xl font-semibold tracking-tight text-gray-950">RAG 知识库</h2>
+        <p class="mt-1 max-w-3xl text-sm text-gray-500">管理测试经验、缺陷根因和修复建议；每条知识按真实 embedding 状态显示，不把降级检索伪装成向量命中。</p>
       </div>
+      <span class="w-fit rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-bold text-gray-600">
+        {{ items.length }} 条知识
+      </span>
     </div>
 
-    <div class="grid grid-cols-1 gap-4 lg:grid-cols-[380px_minmax(0,1fr)] lg:items-start">
-      <aside class="space-y-4">
-        <section class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+    <div class="grid grid-cols-1 gap-4 lg:grid-cols-[340px_minmax(0,1fr)] lg:items-start">
+      <aside class="space-y-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-9rem)] lg:overflow-y-auto lg:pr-1">
+        <section class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
           <h3 class="mb-3 text-xs font-bold uppercase tracking-widest text-gray-400">添加知识</h3>
           <textarea v-model="newContent" rows="5" placeholder="输入知识内容..."
             class="w-full resize-none rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:bg-white" />
           <button @click="addEntry" :disabled="adding || !newContent.trim()"
-            class="mt-3 flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 py-2.5 text-sm font-bold text-white shadow-md shadow-blue-600/10 transition-all hover:bg-blue-700 disabled:opacity-50">
+            class="mt-3 flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 py-2.5 text-sm font-bold text-white transition-colors hover:bg-blue-700 disabled:opacity-50">
             <Plus :size="16" />
             {{ adding ? '添加中...' : '添加条目' }}
           </button>
         </section>
 
-        <section class="rounded-xl border border-gray-200 bg-white shadow-sm">
+        <section class="rounded-lg border border-gray-200 bg-white shadow-sm">
           <div class="border-b border-gray-100 p-4">
             <h3 class="mb-3 text-xs font-bold uppercase tracking-widest text-gray-400">搜索 / 列表</h3>
             <div class="relative">
@@ -200,7 +191,7 @@ onMounted(fetchItems)
 
           <LoadingSpinner v-if="loading || searching" text="加载中..." />
           <EmptyState v-else-if="!displayedItems.length" :icon="BookOpen" title="暂无知识条目" description="添加知识条目来构建你的测试知识库。" />
-          <div v-else class="max-h-[calc(100vh-430px)] min-h-[260px] divide-y divide-gray-100 overflow-y-auto">
+          <div v-else class="max-h-96 min-h-[260px] divide-y divide-gray-100 overflow-y-auto lg:max-h-[calc(100vh-28rem)]">
             <button
               v-for="entry in displayedItems"
               :key="entry.id"
@@ -228,7 +219,7 @@ onMounted(fetchItems)
         </section>
       </aside>
 
-      <section class="min-w-0 rounded-xl border border-gray-200 bg-white shadow-sm">
+      <section class="min-w-0 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm lg:flex lg:max-h-[calc(100vh-9rem)] lg:flex-col">
         <div class="flex flex-wrap items-start justify-between gap-3 border-b border-gray-100 px-5 py-4">
           <div>
             <h3 class="text-sm font-bold text-gray-900">知识详情</h3>
@@ -250,7 +241,7 @@ onMounted(fetchItems)
           <EmptyState :icon="BookOpen" title="选择一条知识" description="从左侧列表选择条目后查看详情、编辑内容和确认向量状态。" />
         </div>
 
-        <div v-else class="p-5">
+        <div v-else class="min-h-0 p-5 lg:flex-1 lg:overflow-y-auto">
           <div class="mb-4 grid gap-3 sm:grid-cols-3">
             <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
               <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Embedding</div>
@@ -279,7 +270,7 @@ onMounted(fetchItems)
             </div>
           </template>
 
-          <div v-else class="max-h-[calc(100vh-360px)] overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-4">
+          <div v-else class="max-h-[420px] overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-4 lg:max-h-[calc(100vh-22rem)]">
             <p class="whitespace-pre-wrap break-words text-sm leading-6 text-gray-700">{{ selectedEntry.content }}</p>
           </div>
         </div>

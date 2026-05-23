@@ -859,14 +859,14 @@ watch(visibleTabs, (tabs) => {
 <template>
   <LoadingSpinner v-if="loading && !run" text="加载运行详情..." />
 
-  <div class="space-y-6 pb-12" v-else-if="run">
+  <div class="space-y-4 pb-10" v-else-if="run">
     <!-- Header -->
-    <div class="flex items-center gap-4">
+    <div class="flex items-center gap-4 border-b border-gray-200 pb-4">
       <button @click="router.push('/history')" class="p-2 hover:bg-gray-100 rounded-lg text-gray-400 hover:text-gray-600 transition-all">
         <ArrowLeft :size="20" />
       </button>
       <div class="flex-1 min-w-0">
-        <h2 class="text-xl font-bold tracking-tight text-gray-900 truncate">{{ run.objective }}</h2>
+        <h2 class="text-lg font-semibold tracking-tight text-gray-950 truncate">{{ run.objective }}</h2>
         <p class="text-gray-400 text-xs font-mono truncate">{{ run.target_url }}</p>
       </div>
       <div class="flex items-center gap-2 shrink-0">
@@ -905,9 +905,9 @@ watch(visibleTabs, (tabs) => {
     </div>
 
     <!-- Execution Cockpit -->
-    <section class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+    <section class="bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
       <div
-        class="p-5 border-b"
+        class="p-4 border-b"
         :class="isFailedRun ? 'bg-red-50/70 border-red-100' : isActiveRun ? 'bg-blue-50/70 border-blue-100' : 'bg-gray-50 border-gray-100'"
       >
         <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -975,7 +975,7 @@ watch(visibleTabs, (tabs) => {
       </div>
 
       <div class="grid gap-0 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.75fr)]">
-        <div class="border-b border-gray-100 p-5 lg:border-b-0 lg:border-r">
+        <div class="border-b border-gray-100 p-4 lg:border-b-0 lg:border-r">
           <div
             class="grid gap-3"
             :class="hasApiSurface && hasUiSurface ? 'sm:grid-cols-2' : 'sm:grid-cols-1'"
@@ -1043,7 +1043,7 @@ watch(visibleTabs, (tabs) => {
           </div>
         </div>
 
-        <div class="bg-gray-950 p-5 text-gray-100">
+        <div class="bg-gray-950 p-4 text-gray-100">
           <div class="mb-3 flex items-center justify-between">
             <h3 class="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-gray-400">
               <Terminal :size="14" /> 实时日志
@@ -1055,7 +1055,7 @@ watch(visibleTabs, (tabs) => {
           </div>
           <pre
             v-if="liveRawLog || run.execution_log"
-            class="max-h-[600px] overflow-auto whitespace-pre-wrap rounded-lg border border-white/10 bg-black/30 p-4 text-[11px] leading-relaxed text-gray-100"
+            class="max-h-[420px] overflow-auto whitespace-pre-wrap rounded-lg border border-white/10 bg-black/30 p-4 text-[11px] leading-relaxed text-gray-100"
           >{{ liveRawLog || formatPreview(run.execution_log) }}</pre>
           <div v-else class="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-white/10 bg-black/20 px-4 text-center text-xs text-gray-500">
             <span v-if="isActiveRun">等待第一条执行日志...</span>
@@ -1066,7 +1066,7 @@ watch(visibleTabs, (tabs) => {
     </section>
 
     <!-- Human Intervention -->
-    <section v-if="showInterventionPanel" class="bg-white border border-amber-200 rounded-xl shadow-sm p-6">
+    <section v-if="showInterventionPanel" class="bg-white border border-amber-200 rounded-lg shadow-sm p-4">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div class="min-w-0">
           <div class="flex items-center gap-2">
@@ -1117,41 +1117,8 @@ watch(visibleTabs, (tabs) => {
       </div>
     </section>
 
-    <!-- Final Report Summary Card -->
-    <div v-if="run.final_report" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
-      <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">测试总结</h3>
-      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
-        <div class="p-3 rounded-lg border" :class="run.final_report.overall_verdict === 'PASS' ? 'bg-emerald-50 border-emerald-200' : run.final_report.overall_verdict === 'PARTIAL' ? 'bg-amber-50 border-amber-200' : 'bg-red-50 border-red-200'">
-          <div class="text-[10px] font-bold text-gray-400 uppercase">最终结论</div>
-          <div class="text-lg font-bold mt-1" :class="run.final_report.overall_verdict === 'PASS' ? 'text-emerald-600' : run.final_report.overall_verdict === 'PARTIAL' ? 'text-amber-600' : 'text-red-600'">
-            {{ run.final_report.overall_verdict }}
-          </div>
-        </div>
-        <div v-if="hasApiSurface" class="p-3 bg-gray-50 rounded-lg border border-gray-100">
-          <div class="text-[10px] font-bold text-gray-400 uppercase">API 测试</div>
-          <div class="text-sm font-bold text-gray-900 mt-1">{{ run.final_report.api_test_summary?.pass_rate || 'N/A' }}</div>
-          <div class="text-[10px] text-gray-500">{{ run.final_report.api_test_summary?.passed || 0 }}/{{ run.final_report.api_test_summary?.total || 0 }} 通过</div>
-        </div>
-        <div v-if="hasUiSurface" class="p-3 bg-gray-50 rounded-lg border border-gray-100">
-          <div class="text-[10px] font-bold text-gray-400 uppercase">UI 测试</div>
-          <div class="text-sm font-bold text-gray-900 mt-1">{{ run.final_report.ui_test_summary?.pass_rate || 'N/A' }}</div>
-          <div class="text-[10px] text-gray-500">{{ run.final_report.ui_test_summary?.passed || 0 }}/{{ run.final_report.ui_test_summary?.total || 0 }} 通过</div>
-        </div>
-        <div class="p-3 bg-gray-50 rounded-lg border border-gray-100">
-          <div class="text-[10px] font-bold text-gray-400 uppercase">发现缺陷</div>
-          <div class="text-lg font-bold text-red-600 mt-1">{{ run.final_report.bugs_found?.length || 0 }}</div>
-        </div>
-      </div>
-      <p v-if="run.final_report.summary" class="text-sm text-gray-600">{{ run.final_report.summary }}</p>
-      <div v-if="run.final_report.recommendations?.length" class="mt-3 space-y-1">
-        <div v-for="(rec, i) in run.final_report.recommendations" :key="i" class="text-xs text-gray-500 flex gap-2">
-          <span class="text-blue-400 font-bold">-</span> {{ rec }}
-        </div>
-      </div>
-    </div>
-
     <!-- Triage Summary -->
-    <div v-if="triageSummary" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+    <div v-if="triageSummary" class="bg-white border border-gray-200 rounded-lg shadow-sm p-4">
       <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">分诊摘要</h3>
@@ -1299,24 +1266,8 @@ watch(visibleTabs, (tabs) => {
       </div>
     </div>
 
-    <!-- Workflow Timeline -->
-    <div v-if="run.workflow_steps?.length" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
-      <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">Agent 工作流</h3>
-      <div class="flex flex-wrap gap-2">
-        <div
-          v-for="(step, idx) in run.workflow_steps"
-          :key="idx"
-          class="flex items-center gap-2 px-3 py-2 rounded-lg border text-xs"
-          :class="step.status === 'done' ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : step.status === 'failed' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-gray-50 border-gray-200 text-gray-600'"
-        >
-          <span class="font-bold">{{ step.node }}</span>
-          <span class="text-[10px] opacity-70">{{ step.detail }}</span>
-        </div>
-      </div>
-    </div>
-
     <!-- Tab Navigation -->
-    <div class="flex flex-wrap gap-1 bg-gray-100 rounded-lg p-1">
+    <div class="sticky top-0 z-10 flex flex-wrap gap-1 rounded-lg border border-gray-200 bg-gray-100 p-1">
       <button
         v-for="tab in visibleTabs"
         :key="tab.key"

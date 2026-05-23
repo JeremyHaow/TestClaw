@@ -334,10 +334,10 @@ onMounted(fetchItems)
 </script>
 
 <template>
-  <div class="mx-auto max-w-7xl space-y-6 pb-12">
-    <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+  <div class="mx-auto max-w-7xl space-y-4 pb-10">
+    <div class="flex flex-col gap-3 border-b border-gray-200 pb-4 lg:flex-row lg:items-end lg:justify-between">
       <div>
-        <h2 class="text-2xl font-bold tracking-tight text-gray-900">接口文档</h2>
+        <h2 class="text-xl font-semibold tracking-tight text-gray-950">接口文档</h2>
         <p class="mt-1 max-w-3xl text-sm leading-6 text-gray-500">
           导入 OpenAPI / Postman 文档后，可以在线修订原文、按端点检索浏览，并把真实文档 source 带入 Testing Agent 运行页。
         </p>
@@ -361,8 +361,8 @@ onMounted(fetchItems)
       </div>
     </div>
 
-    <div class="grid gap-6 lg:grid-cols-[360px_minmax(0,1fr)]">
-      <aside class="space-y-4">
+    <div class="grid gap-4 lg:grid-cols-[340px_minmax(0,1fr)]">
+      <aside class="space-y-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-9rem)] lg:overflow-y-auto lg:pr-1">
         <section class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
           <div class="mb-4 flex items-center justify-between">
             <h3 class="text-sm font-bold text-gray-900">导入文档</h3>
@@ -426,7 +426,7 @@ onMounted(fetchItems)
             <button
               type="submit"
               :disabled="importing"
-              class="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-bold text-white shadow-md shadow-blue-600/10 transition-all hover:bg-blue-700 disabled:opacity-50"
+              class="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
             >
               <Link2 v-if="importMode === 'url'" :size="16" />
               <FileCode v-else :size="16" />
@@ -491,7 +491,7 @@ onMounted(fetchItems)
         </section>
       </aside>
 
-      <main class="min-w-0 rounded-lg border border-gray-200 bg-white shadow-sm">
+      <main class="min-w-0 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm lg:flex lg:max-h-[calc(100vh-9rem)] lg:flex-col">
         <LoadingSpinner v-if="loading" text="加载文档中..." />
         <EmptyState
           v-else-if="!selectedDoc"
@@ -592,11 +592,11 @@ onMounted(fetchItems)
             </div>
           </div>
 
-          <div v-if="viewMode === 'raw'" class="p-5">
+          <div v-if="viewMode === 'raw'" class="min-h-0 p-5 lg:flex-1">
             <pre class="max-h-[640px] overflow-auto rounded-lg border border-gray-200 bg-gray-950 p-4 text-xs leading-5 text-gray-100">{{ selectedDoc.raw_content }}</pre>
           </div>
 
-          <div v-else class="grid min-h-[580px] gap-0 xl:grid-cols-[minmax(0,1fr)_360px]">
+          <div v-else class="grid min-h-[520px] gap-0 lg:min-h-0 lg:flex-1 xl:grid-cols-[minmax(0,1fr)_340px]">
             <section class="min-w-0 border-r border-gray-100">
               <div class="flex items-center justify-between border-b border-gray-100 px-4 py-3">
                 <span class="text-xs font-bold text-gray-500">端点 {{ endpointRangeLabel }}</span>
@@ -624,7 +624,7 @@ onMounted(fetchItems)
               <div v-if="!filteredEndpoints.length" class="px-4 py-16 text-center text-sm text-gray-400">
                 没有匹配的端点
               </div>
-              <div v-else class="max-h-[580px] overflow-y-auto divide-y divide-gray-100">
+              <div v-else class="max-h-[520px] overflow-y-auto divide-y divide-gray-100 lg:max-h-full">
                 <button
                   v-for="endpoint in pagedEndpoints"
                   :key="`${endpoint.method}-${endpointPath(endpoint)}-${endpoint.operationId || ''}`"
@@ -660,7 +660,7 @@ onMounted(fetchItems)
               <div v-if="!selectedEndpoint" class="px-5 py-16 text-center text-sm text-gray-400">
                 选择左侧端点查看参数、请求体和响应结构
               </div>
-              <div v-else class="max-h-[580px] overflow-y-auto p-4">
+              <div v-else class="max-h-[520px] overflow-y-auto p-4 lg:max-h-full">
                 <div class="rounded-lg border border-gray-200 bg-white p-4">
                   <div class="flex items-start gap-2">
                     <span class="rounded border px-2 py-1 text-[10px] font-bold" :class="getMethodColor(selectedEndpoint.method)">

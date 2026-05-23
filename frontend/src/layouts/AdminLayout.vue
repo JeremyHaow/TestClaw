@@ -18,7 +18,7 @@ onMounted(async () => {
     <AppSidebar />
     <main class="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
       <AppHeader />
-      <div class="flex-1 overflow-y-auto p-4 lg:p-8">
+      <div class="flex-1 overflow-y-auto p-4 lg:p-6">
         <router-view />
       </div>
     </main>

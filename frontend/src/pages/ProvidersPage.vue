@@ -308,17 +308,17 @@ onMounted(fetchItems)
 </script>
 
 <template>
-  <div class="space-y-5 pb-10">
-    <div class="flex flex-wrap items-start justify-between gap-3">
+  <div class="mx-auto max-w-7xl space-y-4 pb-10">
+    <div class="flex flex-wrap items-start justify-between gap-3 border-b border-gray-200 pb-4">
       <div class="flex flex-col gap-1">
-        <h2 class="text-2xl font-bold tracking-tight text-gray-900">模型与 Agent</h2>
+        <h2 class="text-xl font-semibold tracking-tight text-gray-950">模型与 Agent</h2>
         <p class="max-w-3xl text-sm text-gray-500">
           先配置 AI Provider，再在 Provider 下维护具体模型。Planner/Coder/Vision 默认角色只设置在模型行上。
         </p>
       </div>
       <button
         @click="openNewProvider"
-        class="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white shadow-md shadow-blue-600/10 transition-all hover:bg-blue-700"
+        class="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-blue-700"
       >
         <Plus :size="16" /> 新增 Provider
       </button>
@@ -326,18 +326,18 @@ onMounted(fetchItems)
 
     <LoadingSpinner v-if="loading" text="加载模型列表中..." />
 
-    <div v-else-if="!providerGroups.length" class="rounded-xl border border-gray-200 bg-white">
+    <div v-else-if="!providerGroups.length" class="rounded-lg border border-gray-200 bg-white">
       <EmptyState :icon="Bot" title="还没有 AI Provider" description="新增 Provider 并添加第一个模型后，Agent 运行预检才能选择可用模型。" />
     </div>
 
-    <div v-else class="grid gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
-      <aside class="space-y-3">
-        <div class="rounded-xl border border-gray-200 bg-white p-3 shadow-sm">
+    <div v-else class="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
+      <aside class="space-y-3 lg:sticky lg:top-4 lg:max-h-[calc(100vh-9rem)] lg:overflow-y-auto">
+        <div class="rounded-lg border border-gray-200 bg-white p-3 shadow-sm">
           <div class="mb-3 flex items-center justify-between">
             <h3 class="text-xs font-bold uppercase tracking-widest text-gray-400">Provider</h3>
             <span class="text-xs font-mono text-gray-400">{{ providerGroups.length }}</span>
           </div>
-          <div class="max-h-[calc(100vh-260px)] space-y-2 overflow-y-auto pr-1">
+          <div class="max-h-[calc(100vh-15rem)] space-y-2 overflow-y-auto pr-1">
             <button
               v-for="group in providerGroups"
               :key="group.key"
@@ -364,7 +364,7 @@ onMounted(fetchItems)
         </div>
       </aside>
 
-      <section v-if="selectedProvider" class="min-w-0 rounded-xl border border-gray-200 bg-white shadow-sm">
+      <section v-if="selectedProvider" class="min-w-0 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm lg:flex lg:max-h-[calc(100vh-9rem)] lg:flex-col">
         <div class="flex flex-wrap items-start justify-between gap-3 border-b border-gray-100 px-5 py-4">
           <div class="min-w-0">
             <div class="flex flex-wrap items-center gap-2">
@@ -386,7 +386,7 @@ onMounted(fetchItems)
           </button>
         </div>
 
-        <div class="overflow-x-auto">
+        <div class="min-h-0 overflow-auto">
           <table class="w-full text-left text-sm">
             <thead>
               <tr class="border-b border-gray-100 bg-gray-50 text-[10px] font-bold uppercase tracking-widest text-gray-400">
@@ -448,7 +448,7 @@ onMounted(fetchItems)
     </div>
 
     <div v-if="showModelForm" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div class="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-xl border border-gray-200 bg-white shadow-xl">
+      <div class="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-xl">
         <div class="flex items-center justify-between border-b border-gray-100 px-6 py-4">
           <div>
             <h3 class="text-sm font-bold text-gray-900">{{ modelFormMode === 'edit' ? '编辑模型' : '配置 Provider 与模型' }}</h3>
