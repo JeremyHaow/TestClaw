@@ -4,6 +4,7 @@ import LoginPage from '../pages/LoginPage.vue'
 import RunPage from '../pages/RunPage.vue'
 import RunDetailPage from '../pages/RunDetailPage.vue'
 import HistoryPage from '../pages/HistoryPage.vue'
+import QualityMemoryPage from '../pages/QualityMemoryPage.vue'
 import SettingsPage from '../pages/SettingsPage.vue'
 import ProvidersPage from '../pages/ProvidersPage.vue'
 import DocumentsPage from '../pages/DocumentsPage.vue'
@@ -24,6 +25,7 @@ const router = createRouter({
         { path: 'run', component: RunPage },
         { path: 'runs/:id', component: RunDetailPage },
         { path: 'history', component: HistoryPage },
+        { path: 'quality-memory', component: QualityMemoryPage },
         { path: 'settings', component: SettingsPage },
         { path: 'providers', component: ProvidersPage },
         { path: 'documents', component: DocumentsPage },

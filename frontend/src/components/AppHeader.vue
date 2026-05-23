@@ -14,6 +14,7 @@ const pageTitle = computed(() => {
   const titles: Record<string, string> = {
     '/run': 'Testing Agent Workspace',
     '/history': '运行历史',
+    '/quality-memory': '质量记忆',
     '/settings': '系统设置',
     '/providers': '模型管理',
     '/documents': '文档管理',
