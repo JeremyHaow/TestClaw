@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import api from '../lib/api'
+import api, { apiUrl } from '../lib/api'
 import StatusBadge from '../components/StatusBadge.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import { useToast } from '../composables/useToast'
-import { Activity, AlertTriangle, ArrowLeft, Camera, CheckCircle2, ChevronDown, ChevronRight, Clock, FileText, Loader2, Monitor, RotateCcw, Terminal, XCircle, XCircleIcon, Zap } from 'lucide-vue-next'
+import { Activity, AlertTriangle, ArrowLeft, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCopy, Clock, Download, FileText, Loader2, Monitor, RotateCcw, Save, Terminal, XCircle, XCircleIcon, Zap } from 'lucide-vue-next'
 
 const expandedApiRow = ref<number | null>(null)
 const lightboxUrl = ref<string | null>(null)
@@ -16,8 +16,7 @@ function toggleApiRow(idx: number) {
 
 function screenshotUrl(runId: string, filename: string) {
   const token = localStorage.getItem('testclaw_token')
-  const query = token ? `?token=${encodeURIComponent(token)}` : ''
-  return `/api/v1/runs/${runId}/screenshots/${encodeURIComponent(filename)}${query}`
+  return apiUrl(`/runs/${runId}/screenshots/${encodeURIComponent(filename)}`, { token })
 }
 
 function screenshotFilename(path: string) {
@@ -63,6 +62,7 @@ const toast = useToast()
 const loading = ref(false)
 const run = ref<any>(null)
 const liveRawLog = ref('')
+const triageExporting = ref<'markdown' | 'json' | null>(null)
 let eventSource: EventSource | null = null
 
 const terminalStatuses = ['succeeded', 'failed', 'bug_found', 'cancelled']
@@ -80,6 +80,8 @@ const snapshotKeys = [
   'api_execution_result',
   'ui_execution_result',
   'final_report',
+  'triage_summary',
+  'intervention_summary',
   'artifacts',
   'tool_registry',
   'skill_plan',
@@ -147,19 +149,20 @@ function applySnapshot(snapshot: any) {
   }
   const previous = parseExecutionLog(run.value.execution_log)
   run.value.execution_log = JSON.stringify({ ...previous, ...snapshot })
+  syncCaseAssetDrafts()
 }
 
 function hydrateRun(data: any) {
   run.value = data
   const parsed = parseExecutionLog(data.execution_log)
   applySnapshot(parsed)
+  syncCaseAssetDrafts()
 }
 
 function connectSSE(runId: string) {
   disconnectSSE()
   const token = localStorage.getItem('testclaw_token')
-  const url = `/api/v1/runs/${runId}/stream`
-  eventSource = new EventSource(token ? `${url}?token=${token}` : url)
+  eventSource = new EventSource(apiUrl(`/runs/${runId}/stream`, { token }))
   eventSource.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data)
@@ -226,9 +229,42 @@ async function cancelRun() {
   }
 }
 
+const interventionText = ref('')
+const interventionCancelCurrent = ref(false)
+const interventionSubmitting = ref(false)
+
+async function submitInterventionRerun() {
+  const supplemental = interventionText.value.trim()
+  if (!supplemental) {
+    toast.error('请先填写补充上下文')
+    return
+  }
+
+  interventionSubmitting.value = true
+  try {
+    const { data } = await api.post(`/runs/${route.params.id}/interventions`, {
+      supplemental_instructions: supplemental,
+      cancel_current: interventionCancelCurrent.value,
+    })
+    interventionText.value = ''
+    interventionCancelCurrent.value = false
+    router.push(`/runs/${data.id}`)
+  } catch (err: any) {
+    toast.error(err?.response?.data?.detail || '发起辅助重跑失败')
+  } finally {
+    interventionSubmitting.value = false
+  }
+}
+
 onMounted(() => loadRun(String(route.params.id)))
 onUnmounted(() => disconnectSSE())
-watch(() => route.params.id, (id) => { if (id) loadRun(String(id)) })
+watch(() => route.params.id, (id) => {
+  if (id) {
+    interventionText.value = ''
+    interventionCancelCurrent.value = false
+    loadRun(String(id))
+  }
+})
 
 const activeTab = ref('report')
 
@@ -270,6 +306,162 @@ function ensureSteps(steps: any): string[] {
 
 function ensureList(value: any): any[] {
   return Array.isArray(value) ? value : []
+}
+
+type CaseAssetSource = 'api_cases' | 'ui_cases' | 'test_cases'
+type CaseAssetStatus = 'accepted' | 'rejected'
+
+type CaseAssetEntry = {
+  key: string
+  source: CaseAssetSource
+  index: number
+  raw: any
+}
+
+type CaseAssetDraft = CaseAssetEntry & {
+  caseType: 'api' | 'ui'
+  status: CaseAssetStatus
+  title: string
+  priority: string
+  category: string
+  stepsText: string
+  expectedText: string
+}
+
+const caseAssetDrafts = ref<CaseAssetDraft[]>([])
+const caseAssetSuiteName = ref('')
+const caseAssetSaving = ref(false)
+const caseAssetResult = ref<any>(null)
+
+function ensureTextLines(value: any): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item: any) => {
+        if (typeof item === 'string') return item
+        if (item && typeof item === 'object') return item.step || item.action || item.description || item.expected || JSON.stringify(item)
+        return String(item || '')
+      })
+      .map((item: string) => item.trim())
+      .filter(Boolean)
+  }
+  return ensureSteps(value)
+}
+
+function linesFromText(value: string): string[] {
+  return String(value || '')
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+}
+
+function generatedCaseEntries(): CaseAssetEntry[] {
+  if (!run.value) return []
+  const entries: CaseAssetEntry[] = []
+  const runId = String(run.value.id || 'run')
+
+  const apiCases = ensureList(run.value.api_cases)
+  const uiCases = ensureList(run.value.ui_cases)
+  apiCases.forEach((raw: any, index: number) => entries.push({ key: `${runId}:api_cases:${index}`, source: 'api_cases', index, raw }))
+  uiCases.forEach((raw: any, index: number) => entries.push({ key: `${runId}:ui_cases:${index}`, source: 'ui_cases', index, raw }))
+
+  if (!entries.length) {
+    ensureList(run.value.test_cases).forEach((raw: any, index: number) => entries.push({ key: `${runId}:test_cases:${index}`, source: 'test_cases', index, raw }))
+  }
+
+  return entries
+}
+
+function requestTemplate(caseItem: any) {
+  return caseItem?.request_template || caseItem?.test_data?.request_template || caseItem?.request || {}
+}
+
+function caseMethod(caseItem: any) {
+  return caseItem?.method || requestTemplate(caseItem).method || ''
+}
+
+function caseEndpoint(caseItem: any) {
+  const template = requestTemplate(caseItem)
+  return caseItem?.endpoint || caseItem?.path || caseItem?.url || template.endpoint || template.path || template.url || ''
+}
+
+function caseCommands(caseItem: any): string[] {
+  return ensureList(caseItem?.playwright_commands || caseItem?.test_data?.playwright_commands || caseItem?.commands).map(String)
+}
+
+function inferDraftCaseType(entry: CaseAssetEntry): 'api' | 'ui' {
+  if (entry.source === 'api_cases') return 'api'
+  if (entry.source === 'ui_cases') return 'ui'
+  const declared = String(entry.raw?.case_type || entry.raw?.type || entry.raw?.category || '').toLowerCase()
+  if (declared.includes('api') || caseMethod(entry.raw) || caseEndpoint(entry.raw)) return 'api'
+  return 'ui'
+}
+
+function draftFromGeneratedCase(entry: CaseAssetEntry): CaseAssetDraft {
+  const caseType = inferDraftCaseType(entry)
+  const raw = entry.raw || {}
+  return {
+    ...entry,
+    caseType,
+    status: 'accepted',
+    title: String(raw.title || raw.name || raw.case_title || `${caseType.toUpperCase()} Case ${entry.index + 1}`),
+    priority: String(raw.priority || 'P2').toUpperCase(),
+    category: String(raw.category || raw.case_type || caseType),
+    stepsText: ensureTextLines(raw.steps || raw.actions).join('\n'),
+    expectedText: ensureTextLines(raw.expected || raw.expected_result || raw.expected_results || raw.assertions).join('\n'),
+  }
+}
+
+function syncCaseAssetDrafts() {
+  if (!run.value) {
+    caseAssetDrafts.value = []
+    caseAssetResult.value = null
+    return
+  }
+
+  const existing = new Map(caseAssetDrafts.value.map((draft) => [draft.key, draft]))
+  caseAssetDrafts.value = generatedCaseEntries().map((entry) => existing.get(entry.key) || draftFromGeneratedCase(entry))
+}
+
+function setCaseAssetStatus(draft: CaseAssetDraft, status: CaseAssetStatus) {
+  draft.status = status
+}
+
+const hasGeneratedCaseAssets = computed(() => caseAssetDrafts.value.length > 0)
+const acceptedCaseAssetCount = computed(() => caseAssetDrafts.value.filter((draft) => draft.status === 'accepted').length)
+const apiCaseAssetDrafts = computed(() => caseAssetDrafts.value.filter((draft) => draft.caseType === 'api'))
+const uiCaseAssetDrafts = computed(() => caseAssetDrafts.value.filter((draft) => draft.caseType === 'ui'))
+
+async function saveAcceptedCaseAssets() {
+  if (!run.value) return
+  const accepted = caseAssetDrafts.value.filter((draft) => draft.status === 'accepted')
+  if (!accepted.length) {
+    toast.error('没有已接受的测试用例')
+    return
+  }
+
+  caseAssetSaving.value = true
+  try {
+    const { data } = await api.post(`/runs/${run.value.id}/case-assets`, {
+      suite_name: caseAssetSuiteName.value.trim() || undefined,
+      cases: accepted.map((draft) => ({
+        source: draft.source,
+        index: draft.index,
+        case: {
+          title: draft.title,
+          priority: draft.priority,
+          category: draft.category,
+          steps: linesFromText(draft.stepsText),
+          expected: linesFromText(draft.expectedText),
+        },
+      })),
+    })
+    caseAssetResult.value = data
+    toast.success(`已保存 ${data.total} 个用例到套件`)
+  } catch (err: any) {
+    toast.error(err?.response?.data?.detail || '保存用例资产失败')
+  } finally {
+    caseAssetSaving.value = false
+  }
 }
 
 function screenshotStepLabel(path: string, fallbackIndex: number) {
@@ -423,12 +615,103 @@ const toolCalls = computed(() => ensureList(run.value?.tool_calls || run.value?.
 const skillPlan = computed(() => ensureList(run.value?.skill_plan || run.value?.final_report?.skill_plan))
 const toolSummary = computed(() => run.value?.tool_summary || run.value?.final_report?.tool_summary || run.value?.artifacts?.tool_summary || null)
 const hasToolSurface = computed(() => toolCalls.value.length > 0 || skillPlan.value.length > 0 || Boolean(toolSummary.value))
+const triageSummary = computed(() => run.value?.triage_summary || null)
+const interventionSummary = computed(() => run.value?.intervention_summary || null)
+const showInterventionPanel = computed(() => Boolean(interventionSummary.value?.useful))
+const interventionSuggestedInputs = computed(() => ensureList(interventionSummary.value?.suggested_inputs))
 function toolStatusClass(status: string) {
   const value = String(status || '').toLowerCase()
   if (['success', 'passed', 'done'].includes(value)) return 'bg-emerald-100 text-emerald-700'
   if (value === 'skipped') return 'bg-amber-100 text-amber-700'
   if (['failed', 'error'].includes(value)) return 'bg-red-100 text-red-700'
   return 'bg-gray-100 text-gray-600'
+}
+function triageRiskClass(level: string) {
+  const value = String(level || '').toLowerCase()
+  if (value === 'high') return 'bg-red-50 border-red-200 text-red-700'
+  if (value === 'medium') return 'bg-amber-50 border-amber-200 text-amber-700'
+  if (value === 'low') return 'bg-emerald-50 border-emerald-200 text-emerald-700'
+  return 'bg-gray-50 border-gray-200 text-gray-600'
+}
+function triageSeverityClass(severity: string) {
+  const value = String(severity || '').toUpperCase()
+  if (['CRITICAL', 'HIGH'].includes(value)) return 'bg-red-100 text-red-700'
+  if (value === 'MEDIUM') return 'bg-amber-100 text-amber-700'
+  return 'bg-gray-100 text-gray-600'
+}
+function triageConfidenceClass(level: string) {
+  const value = String(level || '').toLowerCase()
+  if (value === 'high') return 'bg-blue-100 text-blue-700'
+  if (value === 'medium') return 'bg-amber-100 text-amber-700'
+  return 'bg-gray-100 text-gray-600'
+}
+function formatTriageSummaryForCopy(summary: any) {
+  const lines = [
+    `发布风险：${summary?.release_risk?.label || '未知'} (${summary?.release_risk?.level || 'unknown'})`,
+    `阻断项：${summary?.blocking_count || 0}`,
+    `证据数：${summary?.evidence?.count || 0}`,
+    `置信度：${summary?.confidence?.level || 'unknown'}`,
+    '',
+    summary?.summary || '',
+  ].filter((line) => line !== undefined)
+
+  const findings = ensureList(summary?.blocking_findings).slice(0, 5)
+  if (findings.length) {
+    lines.push('', '阻断发现：')
+    findings.forEach((finding: any, index: number) => {
+      lines.push(`${index + 1}. [${finding.severity || 'MEDIUM'}] ${finding.title || 'Finding'}`)
+      if (finding.surface) lines.push(`   影响面：${finding.surface}`)
+      if (finding.description) lines.push(`   说明：${finding.description}`)
+      if (finding.next_action) lines.push(`   下一步：${finding.next_action}`)
+    })
+  }
+
+  const actions = ensureList(summary?.recommended_next_actions).slice(0, 5)
+  if (actions.length) {
+    lines.push('', '建议动作：')
+    actions.forEach((action: string, index: number) => lines.push(`${index + 1}. ${action}`))
+  }
+
+  const steps = ensureList(summary?.reproduction?.steps).slice(0, 5)
+  if (steps.length) {
+    lines.push('', '复现路径：')
+    steps.forEach((step: string, index: number) => lines.push(`${index + 1}. ${step}`))
+  }
+
+  return lines.filter(Boolean).join('\n')
+}
+async function copyTriageSummary() {
+  if (!triageSummary.value) return
+  try {
+    await navigator.clipboard.writeText(formatTriageSummaryForCopy(triageSummary.value))
+    toast.success('分诊摘要已复制')
+  } catch {
+    toast.error('复制分诊摘要失败')
+  }
+}
+async function downloadTriageExport(format: 'markdown' | 'json') {
+  if (!run.value?.id) return
+  triageExporting.value = format
+  try {
+    const { data } = await api.get(`/runs/${run.value.id}/triage-export`, {
+      params: { format },
+      responseType: 'blob',
+    })
+    const extension = format === 'markdown' ? 'md' : 'json'
+    const mimeType = format === 'markdown' ? 'text/markdown' : 'application/json'
+    const blob = data instanceof Blob ? data : new Blob([data], { type: mimeType })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `testclaw-triage-${run.value.id.slice(0, 8)}.${extension}`
+    a.click()
+    URL.revokeObjectURL(url)
+    toast.success(format === 'markdown' ? 'Markdown 分诊已下载' : 'JSON 分诊已下载')
+  } catch (err: any) {
+    toast.error(err?.response?.data?.detail || '下载分诊导出失败')
+  } finally {
+    triageExporting.value = null
+  }
 }
 const visibleTabs = computed(() => {
   const tabs = [
@@ -726,6 +1009,58 @@ watch(visibleTabs, (tabs) => {
       </div>
     </section>
 
+    <!-- Human Intervention -->
+    <section v-if="showInterventionPanel" class="bg-white border border-amber-200 rounded-xl shadow-sm p-6">
+      <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2">
+            <AlertTriangle :size="17" class="text-amber-600" />
+            <h3 class="text-sm font-bold text-gray-900">人工干预 / 补充上下文</h3>
+            <span class="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-700">{{ interventionSummary?.category }}</span>
+          </div>
+          <p class="mt-2 text-sm leading-6 text-gray-700">{{ interventionSummary?.reason }}</p>
+          <p class="mt-1 text-xs leading-5 text-amber-700">{{ interventionSummary?.recommended_action }}</p>
+        </div>
+        <div class="shrink-0 rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
+          辅助重跑 {{ interventionSummary?.assisted_rerun_enabled ? '可用' : '不可用' }}
+        </div>
+      </div>
+
+      <div v-if="interventionSuggestedInputs.length" class="mt-4 flex flex-wrap gap-2">
+        <span
+          v-for="item in interventionSuggestedInputs"
+          :key="item"
+          class="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1 text-[11px] text-gray-600"
+        >
+          {{ item }}
+        </span>
+      </div>
+
+      <div class="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+        <div>
+          <textarea
+            v-model="interventionText"
+            rows="4"
+            class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm leading-6 text-gray-700 outline-none transition-all focus:border-amber-400 focus:ring-2 focus:ring-amber-100"
+            placeholder="补充登录步骤、测试账号、Token/Header、环境入口、需要跳过或优先验证的范围..."
+          ></textarea>
+          <label v-if="interventionSummary?.requires_cancel_current" class="mt-2 flex items-center gap-2 text-xs font-bold text-amber-700">
+            <input v-model="interventionCancelCurrent" type="checkbox" class="h-4 w-4 rounded border-amber-300 text-amber-600 focus:ring-amber-500" />
+            先取消当前运行再发起辅助重跑
+          </label>
+        </div>
+        <button
+          @click="submitInterventionRerun"
+          :disabled="interventionSubmitting || !interventionText.trim() || !interventionSummary?.assisted_rerun_enabled || (interventionSummary?.requires_cancel_current && !interventionCancelCurrent)"
+          class="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg bg-amber-600 px-4 text-xs font-bold text-white transition-all hover:bg-amber-700 disabled:cursor-not-allowed disabled:bg-gray-300"
+        >
+          <Loader2 v-if="interventionSubmitting" :size="14" class="animate-spin" />
+          <RotateCcw v-else :size="14" />
+          辅助重跑
+        </button>
+      </div>
+    </section>
+
     <!-- Final Report Summary Card -->
     <div v-if="run.final_report" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
       <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">测试总结</h3>
@@ -756,6 +1091,155 @@ watch(visibleTabs, (tabs) => {
         <div v-for="(rec, i) in run.final_report.recommendations" :key="i" class="text-xs text-gray-500 flex gap-2">
           <span class="text-blue-400 font-bold">-</span> {{ rec }}
         </div>
+      </div>
+    </div>
+
+    <!-- Triage Summary -->
+    <div v-if="triageSummary" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+      <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">分诊摘要</h3>
+          <p class="mt-2 text-sm leading-6 text-gray-700">{{ triageSummary.summary }}</p>
+        </div>
+        <div class="flex shrink-0 flex-wrap gap-2">
+          <button
+            @click="copyTriageSummary"
+            class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs font-bold text-gray-600 transition-all hover:bg-gray-100 flex items-center gap-1.5"
+          >
+            <ClipboardCopy :size="14" /> 复制摘要
+          </button>
+          <button
+            @click="downloadTriageExport('markdown')"
+            :disabled="triageExporting === 'markdown'"
+            class="rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-bold text-blue-700 transition-all hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60 flex items-center gap-1.5"
+          >
+            <Download :size="14" /> Markdown
+          </button>
+          <button
+            @click="downloadTriageExport('json')"
+            :disabled="triageExporting === 'json'"
+            class="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-bold text-gray-700 transition-all hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60 flex items-center gap-1.5"
+          >
+            <Download :size="14" /> JSON
+          </button>
+        </div>
+      </div>
+
+      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div class="rounded-lg border p-3" :class="triageRiskClass(triageSummary.release_risk?.level)">
+          <div class="text-[10px] font-bold uppercase tracking-widest opacity-70">发布风险</div>
+          <div class="mt-1 text-sm font-bold">{{ triageSummary.release_risk?.label || '等待结果' }}</div>
+          <div class="mt-1 text-[11px] leading-4 opacity-80">{{ triageSummary.release_risk?.rationale }}</div>
+        </div>
+        <div class="rounded-lg border border-gray-100 bg-gray-50 p-3">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">阻断项</div>
+          <div class="mt-1 text-lg font-bold" :class="triageSummary.blocking_count ? 'text-red-600' : 'text-emerald-600'">{{ triageSummary.blocking_count || 0 }}</div>
+          <div class="mt-1 text-[11px] text-gray-500">{{ ensureList(triageSummary.affected_surfaces).length }} 个影响面</div>
+        </div>
+        <div class="rounded-lg border border-gray-100 bg-gray-50 p-3">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">证据</div>
+          <div class="mt-1 text-lg font-bold text-gray-900">{{ triageSummary.evidence?.count || 0 }}</div>
+          <div class="mt-1 text-[11px] text-gray-500">
+            API {{ triageSummary.evidence?.api_result_count || 0 }} · 截图 {{ triageSummary.evidence?.screenshot_count || 0 }} · 工具 {{ triageSummary.evidence?.tool_call_count || 0 }}
+          </div>
+        </div>
+        <div class="rounded-lg border border-gray-100 bg-gray-50 p-3">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">置信度</div>
+          <div class="mt-2">
+            <span class="rounded px-2 py-0.5 text-[10px] font-bold" :class="triageConfidenceClass(triageSummary.confidence?.level)">
+              {{ triageSummary.confidence?.level || 'unknown' }}
+            </span>
+          </div>
+          <div class="mt-2 text-[11px] leading-4 text-gray-500">{{ triageSummary.confidence?.rationale }}</div>
+        </div>
+      </div>
+
+      <div v-if="ensureList(triageSummary.affected_surfaces).length" class="mt-4">
+        <div class="mb-2 text-[10px] font-bold uppercase tracking-widest text-gray-400">影响面</div>
+        <div class="flex flex-wrap gap-2">
+          <span
+            v-for="surface in ensureList(triageSummary.affected_surfaces)"
+            :key="`${surface.type}-${surface.name}`"
+            class="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1 text-[11px] font-mono text-gray-600"
+          >
+            {{ surface.name }}
+          </span>
+        </div>
+      </div>
+
+      <div v-if="ensureList(triageSummary.blocking_findings).length" class="mt-4 space-y-3">
+        <div
+          v-for="(finding, index) in ensureList(triageSummary.blocking_findings).slice(0, 5)"
+          :key="`${finding.source}-${finding.surface}-${index}`"
+          class="rounded-lg border border-red-100 bg-red-50 p-4"
+        >
+          <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div class="min-w-0">
+              <div class="text-sm font-bold text-red-950">{{ finding.title }}</div>
+              <div v-if="finding.surface" class="mt-1 truncate font-mono text-[11px] text-red-700">{{ finding.surface }}</div>
+            </div>
+            <div class="flex shrink-0 flex-wrap gap-1.5">
+              <span class="rounded px-2 py-0.5 text-[10px] font-bold" :class="triageSeverityClass(finding.severity)">{{ finding.severity || 'MEDIUM' }}</span>
+              <span class="rounded bg-white px-2 py-0.5 text-[10px] font-bold text-red-600">{{ finding.confidence || 'medium' }}</span>
+            </div>
+          </div>
+          <p v-if="finding.description" class="mt-2 text-xs leading-5 text-red-800">{{ finding.description }}</p>
+          <div v-if="ensureList(finding.evidence).length" class="mt-3 flex flex-wrap gap-2">
+            <span
+              v-for="(evidence, evidenceIndex) in ensureList(finding.evidence)"
+              :key="`${finding.title}-evidence-${evidenceIndex}`"
+              class="rounded border border-red-100 bg-white px-2 py-1 text-[11px] text-red-700"
+            >
+              {{ evidence.summary || evidence.kind }}
+            </span>
+          </div>
+          <div v-if="ensureList(finding.reproduction_steps).length" class="mt-3 rounded-lg border border-red-100 bg-white p-3">
+            <div class="text-[10px] font-bold uppercase tracking-widest text-red-400">复现</div>
+            <ol class="mt-2 space-y-1">
+              <li v-for="(step, stepIndex) in ensureList(finding.reproduction_steps).slice(0, 4)" :key="`${finding.title}-step-${stepIndex}`" class="text-xs leading-5 text-red-800">
+                {{ stepIndex + 1 }}. {{ step }}
+              </li>
+            </ol>
+          </div>
+          <div v-if="finding.next_action" class="mt-3 text-xs font-bold text-red-900">{{ finding.next_action }}</div>
+        </div>
+      </div>
+      <div v-else class="mt-4 rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3 text-xs text-emerald-700">
+        当前报告未发现阻断缺陷，可将证据随发布评审归档。
+      </div>
+
+      <div class="mt-4 grid gap-4 lg:grid-cols-2">
+        <div v-if="ensureList(triageSummary.recommended_next_actions).length" class="rounded-lg border border-amber-100 bg-amber-50 p-4">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-amber-500">建议动作</div>
+          <ul class="mt-2 space-y-1">
+            <li v-for="(action, index) in ensureList(triageSummary.recommended_next_actions)" :key="`triage-action-${index}`" class="text-xs leading-5 text-amber-800">
+              {{ action }}
+            </li>
+          </ul>
+        </div>
+        <div class="rounded-lg border border-blue-100 bg-blue-50 p-4">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-blue-500">复现能力</div>
+          <div class="mt-2 text-xs leading-5 text-blue-800">
+            <template v-if="triageSummary.reproduction?.available">已生成可执行的复现路径<span v-if="triageSummary.reproduction?.script_available">，包含可复现脚本</span>。</template>
+            <template v-else>当前没有失败路径需要复现。</template>
+          </div>
+          <ul v-if="ensureList(triageSummary.reproduction?.steps).length" class="mt-2 space-y-1">
+            <li v-for="(step, index) in ensureList(triageSummary.reproduction?.steps).slice(0, 4)" :key="`triage-repro-${index}`" class="text-xs leading-5 text-blue-800">
+              {{ index + 1 }}. {{ step }}
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      <div v-if="ensureList(triageSummary.triage_flow).length" class="mt-4 flex flex-wrap gap-2">
+        <span
+          v-for="item in ensureList(triageSummary.triage_flow)"
+          :key="item.key"
+          class="rounded-lg border px-2.5 py-1 text-[11px] font-bold"
+          :class="item.enabled ? 'border-gray-200 bg-gray-50 text-gray-600' : 'border-gray-100 bg-gray-50 text-gray-300'"
+        >
+          {{ item.label }}
+        </span>
       </div>
     </div>
 
@@ -1201,47 +1685,142 @@ watch(visibleTabs, (tabs) => {
 
     <!-- Tab: Test Cases -->
     <div v-if="activeTab === 'cases'" class="space-y-4">
+      <div v-if="hasGeneratedCaseAssets" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">用例资产</h3>
+            <div class="mt-1 text-sm font-bold text-gray-900">{{ acceptedCaseAssetCount }}/{{ caseAssetDrafts.length }} 已接受</div>
+          </div>
+          <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <input
+              v-model="caseAssetSuiteName"
+              class="h-9 min-w-0 rounded-lg border border-gray-200 bg-white px-3 text-xs text-gray-700 outline-none transition-all focus:border-blue-400 focus:ring-2 focus:ring-blue-100 sm:w-72"
+              placeholder="套件名称"
+            />
+            <button
+              @click="saveAcceptedCaseAssets"
+              :disabled="caseAssetSaving || !acceptedCaseAssetCount"
+              class="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-3 text-xs font-bold text-white transition-all hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-300"
+            >
+              <Loader2 v-if="caseAssetSaving" :size="14" class="animate-spin" />
+              <Save v-else :size="14" />
+              保存到套件
+            </button>
+          </div>
+        </div>
+        <div v-if="caseAssetResult" class="mt-4 rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3 text-xs text-emerald-700">
+          已保存到套件：{{ caseAssetResult.suite_name }}，共 {{ caseAssetResult.total }} 个用例。
+        </div>
+      </div>
+
       <!-- API Cases -->
-      <div v-if="run.api_cases?.length" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
-        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">API 测试用例 ({{ run.api_cases.length }})</h3>
+      <div v-if="apiCaseAssetDrafts.length" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">API 测试用例 ({{ apiCaseAssetDrafts.length }})</h3>
         <div class="space-y-3">
-          <div v-for="(tc, i) in run.api_cases" :key="i" class="p-4 bg-gray-50 rounded-lg border border-gray-100">
-            <div class="flex items-center justify-between mb-2">
-              <span class="font-bold text-sm text-gray-900">{{ tc.title }}</span>
-              <div class="flex gap-2">
-                <span class="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-[10px] font-bold">{{ tc.method }}</span>
-                <span class="px-2 py-0.5 bg-gray-200 text-gray-600 rounded text-[10px] font-bold">{{ tc.category }}</span>
+          <div
+            v-for="draft in apiCaseAssetDrafts"
+            :key="draft.key"
+            class="rounded-lg border p-4 transition-all"
+            :class="draft.status === 'accepted' ? 'border-emerald-200 bg-emerald-50/40' : 'border-gray-200 bg-gray-50 opacity-75'"
+          >
+            <div class="mb-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div class="min-w-0 flex-1">
+                <input
+                  v-model="draft.title"
+                  class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-bold text-gray-900 outline-none transition-all focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                />
+                <div v-if="caseEndpoint(draft.raw)" class="mt-2 truncate font-mono text-xs text-gray-500">
+                  <span v-if="caseMethod(draft.raw)" class="font-bold text-blue-600">{{ caseMethod(draft.raw) }}</span>
+                  {{ caseEndpoint(draft.raw) }}
+                </div>
+              </div>
+              <div class="flex shrink-0 flex-wrap gap-2">
+                <button
+                  @click="setCaseAssetStatus(draft, 'accepted')"
+                  class="inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-bold transition-all"
+                  :class="draft.status === 'accepted' ? 'border-emerald-200 bg-emerald-100 text-emerald-700' : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-100'"
+                >
+                  <CheckCircle2 :size="13" /> 接受
+                </button>
+                <button
+                  @click="setCaseAssetStatus(draft, 'rejected')"
+                  class="inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-bold transition-all"
+                  :class="draft.status === 'rejected' ? 'border-red-200 bg-red-100 text-red-700' : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-100'"
+                >
+                  <XCircle :size="13" /> 拒绝
+                </button>
               </div>
             </div>
-            <div v-if="tc.endpoint" class="text-xs font-mono text-gray-500 mb-1">{{ tc.endpoint }}</div>
-            <ul v-if="ensureSteps(tc.steps).length" class="mt-2 space-y-1">
-              <li v-for="(s, j) in ensureSteps(tc.steps)" :key="j" class="text-xs text-gray-500">{{ j + 1 }}. {{ s }}</li>
-            </ul>
+
+            <div class="grid gap-3 md:grid-cols-[120px_160px_minmax(0,1fr)]">
+              <select v-model="draft.priority" class="h-9 rounded-lg border border-gray-200 bg-white px-2 text-xs font-bold text-gray-700 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100">
+                <option value="P0">P0</option>
+                <option value="P1">P1</option>
+                <option value="P2">P2</option>
+                <option value="P3">P3</option>
+              </select>
+              <input v-model="draft.category" class="h-9 rounded-lg border border-gray-200 bg-white px-3 text-xs text-gray-700 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" />
+              <textarea v-model="draft.expectedText" rows="2" class="min-h-9 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs leading-5 text-gray-600 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"></textarea>
+            </div>
+            <textarea v-model="draft.stepsText" rows="3" class="mt-3 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs leading-5 text-gray-600 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"></textarea>
           </div>
         </div>
       </div>
 
       <!-- UI Cases -->
-      <div v-if="run.ui_cases?.length" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
-        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">UI 测试用例 ({{ run.ui_cases.length }})</h3>
+      <div v-if="uiCaseAssetDrafts.length" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">UI 测试用例 ({{ uiCaseAssetDrafts.length }})</h3>
         <div class="space-y-3">
-          <div v-for="(tc, i) in run.ui_cases" :key="i" class="p-4 bg-gray-50 rounded-lg border border-gray-100">
-            <div class="flex items-center justify-between mb-2">
-              <span class="font-bold text-sm text-gray-900">{{ tc.title }}</span>
-              <span class="px-2 py-0.5 bg-gray-200 text-gray-600 rounded text-[10px] font-bold">{{ tc.category }}</span>
+          <div
+            v-for="draft in uiCaseAssetDrafts"
+            :key="draft.key"
+            class="rounded-lg border p-4 transition-all"
+            :class="draft.status === 'accepted' ? 'border-emerald-200 bg-emerald-50/40' : 'border-gray-200 bg-gray-50 opacity-75'"
+          >
+            <div class="mb-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <input
+                v-model="draft.title"
+                class="min-w-0 flex-1 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-bold text-gray-900 outline-none transition-all focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+              />
+              <div class="flex shrink-0 flex-wrap gap-2">
+                <button
+                  @click="setCaseAssetStatus(draft, 'accepted')"
+                  class="inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-bold transition-all"
+                  :class="draft.status === 'accepted' ? 'border-emerald-200 bg-emerald-100 text-emerald-700' : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-100'"
+                >
+                  <CheckCircle2 :size="13" /> 接受
+                </button>
+                <button
+                  @click="setCaseAssetStatus(draft, 'rejected')"
+                  class="inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-bold transition-all"
+                  :class="draft.status === 'rejected' ? 'border-red-200 bg-red-100 text-red-700' : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-100'"
+                >
+                  <XCircle :size="13" /> 拒绝
+                </button>
+              </div>
             </div>
-            <ul v-if="ensureSteps(tc.steps).length" class="mt-2 space-y-1">
-              <li v-for="(s, j) in ensureSteps(tc.steps)" :key="j" class="text-xs text-gray-500">{{ j + 1 }}. {{ s }}</li>
-            </ul>
-            <div v-if="tc.playwright_commands?.length" class="mt-2">
+
+            <div class="grid gap-3 md:grid-cols-[120px_160px_minmax(0,1fr)]">
+              <select v-model="draft.priority" class="h-9 rounded-lg border border-gray-200 bg-white px-2 text-xs font-bold text-gray-700 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100">
+                <option value="P0">P0</option>
+                <option value="P1">P1</option>
+                <option value="P2">P2</option>
+                <option value="P3">P3</option>
+              </select>
+              <input v-model="draft.category" class="h-9 rounded-lg border border-gray-200 bg-white px-3 text-xs text-gray-700 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" />
+              <textarea v-model="draft.expectedText" rows="2" class="min-h-9 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs leading-5 text-gray-600 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"></textarea>
+            </div>
+            <textarea v-model="draft.stepsText" rows="3" class="mt-3 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs leading-5 text-gray-600 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"></textarea>
+
+            <div v-if="caseCommands(draft.raw).length" class="mt-3">
               <div class="text-[10px] font-bold text-gray-400 uppercase mb-1">Playwright 命令</div>
-              <pre class="bg-gray-100 rounded p-2 text-[10px] font-mono text-gray-600 overflow-auto max-h-32">{{ tc.playwright_commands.join('\n') }}</pre>
+              <pre class="bg-gray-100 rounded p-2 text-[10px] font-mono text-gray-600 overflow-auto max-h-32">{{ caseCommands(draft.raw).join('\n') }}</pre>
             </div>
           </div>
         </div>
       </div>
 
-      <div v-if="!run.api_cases?.length && !run.ui_cases?.length" class="text-center py-12 text-gray-400 text-sm">无测试用例</div>
+      <div v-if="!hasGeneratedCaseAssets" class="text-center py-12 text-gray-400 text-sm">无测试用例</div>
     </div>
 
     <!-- Tab: Script -->

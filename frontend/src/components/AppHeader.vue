@@ -12,7 +12,6 @@ const { isMobile, toggleMobile } = useSidebar()
 
 const pageTitle = computed(() => {
   const titles: Record<string, string> = {
-    '/dashboard': '质量仪表盘',
     '/run': 'Testing Agent Workspace',
     '/history': '运行历史',
     '/settings': '系统设置',

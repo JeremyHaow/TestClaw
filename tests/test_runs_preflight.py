@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.api.v1 import runs
@@ -46,6 +47,62 @@ def test_run_preflight_classifies_raw_openapi_and_reports_readiness() -> None:
     assert body["api_execution_policy"] == "safe_read_only"
     assert body["expected_flow"][0] == "识别输入"
     assert any(check["key"] == "provider" and check["status"] == "missing" for check in body["checks"])
+
+
+def test_run_preflight_returns_structured_mission_preview(monkeypatch) -> None:
+    openapi = {
+        "openapi": "3.0.0",
+        "info": {"title": "Mission API", "version": "1.0.0"},
+        "servers": [{"url": "https://api.example.test"}],
+        "paths": {
+            "/health": {
+                "get": {
+                    "summary": "Health check",
+                    "responses": {"200": {"description": "ok"}},
+                }
+            },
+            "/items": {
+                "post": {
+                    "summary": "Create item",
+                    "responses": {"201": {"description": "created"}},
+                }
+            },
+        },
+    }
+
+    async def fake_worker_readiness() -> tuple[str, str, str | None]:
+        return "ready", "检测到 1 个活跃 Worker", None
+
+    monkeypatch.setattr(runs, "_best_effort_worker_readiness", fake_worker_readiness)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": json.dumps(openapi),
+                "test_type": "api",
+                "objective": "验证健康检查和只读接口",
+                "setup_instructions": "只允许读取测试环境数据",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    preview = body["mission_preview"]
+    assert preview["target"] == "https://api.example.test"
+    assert preview["input_mode"] == "Swagger/OpenAPI JSON"
+    assert preview["test_mode"] == "API 检查"
+    assert preview["objective"] == "验证健康检查和只读接口"
+    assert "预计执行 1 个接口" in preview["scope"]
+    assert "安全只读" in preview["execution_policy"]
+    assert "已提供前置说明" in preview["safety_boundary"]
+    assert preview["counts"]["endpoint_count"] == 2
+    assert preview["counts"]["estimated_executable_count"] == 1
+    assert preview["counts"]["estimated_skipped_count"] == 1
+    assert preview["counts"]["flow_step_count"] == len(body["expected_flow"])
+    assert isinstance(preview["correction_prompts"], list)
 
 
 def test_run_preflight_requires_source() -> None:
@@ -120,6 +177,54 @@ def _check_by_key(body: dict, key: str) -> dict:
     return next(check for check in body["checks"] if check["key"] == key)
 
 
+@pytest.mark.asyncio
+async def test_worker_readiness_warns_when_broker_unreachable(monkeypatch) -> None:
+    async def fake_broker_reachable(timeout: float) -> bool:
+        return False
+
+    monkeypatch.setattr(runs, "_redis_broker_reachable", fake_broker_reachable)
+
+    status, detail, action = await runs._best_effort_worker_readiness()
+
+    assert status == "warning"
+    assert "Redis Broker" in detail
+    assert action == "启动 Redis 和 Celery Worker 后重新预检"
+
+
+def test_run_preflight_reports_worker_readiness(monkeypatch) -> None:
+    openapi = {
+        "openapi": "3.0.0",
+        "info": {"title": "Worker API", "version": "1.0.0"},
+        "servers": [{"url": "https://api.example.test"}],
+        "paths": {
+            "/health": {
+                "get": {
+                    "summary": "Health check",
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    }
+
+    async def fake_worker_readiness() -> tuple[str, str, str | None]:
+        return "ready", "检测到 1 个活跃 Worker", None
+
+    monkeypatch.setattr(runs, "_best_effort_worker_readiness", fake_worker_readiness)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={"source": json.dumps(openapi), "test_type": "api"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    worker_check = _check_by_key(response.json(), "worker")
+    assert worker_check["status"] == "ready"
+    assert "活跃 Worker" in worker_check["detail"]
+
+
 def test_run_preflight_blocks_auth_required_api_without_credentials() -> None:
     with TestClient(app) as client:
         token = _token(client)
@@ -136,6 +241,45 @@ def test_run_preflight_blocks_auth_required_api_without_credentials() -> None:
     auth_check = _check_by_key(body, "auth")
     assert auth_check["status"] == "missing"
     assert "必须提供 Token/Header" in auth_check["detail"]
+    auth_prompt = next(prompt for prompt in body["mission_preview"]["correction_prompts"] if prompt["key"] == "auth")
+    assert auth_prompt["status"] == "missing"
+    assert "Token" in auth_prompt["action"]
+
+
+def test_run_preflight_mission_preview_does_not_expose_manual_auth_values(monkeypatch) -> None:
+    async def fake_worker_readiness() -> tuple[str, str, str | None]:
+        return "ready", "检测到 1 个活跃 Worker", None
+
+    monkeypatch.setattr(runs, "_best_effort_worker_readiness", fake_worker_readiness)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": json.dumps(_auth_required_openapi()),
+                "test_type": "api",
+                "token": "manual-token-secret",
+                "headers": {
+                    "Authorization": "Bearer header-secret",
+                    "X-Api-Key": "api-key-secret",
+                    "X-Tenant": "tenant-a",
+                },
+                "setup_instructions": "password=setup-secret; do not delete data",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    preview = body["mission_preview"]
+    serialized = json.dumps(body, ensure_ascii=False)
+    assert preview["counts"]["auth_required_count"] == 1
+    assert "预览不展示" in preview["auth_readiness"]
+    assert "manual-token-secret" not in serialized
+    assert "header-secret" not in serialized
+    assert "api-key-secret" not in serialized
+    assert "setup-secret" not in serialized
 
 
 def test_run_preflight_auto_auth_resolves_token_without_returning_secret(monkeypatch) -> None:

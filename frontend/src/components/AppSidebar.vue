@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
-  Bot, History, Settings2, ChevronLeft, ChevronRight, LayoutDashboard
+  Bot, History, Settings2, ChevronLeft, ChevronRight
 } from 'lucide-vue-next'
 import { useSidebar } from '../composables/useSidebar'
 
@@ -14,7 +14,6 @@ const { mobileOpen, isMobile, closeMobile } = useSidebar()
 const navItems = [
   { path: '/run', label: '测试智能体', icon: Bot },
   { path: '/history', label: '运行历史', icon: History },
-  { path: '/dashboard', label: '质量仪表盘', icon: LayoutDashboard },
   { path: '/settings', label: '系统设置', icon: Settings2 },
 ]
 

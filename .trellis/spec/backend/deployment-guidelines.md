@@ -79,3 +79,61 @@ docker compose --env-file .env -f docker/docker-compose.yml up -d api worker fro
 ```bash
 docker compose --env-file .env -f docker/docker-compose.yml --profile edge up -d nginx
 ```
+
+## Scenario: Frontend API Base URL Contract
+
+### 1. Scope / Trigger
+
+- Trigger: the browser may run against a local Vite server while the API is served from a different origin, or from production where `/api/v1` is same-origin.
+- Applies to `frontend/src/lib/api.ts` and any browser API URL that bypasses axios, including `EventSource`, asset URLs, and direct download links.
+
+### 2. Signatures
+
+- Environment key:
+  ```text
+  VITE_API_BASE_URL=http://127.0.0.1:8000/api/v1
+  ```
+- Frontend helper:
+  ```typescript
+  apiUrl(path: string, params?: Record<string, string | number | boolean | null | undefined>): string
+  ```
+
+### 3. Contracts
+
+- Axios `baseURL` and direct browser API URLs must use the same exported API base helper.
+- Default deployments preserve same-origin relative URLs by falling back to `/api/v1`.
+- Local split-origin development may set `VITE_API_BASE_URL` to an absolute backend URL.
+- Remote screenshot URLs from storage payloads stay unchanged; only backend fallback routes use the API URL helper.
+
+### 4. Validation & Error Matrix
+
+- `VITE_API_BASE_URL` unset + SSE stream -> browser requests `/api/v1/runs/{id}/stream` on the current origin.
+- `VITE_API_BASE_URL=http://127.0.0.1:8000/api/v1` + SSE stream -> browser requests `http://127.0.0.1:8000/api/v1/runs/{id}/stream`.
+- Hard-coded `/api/v1` in direct `EventSource` or asset URLs during split-origin local dev -> Vite proxy may target Docker-only upstreams and return `500`.
+
+### 5. Good/Base/Bad Cases
+
+- Good: ``new EventSource(apiUrl(`/runs/${runId}/stream`, { token }))``.
+- Base: ``api.get(`/runs/${runId}`)`` continues to rely on the shared axios client.
+- Bad: ``new EventSource(`/api/v1/runs/${runId}/stream?token=${token}`)``.
+
+### 6. Tests Required
+
+- Frontend type-check: `npm exec tsc -- --noEmit`.
+- Frontend build: `npm run build`.
+- Smoke: with `VITE_API_BASE_URL=http://127.0.0.1:8000/api/v1`, run detail SSE and screenshot fallback URLs hit the backend origin, not the Vite proxy.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```typescript
+const url = `/api/v1/runs/${runId}/stream`
+new EventSource(token ? `${url}?token=${token}` : url)
+```
+
+#### Correct
+
+```typescript
+new EventSource(apiUrl(`/runs/${runId}/stream`, { token }))
+```

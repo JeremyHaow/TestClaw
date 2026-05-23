@@ -30,6 +30,88 @@ type PreflightCheck = {
   action?: string | null
 }
 
+type MissionCorrectionPrompt = {
+  key: string
+  label: string
+  status: string
+  detail: string
+  action?: string | null
+}
+
+type MissionCounts = {
+  endpoint_count?: number | null
+  estimated_executable_count?: number | null
+  estimated_skipped_count?: number | null
+  auth_required_count?: number | null
+  flow_step_count: number
+  check_count: number
+  ready_count: number
+  review_count: number
+  blocked_count: number
+}
+
+type MissionPreview = {
+  handoff: string
+  readiness: string
+  target: string
+  input_mode: string
+  test_mode: string
+  objective: string
+  scope: string
+  execution_policy: string
+  safety_boundary: string
+  auth_readiness: string
+  counts: MissionCounts
+  correction_prompts: MissionCorrectionPrompt[]
+}
+
+type TargetMemoryLastRun = {
+  run_id: string
+  status: string
+  test_type?: string | null
+  created_at?: string | null
+}
+
+type TargetMemoryTheme = {
+  theme: string
+  category: string
+  count: number
+  severity: string
+  surfaces: string[]
+  last_seen?: string | null
+  recommended_action: string
+}
+
+type TargetMemoryBlocker = {
+  category: string
+  label: string
+  count: number
+  detail: string
+  last_seen?: string | null
+}
+
+type TargetMemorySuite = {
+  suite_id: string
+  label: string
+  case_count: number
+}
+
+type TargetMemory = {
+  target: string
+  previous_run_count: number
+  target_run_count: number
+  host_run_count: number
+  last_run?: TargetMemoryLastRun | null
+  recurring_failure_themes: TargetMemoryTheme[]
+  known_blockers: TargetMemoryBlocker[]
+  reusable_suite_count: number
+  reusable_case_count: number
+  reusable_suites: TargetMemorySuite[]
+  suggested_strategy: string
+  confidence: string
+  confidence_reason: string
+}
+
 type PreflightResponse = {
   input_type: string
   test_type: string
@@ -37,6 +119,8 @@ type PreflightResponse = {
   expected_flow: string[]
   readiness: string
   checks: PreflightCheck[]
+  mission_preview?: MissionPreview | null
+  target_memory?: TargetMemory | null
   warnings: string[]
   endpoint_count?: number | null
   auth_required_count?: number | null
@@ -126,7 +210,6 @@ const defaultFlow = ['识别目标', '制定测试计划', '生成用例', '执�
 const localInputType = computed(() => detectInputType(form.source))
 const flow = computed(() => preflight.value?.expected_flow?.length ? preflight.value.expected_flow : defaultFlow)
 const isApiMode = computed(() => form.test_type !== 'ui')
-const isUiMode = computed(() => form.test_type === 'ui')
 const manualAuthSupplied = computed(() => Boolean(form.token.trim() || form.custom_headers.trim()))
 const isAutoAuthMode = computed(() => form.auth_mode === 'auto')
 const isManualAuthMode = computed(() => form.auth_mode === 'manual')
@@ -151,6 +234,50 @@ const endpointCountLabel = computed(() => {
   const count = preflight.value?.endpoint_count
   if (count === null || count === undefined) return '运行时解析'
   return `${count} 个端点`
+})
+const missionPreview = computed(() => preflight.value?.mission_preview || null)
+const missionCountItems = computed(() => {
+  const counts = missionPreview.value?.counts
+  if (!counts) return []
+  const items = [
+    { label: '流程步骤', value: `${counts.flow_step_count}` },
+    { label: '待修正', value: `${counts.blocked_count}` },
+    { label: '需确认', value: `${counts.review_count}` },
+  ]
+  if (counts.endpoint_count !== null && counts.endpoint_count !== undefined) {
+    items.unshift({ label: '端点', value: `${counts.endpoint_count}` })
+  } else if (isApiMode.value) {
+    items.unshift({ label: '端点', value: '运行时解析' })
+  }
+  if (counts.estimated_executable_count !== null && counts.estimated_executable_count !== undefined) {
+    items.push({ label: '预计执行', value: `${counts.estimated_executable_count}` })
+  }
+  if (counts.estimated_skipped_count) {
+    items.push({ label: '策略跳过', value: `${counts.estimated_skipped_count}` })
+  }
+  if (counts.auth_required_count !== null && counts.auth_required_count !== undefined) {
+    items.push({ label: '需鉴权', value: `${counts.auth_required_count}` })
+  }
+  return items
+})
+const missionAuthTone = computed(() => {
+  const authRequiredCount = missionPreview.value?.counts.auth_required_count || 0
+  if (preflight.value?.auth_error || (authRequiredCount > 0 && !preflight.value?.auth_resolved && !manualAuthSupplied.value)) {
+    return 'text-amber-700'
+  }
+  if (authRequiredCount > 0 || preflight.value?.auth_resolved || manualAuthSupplied.value) return 'text-emerald-700'
+  return 'text-gray-700'
+})
+const targetMemory = computed(() => preflight.value?.target_memory || null)
+const targetMemoryCountItems = computed(() => {
+  const memory = targetMemory.value
+  if (!memory) return []
+  return [
+    { label: '历史运行', value: `${memory.previous_run_count}` },
+    { label: '同主机', value: `${memory.host_run_count}` },
+    { label: '套件', value: `${memory.reusable_suite_count}` },
+    { label: '用例', value: `${memory.reusable_case_count}` },
+  ]
 })
 const authProvidedLabel = computed(() => {
   if (isAutoAuthMode.value) return preflight.value?.auth_resolved ? '自动获取成功' : '自动获取'
@@ -218,6 +345,28 @@ function readinessTone(status: string) {
   if (status === 'ready') return 'border-emerald-200 bg-emerald-50 text-emerald-700'
   if (status === 'blocked') return 'border-red-200 bg-red-50 text-red-700'
   return 'border-amber-200 bg-amber-50 text-amber-700'
+}
+
+function memoryConfidenceLabel(confidence?: string) {
+  if (confidence === 'high') return 'High memory'
+  if (confidence === 'medium') return 'Medium memory'
+  return 'Low memory'
+}
+
+function memoryConfidenceTone(confidence?: string) {
+  if (confidence === 'high') return 'border-emerald-200 bg-emerald-50 text-emerald-700'
+  if (confidence === 'medium') return 'border-blue-200 bg-blue-50 text-blue-700'
+  return 'border-gray-200 bg-gray-50 text-gray-600'
+}
+
+function runStatusLabel(status?: string | null) {
+  if (status === 'succeeded') return '通过'
+  if (status === 'failed') return '失败'
+  if (status === 'bug_found') return '发现缺陷'
+  if (status === 'cancelled') return '已取消'
+  if (status === 'running') return '运行中'
+  if (status === 'queued') return '排队中'
+  return status || '未知'
 }
 
 function buildHeaders() {
@@ -819,7 +968,7 @@ async function submit() {
           <div class="mb-4 flex items-center justify-between gap-3">
             <div>
               <h3 class="text-sm font-bold text-gray-900">预检状态</h3>
-              <p class="mt-1 text-xs text-gray-500">运行前确认输入、模型、执行器和环境。</p>
+              <p class="mt-1 text-xs text-gray-500">运行前确认输入、模型、Worker、浏览器执行器和环境。</p>
             </div>
             <span class="rounded-lg border px-2.5 py-1 text-[10px] font-bold" :class="readinessTone(readiness)">
               {{ readinessLabel }}
@@ -865,6 +1014,99 @@ async function submit() {
         </div>
 
         <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+          <div class="mb-4 flex items-center justify-between gap-3">
+            <div class="flex items-center gap-2">
+              <Bot :size="16" class="text-gray-500" />
+              <h3 class="text-sm font-bold text-gray-900">目标记忆 / Agent Memory</h3>
+            </div>
+            <span
+              v-if="targetMemory"
+              class="rounded-lg border px-2.5 py-1 text-[10px] font-bold"
+              :class="memoryConfidenceTone(targetMemory.confidence)"
+            >
+              {{ memoryConfidenceLabel(targetMemory.confidence) }}
+            </span>
+          </div>
+
+          <div v-if="targetMemory" class="space-y-4">
+            <div class="space-y-1 text-xs">
+              <span class="block text-gray-400">记忆目标</span>
+              <span class="block break-words font-mono font-bold text-gray-800">{{ targetMemory.target }}</span>
+            </div>
+
+            <div class="grid grid-cols-2 gap-2">
+              <div
+                v-for="item in targetMemoryCountItems"
+                :key="item.label"
+                class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2"
+              >
+                <div class="text-[10px] font-bold text-gray-400">{{ item.label }}</div>
+                <div class="mt-0.5 text-sm font-bold text-gray-900">{{ item.value }}</div>
+              </div>
+            </div>
+
+            <div v-if="targetMemory.last_run" class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs">
+              <div class="flex items-center justify-between gap-3">
+                <span class="font-bold text-gray-700">上次运行</span>
+                <span class="font-bold text-gray-900">{{ runStatusLabel(targetMemory.last_run.status) }}</span>
+              </div>
+              <div v-if="targetMemory.last_run.created_at" class="mt-1 text-[11px] text-gray-500">{{ targetMemory.last_run.created_at }}</div>
+            </div>
+
+            <div class="rounded-lg border px-3 py-3 text-xs leading-5" :class="memoryConfidenceTone(targetMemory.confidence)">
+              <div class="font-bold">{{ targetMemory.suggested_strategy }}</div>
+              <div class="mt-1 opacity-80">{{ targetMemory.confidence_reason }}</div>
+            </div>
+
+            <div v-if="targetMemory.known_blockers.length" class="space-y-2">
+              <div class="text-xs font-bold text-gray-900">已知阻塞</div>
+              <div
+                v-for="blocker in targetMemory.known_blockers.slice(0, 2)"
+                :key="blocker.category"
+                class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"
+              >
+                <div class="flex items-center justify-between gap-2 font-bold">
+                  <span>{{ blocker.label }}</span>
+                  <span>{{ blocker.count }} 次</span>
+                </div>
+                <div class="mt-1 leading-5 opacity-90">{{ blocker.detail }}</div>
+              </div>
+            </div>
+
+            <div v-if="targetMemory.recurring_failure_themes.length" class="space-y-2">
+              <div class="text-xs font-bold text-gray-900">反复失败主题</div>
+              <div
+                v-for="theme in targetMemory.recurring_failure_themes.slice(0, 2)"
+                :key="`${theme.category}-${theme.theme}`"
+                class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800"
+              >
+                <div class="flex items-center justify-between gap-2 font-bold">
+                  <span class="min-w-0 truncate">{{ theme.theme }}</span>
+                  <span class="shrink-0">{{ theme.count }} 次</span>
+                </div>
+                <div v-if="theme.surfaces.length" class="mt-1 truncate text-[11px] opacity-80">{{ theme.surfaces.join(' / ') }}</div>
+              </div>
+            </div>
+
+            <div v-if="targetMemory.reusable_suites.length" class="space-y-2">
+              <div class="text-xs font-bold text-gray-900">可复用套件</div>
+              <div
+                v-for="suite in targetMemory.reusable_suites.slice(0, 2)"
+                :key="suite.suite_id"
+                class="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs"
+              >
+                <span class="min-w-0 truncate font-bold text-gray-800">{{ suite.label }}</span>
+                <span class="shrink-0 text-gray-500">{{ suite.case_count }} cases</span>
+              </div>
+            </div>
+          </div>
+
+          <div v-else class="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-4 py-8 text-center text-sm text-gray-400">
+            运行预检后，智能体会展示该目标的历史运行、阻塞点和可复用资产。
+          </div>
+        </div>
+
+        <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
           <div class="mb-4 flex items-center gap-2">
             <Terminal :size="16" class="text-gray-500" />
             <h3 class="text-sm font-bold text-gray-900">智能体执行流</h3>
@@ -887,50 +1129,107 @@ async function submit() {
         </div>
 
         <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <div class="mb-3 flex items-center gap-2">
-            <Settings2 :size="16" class="text-gray-500" />
-            <h3 class="text-sm font-bold text-gray-900">本次运行摘要</h3>
+          <div class="mb-4 flex items-center justify-between gap-3">
+            <div class="flex items-center gap-2">
+              <Settings2 :size="16" class="text-gray-500" />
+              <h3 class="text-sm font-bold text-gray-900">任务交接预览</h3>
+            </div>
+            <span
+              v-if="missionPreview"
+              class="rounded-lg border px-2.5 py-1 text-[10px] font-bold"
+              :class="readinessTone(missionPreview.readiness)"
+            >
+              {{ readinessLabel }}
+            </span>
           </div>
-          <div class="space-y-3 text-xs text-gray-600">
+
+          <div v-if="missionPreview" class="space-y-4">
+            <div class="rounded-lg border px-3 py-3 text-xs font-bold" :class="readinessTone(missionPreview.readiness)">
+              {{ missionPreview.handoff }}
+            </div>
+
+            <div class="space-y-3 text-xs text-gray-600">
+              <div class="space-y-1">
+                <span class="block text-gray-400">目标</span>
+                <span class="block break-words font-mono font-bold text-gray-800">{{ missionPreview.target }}</span>
+              </div>
+              <div class="flex items-start justify-between gap-3">
+                <span class="shrink-0 text-gray-400">推断模式</span>
+                <span class="min-w-0 text-right font-bold text-gray-800">{{ missionPreview.input_mode }} / {{ missionPreview.test_mode }}</span>
+              </div>
+              <div class="space-y-1">
+                <span class="block text-gray-400">任务目标</span>
+                <span class="block font-bold leading-5 text-gray-800">{{ missionPreview.objective }}</span>
+              </div>
+              <div class="space-y-1">
+                <span class="block text-gray-400">测试范围</span>
+                <span class="block leading-5 text-gray-700">{{ missionPreview.scope }}</span>
+              </div>
+              <div class="space-y-1">
+                <span class="block text-gray-400">执行策略</span>
+                <span class="block leading-5 text-gray-700">{{ missionPreview.execution_policy }}</span>
+              </div>
+              <div class="space-y-1">
+                <span class="block text-gray-400">安全边界</span>
+                <span class="block leading-5 text-gray-700">{{ missionPreview.safety_boundary }}</span>
+              </div>
+              <div class="space-y-1">
+                <span class="block text-gray-400">鉴权准备</span>
+                <span class="block leading-5" :class="missionAuthTone">{{ missionPreview.auth_readiness }}</span>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-2">
+              <div
+                v-for="item in missionCountItems"
+                :key="item.label"
+                class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2"
+              >
+                <div class="text-[10px] font-bold text-gray-400">{{ item.label }}</div>
+                <div class="mt-0.5 text-sm font-bold text-gray-900">{{ item.value }}</div>
+              </div>
+            </div>
+
+            <div v-if="missionPreview.correction_prompts.length" class="space-y-2">
+              <div class="text-xs font-bold text-gray-900">启动前可修正</div>
+              <div
+                v-for="prompt in missionPreview.correction_prompts"
+                :key="prompt.key"
+                class="rounded-lg border px-3 py-2"
+                :class="checkTone(prompt.status)"
+              >
+                <div class="flex items-start gap-2">
+                  <AlertTriangle :size="14" class="mt-0.5 shrink-0" />
+                  <div class="min-w-0">
+                    <div class="text-xs font-bold">{{ prompt.label }}</div>
+                    <div class="mt-0.5 text-xs leading-5 opacity-90">{{ prompt.detail }}</div>
+                    <div v-if="prompt.action" class="mt-1 text-[11px] font-bold opacity-80">{{ prompt.action }}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div v-else class="space-y-3 text-xs text-gray-600">
+            <div class="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-4 py-6 text-center text-sm text-gray-400">
+              运行预检后，这里会展示智能体准备接收的目标、范围、策略和待修正项。
+            </div>
             <div class="flex items-start justify-between gap-3">
               <span class="shrink-0 text-gray-400">输入类型</span>
-              <span class="min-w-0 text-right font-bold text-gray-800">{{ preflight?.input_type || localInputType }}</span>
+              <span class="min-w-0 text-right font-bold text-gray-800">{{ localInputType }}</span>
             </div>
             <div class="flex items-start justify-between gap-3">
               <span class="shrink-0 text-gray-400">测试模式</span>
-              <span class="font-bold uppercase text-gray-800">{{ preflight?.test_type || form.test_type }}</span>
+              <span class="font-bold uppercase text-gray-800">{{ form.test_type }}</span>
             </div>
             <div v-if="isApiMode" class="flex items-start justify-between gap-3">
               <span class="shrink-0 text-gray-400">API 端点</span>
               <span class="font-bold text-gray-800">{{ endpointCountLabel }}</span>
             </div>
             <div v-if="isApiMode" class="flex items-start justify-between gap-3">
-              <span class="shrink-0 text-gray-400">预计执行</span>
-              <span class="font-bold text-gray-800">
-                {{ preflight?.estimated_executable_count ?? '预检后展示' }}
-                <span v-if="preflight?.estimated_skipped_count" class="text-gray-400">/ 跳过 {{ preflight.estimated_skipped_count }}</span>
-              </span>
-            </div>
-            <div v-if="isApiMode" class="flex items-start justify-between gap-3">
-              <span class="shrink-0 text-gray-400">需鉴权</span>
-              <span class="font-bold" :class="preflight?.auth_required_count ? 'text-amber-700' : 'text-gray-800'">
-                {{ preflight?.auth_required_count ?? '未知' }}
-              </span>
-            </div>
-            <div v-if="isApiMode" class="flex items-start justify-between gap-3">
               <span class="shrink-0 text-gray-400">凭据</span>
               <span class="flex items-center gap-1 font-bold" :class="authProvidedTone">
                 <KeyRound :size="13" /> {{ authProvidedLabel }}
-              </span>
-            </div>
-            <div v-if="isUiMode" class="flex items-start justify-between gap-3">
-              <span class="shrink-0 text-gray-400">执行器</span>
-              <span class="font-bold text-gray-800">浏览器 + 截图证据</span>
-            </div>
-            <div v-if="isUiMode" class="flex items-start justify-between gap-3">
-              <span class="shrink-0 text-gray-400">前置说明</span>
-              <span class="font-bold" :class="form.setup_instructions ? 'text-emerald-700' : 'text-gray-500'">
-                {{ form.setup_instructions ? '已提供' : '未提供' }}
               </span>
             </div>
           </div>
