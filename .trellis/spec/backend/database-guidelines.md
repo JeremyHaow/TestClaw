@@ -161,6 +161,78 @@ agent_test_type = normalize_agent_test_type(db_test_type, default="auto")
 run_agent_task.delay(task.id, objective, target_url, test_type=agent_test_type)
 ```
 
+## Scenario: Lightweight Run History List Contract
+
+### 1. Scope / Trigger
+
+- Trigger: `/api/v1/runs` powers the History page list and must stay fast even when `Task.execution_log` contains large agent traces, screenshots metadata, API results, and final reports.
+- Applies to `app/api/v1/runs.py`, `app/schemas/task.py`, History page list rendering, and runs-list regression tests.
+
+### 2. Signatures
+
+- List route:
+  ```python
+  GET /api/v1/runs?page=1&page_size=20&status=failed&test_type=api
+  ```
+- Response item:
+  ```json
+  {
+    "id": "run-id",
+    "target_url": "https://app.example.test",
+    "objective": "checkout regression",
+    "status": "failed",
+    "test_type": "API",
+    "created_at": "2026-05-23T09:00:00",
+    "updated_at": "2026-05-23T09:01:00",
+    "error_message": null
+  }
+  ```
+- Headers: keep `X-Total-Count` for pagination.
+
+### 3. Contracts
+
+- The runs list must select only list columns from `Task`: `id`, `target_url`, `objective`, `status`, `test_type`, `created_at`, and `updated_at`.
+- The list response must not include `execution_log`, `generated_code`, `api_doc_id`, `environment_id`, plans, cases, artifacts, tool calls, reports, screenshots, or other detail-only fields.
+- Preserve existing pagination and filters: `page`, `page_size`, `status`, and `test_type`.
+- Run detail endpoints may continue to load `Task.execution_log`, redact it, and enrich detail summaries.
+- Frontend History must not block the run list behind `/api/v1/runs/insights`; list loading and quality-memory loading are separate states.
+
+### 4. Validation & Error Matrix
+
+- Unsupported `status` filter -> `400` with allowed statuses.
+- Unsupported `test_type` filter -> `400` with allowed test types.
+- Empty result set after filters -> `200 []` with `X-Total-Count: 0`.
+- Large `execution_log` rows -> list response excludes the log and still returns list metadata only.
+
+### 5. Good/Base/Bad Cases
+
+- Good: `/api/v1/runs?page=1&page_size=20` returns lightweight list rows and `X-Total-Count` without touching detail payload fields.
+- Base: `/api/v1/runs/{id}` still returns redacted `execution_log`, workflow steps, evidence, and triage summaries.
+- Bad: serializing `TaskRead` for `/api/v1/runs`, because it includes `execution_log` and can make History load multi-megabyte payloads.
+
+### 6. Tests Required
+
+- Integration: `/api/v1/runs` response items do not contain `execution_log` or generated/detail fields.
+- Integration: status/test type filters and pagination still return the correct rows and `X-Total-Count`.
+- Regression: invalid filters still return `400`.
+- Frontend build: `HistoryPage.vue` compiles with independent list and insights loading states.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+items, total = await task_service.list(db, page=page, page_size=page_size)
+return [TaskRead.model_validate(item).model_dump(mode="json") for item in items]
+```
+
+#### Correct
+
+```python
+stmt = select(Task.id, Task.target_url, Task.objective, Task.status, Task.test_type, Task.created_at, Task.updated_at)
+rows = await db.execute(stmt.order_by(Task.created_at.desc()).offset(offset).limit(page_size))
+```
+
 ## Scenario: UI/API Evidence and Final Report Contract
 
 ### 1. Scope / Trigger

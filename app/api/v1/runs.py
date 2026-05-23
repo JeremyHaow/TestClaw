@@ -32,7 +32,7 @@ from app.models.environment import Environment
 from app.models.llm_provider import LLMProvider
 from app.models.task import Task, TaskStatus, TestType
 from app.models.test_case import TestCase, TestSuite
-from app.schemas.task import TaskRead, parse_task_detail
+from app.schemas.task import TaskListItemRead, TaskRead, parse_task_detail
 from app.services.api_auth import (
     AuthResolution,
     coerce_auth_config,
@@ -41,7 +41,12 @@ from app.services.api_auth import (
     normalize_headers,
     resolve_auto_auth_headers,
 )
-from app.services.task_service import normalize_agent_test_type, normalize_test_type, task_service
+from app.services.task_service import (
+    normalize_agent_test_type,
+    normalize_task_status,
+    normalize_test_type,
+    task_service,
+)
 from app.api.v1.test_cases import _extract_playwright_commands, _extract_request_template, _suite_case_kind
 from app.worker.tasks import run_agent_task, run_graph_with_progress
 
@@ -3520,7 +3525,7 @@ async def preflight_run(payload: RunPreflightRequest, db: DbSession, _: CurrentU
     )
 
 
-@router.get("", response_model=list[TaskRead])
+@router.get("", response_model=list[TaskListItemRead])
 async def list_runs(
     db: DbSession, _: CurrentUser,
     page: int = Query(default=1, ge=1),
@@ -3530,13 +3535,53 @@ async def list_runs(
 ):
     """List all test runs with optional filters."""
     try:
-        items, total = await task_service.list(
-            db, page=page, page_size=page_size, status=status, test_type=test_type
-        )
+        normalized_status = normalize_task_status(status) if status else None
+        normalized_test_type = normalize_test_type(test_type) if test_type else None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    filters: list[Any] = []
+    if normalized_status is not None:
+        filters.append(Task.status == normalized_status)
+    if normalized_test_type is not None:
+        filters.append(Task.test_type == normalized_test_type)
+
+    count_stmt = select(func.count()).select_from(Task)
+    if filters:
+        count_stmt = count_stmt.where(*filters)
+    total = int((await db.execute(count_stmt)).scalar_one())
+
+    offset = (page - 1) * page_size
+    stmt = (
+        select(
+            Task.id,
+            Task.target_url,
+            Task.objective,
+            Task.status,
+            Task.test_type,
+            Task.created_at,
+            Task.updated_at,
+        )
+    )
+    if filters:
+        stmt = stmt.where(*filters)
+    stmt = stmt.order_by(Task.created_at.desc()).offset(offset).limit(page_size)
+
+    result = await db.execute(stmt)
+    items = [
+        TaskListItemRead(
+            id=row.id,
+            target_url=row.target_url,
+            objective=row.objective,
+            status=_status_value(row.status),
+            test_type=_status_value(row.test_type),
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        ).model_dump(mode="json")
+        for row in result
+    ]
     return JSONResponse(
-        content=[TaskRead.model_validate(i).model_dump(mode="json") for i in items],
+        content=items,
         headers={"X-Total-Count": str(total)},
     )
 

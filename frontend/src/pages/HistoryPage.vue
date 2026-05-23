@@ -28,13 +28,13 @@ const loading = ref(false)
 const insightsLoading = ref(false)
 const hasLoadedRuns = ref(false)
 const hasLoadedInsights = ref(false)
+const insightsError = ref('')
 const filterStatus = ref('')
 const filterType = ref('')
 const page = ref(1)
 const pageSize = 20
 const total = ref(0)
 
-const initialPageLoading = computed(() => !hasLoadedRuns.value || !hasLoadedInsights.value)
 const statusCounts = computed(() => insights.value?.status_counts || {})
 const trend = computed(() => insights.value?.quality_trend || {})
 const trendBuckets = computed(() => (trend.value?.buckets || []).slice(-14))
@@ -124,11 +124,13 @@ async function fetchRuns() {
 
 async function fetchInsights() {
   insightsLoading.value = true
+  insightsError.value = ''
   try {
     const { data } = await api.get('/runs/insights', { params: { days: 30, limit: 100 } })
     insights.value = data
   } catch (err: any) {
-    toast.error(err?.response?.data?.detail || '加载质量记忆失败')
+    insightsError.value = err?.response?.data?.detail || '加载质量记忆失败'
+    toast.error(insightsError.value)
   } finally {
     insightsLoading.value = false
     hasLoadedInsights.value = true
@@ -183,7 +185,19 @@ onUnmounted(() => stopPolling())
       <p class="text-gray-500 text-sm">近期趋势、反复问题、影响面和可复用证据。</p>
     </div>
 
-    <LoadingSpinner v-if="initialPageLoading" text="加载运行历史中..." />
+    <div
+      v-if="insightsLoading && !hasLoadedInsights"
+      class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 flex items-center gap-3 text-sm text-gray-500"
+    >
+      <div class="w-4 h-4 border-2 border-gray-200 border-t-blue-600 rounded-full animate-spin shrink-0"></div>
+      <span>正在加载质量记忆...</span>
+    </div>
+    <div
+      v-else-if="insightsError && !insights"
+      class="bg-white border border-amber-100 rounded-xl shadow-sm p-5 text-sm text-amber-700 bg-amber-50"
+    >
+      质量记忆暂不可用，运行历史可继续查看。
+    </div>
     <template v-else>
       <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
         <div
@@ -343,6 +357,8 @@ onUnmounted(() => stopPolling())
           <p v-else class="text-sm text-gray-400 py-6 text-center">暂无受影响测试面</p>
         </div>
       </div>
+    </template>
+
       <!-- Filters -->
       <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-4 flex flex-wrap gap-4 items-center">
         <div class="flex items-center gap-2">
@@ -365,11 +381,13 @@ onUnmounted(() => stopPolling())
           <option value="API">API</option>
           <option value="UI">UI</option>
         </select>
-        <span class="text-xs text-gray-400 ml-auto">{{ total }} 条记录</span>
+        <span class="text-xs text-gray-400 ml-auto">
+          {{ !hasLoadedRuns ? '正在加载记录...' : `${total} 条记录` }}
+        </span>
       </div>
 
       <!-- Run List -->
-      <LoadingSpinner v-if="loading" text="加载中..." />
+      <LoadingSpinner v-if="loading || !hasLoadedRuns" text="加载运行记录中..." />
       <EmptyState
         v-else-if="!runs.length"
         :icon="Filter"
@@ -403,6 +421,5 @@ onUnmounted(() => stopPolling())
       </div>
 
       <Pagination :page="page" :page-size="pageSize" :total="total" @update:page="page = $event; fetchRuns()" />
-    </template>
   </div>
 </template>

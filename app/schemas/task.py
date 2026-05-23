@@ -46,6 +46,17 @@ class TaskRead(ORMModel):
         return redact_json_text(value) if value else value
 
 
+class TaskListItemRead(ORMModel):
+    id: str
+    target_url: str
+    objective: str
+    status: str
+    test_type: str
+    created_at: datetime
+    updated_at: datetime | None = None
+    error_message: str | None = None
+
+
 class TaskDetailRead(TaskRead):
     workflow_steps: list[WorkflowStep] = []
     test_plan: list[dict] | None = None
