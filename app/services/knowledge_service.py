@@ -9,15 +9,17 @@ from app.services.embedding_service import EmbeddingUnavailableError, embedding_
 logger = logging.getLogger(__name__)
 
 class KnowledgeService:
-    async def create(self, db: AsyncSession, content: str, source_script_id: str | None = None) -> KnowledgeEntry:
-        embedding: list[float] | None = None
+    async def _embed_content(self, db: AsyncSession, content: str) -> list[float] | None:
         try:
-            embedding = await embedding_service.embed_document(db, content)
+            return await embedding_service.embed_document(db, content)
         except EmbeddingUnavailableError as exc:
             logger.info("Knowledge embedding skipped: %s", exc)
         except Exception as exc:
             logger.warning("Knowledge embedding failed: %s", exc)
+        return None
 
+    async def create(self, db: AsyncSession, content: str, source_script_id: str | None = None) -> KnowledgeEntry:
+        embedding = await self._embed_content(db, content)
         entry = KnowledgeEntry(content=content, embedding=embedding, source_script_id=source_script_id)
         db.add(entry)
         await db.commit()
@@ -30,6 +32,16 @@ class KnowledgeService:
 
     async def get(self, db: AsyncSession, entry_id: str) -> KnowledgeEntry | None:
         return await db.get(KnowledgeEntry, entry_id)
+
+    async def update(self, db: AsyncSession, entry_id: str, content: str) -> KnowledgeEntry | None:
+        entry = await db.get(KnowledgeEntry, entry_id)
+        if entry is None:
+            return None
+        entry.content = content
+        entry.embedding = await self._embed_content(db, content)
+        await db.commit()
+        await db.refresh(entry)
+        return entry
 
     async def delete(self, db: AsyncSession, entry_id: str) -> bool:
         entry = await db.get(KnowledgeEntry, entry_id)

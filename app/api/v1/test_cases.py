@@ -3,10 +3,10 @@ import logging
 import re
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 from app.agent.prompts import TC_GEN_PROMPT
 from app.core.dependencies import CurrentUser, DbSession
@@ -321,18 +321,40 @@ async def generate_test_cases_ai(payload: AIGenerateRequest, db: DbSession, _: C
 async def list_test_cases(
     db: DbSession,
     _: CurrentUser,
+    response: Response,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    search: str | None = Query(default=None),
     priority: str | None = Query(default=None),
     category: str | None = Query(default=None),
     source: str | None = Query(default=None),
 ):
     stmt = select(TestCase)
+    count_stmt = select(func.count()).select_from(TestCase)
+    filters = []
+    if search:
+        search_like = f"%{search.strip()}%"
+        filters.append(
+            or_(
+                TestCase.title.ilike(search_like),
+                TestCase.category.ilike(search_like),
+                TestCase.source.ilike(search_like),
+            )
+        )
     if priority:
-        stmt = stmt.where(TestCase.priority == priority)
+        filters.append(TestCase.priority == priority)
     if category:
-        stmt = stmt.where(TestCase.category == category)
+        filters.append(TestCase.category == category)
     if source:
-        stmt = stmt.where(TestCase.source == source)
-    result = await db.execute(stmt.order_by(TestCase.created_at.desc()))
+        filters.append(TestCase.source == source)
+    for condition in filters:
+        stmt = stmt.where(condition)
+        count_stmt = count_stmt.where(condition)
+
+    total = (await db.execute(count_stmt)).scalar_one()
+    response.headers["X-Total-Count"] = str(total)
+    offset = (page - 1) * page_size
+    result = await db.execute(stmt.order_by(TestCase.created_at.desc()).offset(offset).limit(page_size))
     return list(result.scalars())
 
 

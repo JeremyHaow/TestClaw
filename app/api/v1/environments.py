@@ -20,6 +20,24 @@ def _to_schema(environment: Environment) -> EnvironmentRead:
     return EnvironmentRead.model_validate({**environment.__dict__, "variables": masked})
 
 
+def _encrypted_variables_for_update(environment: Environment, variables: dict[str, str]) -> dict[str, str]:
+    encrypted: dict[str, str] = {}
+    existing = environment.variables_encrypted or {}
+    for key, value in variables.items():
+        existing_value = existing.get(key)
+        if existing_value is not None:
+            try:
+                if mask_secret(decrypt_value(str(existing_value))) == value:
+                    encrypted[key] = str(existing_value)
+                    continue
+            except Exception:
+                if mask_secret(str(existing_value)) == value:
+                    encrypted[key] = str(existing_value)
+                    continue
+        encrypted[key] = encrypt_value(value)
+    return encrypted
+
+
 @router.get("", response_model=list[EnvironmentRead])
 async def list_environments(db: DbSession, _: CurrentUser):
     result = await db.execute(select(Environment).order_by(Environment.created_at.desc()))
@@ -47,7 +65,7 @@ async def update_environment(environment_id: str, payload: EnvironmentCreate, db
         raise HTTPException(status_code=404, detail="Environment not found")
     environment.name = payload.name
     environment.base_url = payload.base_url
-    environment.variables_encrypted = {key: encrypt_value(value) for key, value in payload.variables.items()}
+    environment.variables_encrypted = _encrypted_variables_for_update(environment, payload.variables)
     environment.is_production = payload.is_production
     await db.commit()
     await db.refresh(environment)

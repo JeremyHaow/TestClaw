@@ -8,13 +8,25 @@ import Pagination from '../components/Pagination.vue'
 import EmptyState from '../components/EmptyState.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { FileCode, Pencil, Trash2, X, Check, Square, CheckSquare, MinusSquare, Plus, Play } from 'lucide-vue-next'
+import {
+  Check,
+  CheckSquare,
+  Eye,
+  FileCode,
+  MinusSquare,
+  Pencil,
+  Play,
+  Plus,
+  Square,
+  Trash2,
+  X,
+} from 'lucide-vue-next'
 
 const toast = useToast()
 const router = useRouter()
 
-// --- State ---
 const items = ref<any[]>([])
+const suites = ref<any[]>([])
 const loading = ref(false)
 const search = ref('')
 const page = ref(1)
@@ -22,13 +34,12 @@ const pageSize = ref(15)
 const total = ref(0)
 const selectedIds = ref<Set<string>>(new Set())
 const editingId = ref<string | null>(null)
+const detailItem = ref<any | null>(null)
 const editForm = reactive({ title: '', stepsText: '', expectedText: '', priority: 'P1', category: 'FUNCTIONAL' })
 const confirmDelete = ref<string | null>(null)
 const confirmBulkDelete = ref(false)
 const filterPriority = ref('')
 const filterCategory = ref('')
-
-// Create form state
 const showCreate = ref(false)
 const createForm = reactive({
   title: '',
@@ -40,17 +51,28 @@ const createForm = reactive({
 const creating = ref(false)
 const suiteRunning = ref(false)
 
-// --- Computed ---
-const allSelected = computed(() => items.value.length > 0 && items.value.every((i) => selectedIds.value.has(i.id)))
-const someSelected = computed(() => items.value.some((i) => selectedIds.value.has(i.id)) && !allSelected.value)
-const apiCaseCount = computed(() => items.value.filter((item) => String(item.category || '').toUpperCase().includes('API')).length)
-const uiCaseCount = computed(() => items.value.filter((item) => {
-  const category = String(item.category || '').toUpperCase()
-  return category.includes('UI') || category.includes('PAGE') || category.includes('NAVIGATION')
-}).length)
-const agentGeneratedCount = computed(() => items.value.filter((item) => String(item.source || '').startsWith('agent:')).length)
+const allSelected = computed(() => items.value.length > 0 && items.value.every((item) => selectedIds.value.has(item.id)))
+const someSelected = computed(() => items.value.some((item) => selectedIds.value.has(item.id)) && !allSelected.value)
+const suiteMap = computed<Record<string, string[]>>(() => {
+  const mapped: Record<string, string[]> = {}
+  for (const suite of suites.value) {
+    for (const id of suite.test_case_ids || []) {
+      if (!mapped[id]) mapped[id] = []
+      mapped[id].push(suite.name)
+    }
+  }
+  return mapped
+})
 
-// --- API ---
+async function fetchSuites() {
+  try {
+    const { data } = await api.get('/test-cases/suites')
+    suites.value = Array.isArray(data) ? data : []
+  } catch {
+    suites.value = []
+  }
+}
+
 async function fetchItems() {
   loading.value = true
   try {
@@ -61,7 +83,7 @@ async function fetchItems() {
     const { data, headers } = await api.get('/test-cases', { params })
     items.value = Array.isArray(data) ? data : data.items || []
     total.value = headers['x-total-count'] ? Number(headers['x-total-count']) : (data.total ?? items.value.length)
-  } catch (e: any) {
+  } catch {
     toast.error('加载用例失败')
   } finally {
     loading.value = false
@@ -73,6 +95,7 @@ async function updateCase(id: string, data: Record<string, any>) {
     await api.put(`/test-cases/${id}`, data)
     toast.success('用例已更新')
     editingId.value = null
+    detailItem.value = null
     await fetchItems()
   } catch {
     toast.error('更新失败')
@@ -83,8 +106,10 @@ async function remove(id: string) {
   try {
     await api.delete(`/test-cases/${id}`)
     selectedIds.value.delete(id)
+    if (detailItem.value?.id === id) detailItem.value = null
     toast.success('用例已删除')
     await fetchItems()
+    await fetchSuites()
   } catch {
     toast.error('删除失败')
   }
@@ -95,8 +120,10 @@ async function bulkDelete() {
   try {
     await Promise.all(ids.map((id) => api.delete(`/test-cases/${id}`)))
     selectedIds.value.clear()
+    if (detailItem.value && ids.includes(detailItem.value.id)) detailItem.value = null
     toast.success(`已删除 ${ids.length} 条用例`)
     await fetchItems()
+    await fetchSuites()
   } catch {
     toast.error('批量删除失败')
   }
@@ -127,28 +154,46 @@ async function runSelectedSuite() {
   }
 }
 
-// --- Selection ---
 function toggleSelect(id: string) {
-  const s = new Set(selectedIds.value)
-  if (s.has(id)) s.delete(id)
-  else s.add(id)
-  selectedIds.value = s
+  const selected = new Set(selectedIds.value)
+  if (selected.has(id)) selected.delete(id)
+  else selected.add(id)
+  selectedIds.value = selected
 }
 
 function toggleSelectAll() {
-  if (allSelected.value) {
-    selectedIds.value = new Set()
-  } else {
-    selectedIds.value = new Set(items.value.map((i) => i.id))
+  selectedIds.value = allSelected.value ? new Set() : new Set(items.value.map((item) => item.id))
+}
+
+function arrayText(value: any): string {
+  if (Array.isArray(value)) return value.map(formatStep).join('\n')
+  if (typeof value === 'string') return value
+  if (value == null) return ''
+  return JSON.stringify(value, null, 2)
+}
+
+function parseListText(value: string): any[] {
+  const trimmed = value.trim()
+  if (!trimmed) return []
+  try {
+    const parsed = JSON.parse(trimmed)
+    return Array.isArray(parsed) ? parsed : [parsed]
+  } catch {
+    return trimmed.split('\n').map((line) => line.trim()).filter(Boolean)
   }
 }
 
-// --- Inline Edit ---
+function openDetail(item: any) {
+  detailItem.value = item
+  editingId.value = null
+}
+
 function startEdit(item: any) {
+  detailItem.value = item
   editingId.value = item.id
   editForm.title = item.title
-  editForm.stepsText = JSON.stringify(item.steps || [])
-  editForm.expectedText = JSON.stringify(item.expected || [])
+  editForm.stepsText = JSON.stringify(item.steps || [], null, 2)
+  editForm.expectedText = JSON.stringify(item.expected || [], null, 2)
   editForm.priority = item.priority || 'P1'
   editForm.category = item.category || 'FUNCTIONAL'
 }
@@ -158,25 +203,17 @@ function cancelEdit() {
 }
 
 function saveEdit(id: string) {
-  let steps: any
-  let expected: any
-  try {
-    steps = JSON.parse(editForm.stepsText)
-    expected = JSON.parse(editForm.expectedText)
-  } catch {
-    toast.error('步骤或预期 JSON 格式错误')
-    return
-  }
   updateCase(id, {
     title: editForm.title,
-    steps,
-    expected,
+    steps: parseListText(editForm.stepsText),
+    expected: parseListText(editForm.expectedText),
     priority: editForm.priority,
     category: editForm.category,
+    test_data: detailItem.value?.test_data || null,
+    source: detailItem.value?.source || null,
   })
 }
 
-// --- Create ---
 function openCreate() {
   createForm.title = ''
   createForm.category = 'FUNCTIONAL'
@@ -193,8 +230,8 @@ function removeExpected(i: number) { createForm.expected.splice(i, 1) }
 
 async function submitCreate() {
   if (!createForm.title.trim()) { toast.warning('标题不能为空'); return }
-  const steps = createForm.steps.map(s => s.trim()).filter(Boolean)
-  const expected = createForm.expected.map(s => s.trim()).filter(Boolean)
+  const steps = createForm.steps.map((step) => step.trim()).filter(Boolean)
+  const expected = createForm.expected.map((item) => item.trim()).filter(Boolean)
   if (!steps.length) { toast.warning('至少需要一个测试步骤'); return }
   creating.value = true
   try {
@@ -215,7 +252,59 @@ async function submitCreate() {
   }
 }
 
-// --- Watchers ---
+function formatStep(value: any): string {
+  return typeof value === 'string' ? value : JSON.stringify(value)
+}
+
+function caseAsset(item: any) {
+  return item.test_data?.case_asset || {}
+}
+
+function caseType(item: any) {
+  const assetType = String(caseAsset(item).case_type || '').toLowerCase()
+  if (assetType) return assetType
+  const category = String(item.category || '').toLowerCase()
+  if (category.includes('api') || item.test_data?.request_template) return 'api'
+  if (category.includes('ui') || category.includes('page') || item.test_data?.playwright_commands) return 'ui'
+  return 'case'
+}
+
+function sourceKind(item: any) {
+  const source = String(item.source || '')
+  if (caseAsset(item).source_run_id || source.startsWith('run_case_asset:')) return '运行沉淀'
+  if (source.startsWith('agent:')) return 'Agent 生成'
+  if (source) return source
+  return '手动维护'
+}
+
+function sourceRunId(item: any) {
+  const asset = caseAsset(item)
+  if (asset.source_run_id) return String(asset.source_run_id)
+  const source = String(item.source || '')
+  if (source.startsWith('run_case_asset:')) return source.split(':')[1] || ''
+  return ''
+}
+
+function sourceProject(item: any) {
+  return item.test_data?.project || item.test_data?.project_id || item.test_data?.target_url || item.test_data?.base_url || ''
+}
+
+function sourceSuiteNames(item: any) {
+  return suiteMap.value[item.id] || []
+}
+
+function sourceDetail(item: any) {
+  const asset = caseAsset(item)
+  const source = asset.source ? `${asset.source} #${Number(asset.source_index ?? 0) + 1}` : ''
+  return source || item.source || 'manual'
+}
+
+function previewText(item: any) {
+  const steps = Array.isArray(item.steps) ? item.steps : []
+  if (!steps.length) return '未记录步骤'
+  return steps.slice(0, 2).map(formatStep).join(' / ')
+}
+
 watch([search, filterPriority, filterCategory], () => {
   page.value = 1
   fetchItems()
@@ -225,69 +314,42 @@ watch(page, () => {
   fetchItems()
 })
 
-onMounted(fetchItems)
+onMounted(async () => {
+  await Promise.all([fetchItems(), fetchSuites()])
+})
 </script>
 
 <template>
-  <div class="space-y-6 pb-12">
-    <!-- Header -->
-    <div class="flex items-center justify-between">
+  <div class="space-y-5 pb-10">
+    <div class="flex flex-wrap items-start justify-between gap-3">
       <div class="flex flex-col gap-1">
         <h2 class="text-2xl font-bold tracking-tight text-gray-900">用例资产</h2>
-        <p class="text-gray-500 text-sm">复核 Agent 生成的 API/UI 用例，接受为资产后可重新组成套件并交给 LangGraph 执行。</p>
+        <p class="max-w-3xl text-sm text-gray-500">按来源、运行、套件和分类管理可复用用例；长步骤和预期结果在详情面板中查看和编辑。</p>
       </div>
       <div class="flex items-center gap-3">
-        <span class="text-xs text-gray-400 font-mono">{{ total }} 条</span>
+        <span class="font-mono text-xs text-gray-400">{{ total }} 条</span>
         <button @click="openCreate"
-          class="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-bold transition-all shadow-md shadow-blue-600/10">
+          class="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white shadow-md shadow-blue-600/10 transition-all hover:bg-blue-700">
           <Plus :size="16" /> 创建用例
         </button>
       </div>
     </div>
 
-    <div class="grid gap-3 md:grid-cols-4">
-      <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-        <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">当前结果</div>
-        <div class="mt-2 text-2xl font-semibold text-gray-900">{{ items.length }}</div>
-        <div class="mt-1 text-xs text-gray-500">按筛选加载</div>
-      </div>
-      <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-        <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">API / UI</div>
-        <div class="mt-2 text-2xl font-semibold text-gray-900">{{ apiCaseCount }} / {{ uiCaseCount }}</div>
-        <div class="mt-1 text-xs text-gray-500">套件会自动分流执行</div>
-      </div>
-      <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-        <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Agent 生成</div>
-        <div class="mt-2 text-2xl font-semibold text-gray-900">{{ agentGeneratedCount }}</div>
-        <div class="mt-1 text-xs text-gray-500">来自历史运行沉淀</div>
-      </div>
-      <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-        <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">已选择</div>
-        <div class="mt-2 text-2xl font-semibold text-gray-900">{{ selectedIds.size }}</div>
-        <div class="mt-1 text-xs text-gray-500">可一键组成套件运行</div>
-      </div>
-    </div>
-
-    <!-- Filters -->
-    <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-4">
+    <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
       <div class="flex flex-wrap items-center gap-3">
-        <div class="flex-1 min-w-[200px]">
-          <SearchInput v-model="search" placeholder="搜索用例标题..." />
+        <div class="min-w-[220px] flex-1">
+          <SearchInput v-model="search" placeholder="搜索标题、分类或来源..." />
         </div>
-        <select
-          v-model="filterPriority"
-          class="px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:bg-white transition-all"
-        >
+        <select v-model="filterPriority"
+          class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm outline-none transition-all focus:border-blue-500 focus:bg-white">
           <option value="">全部优先级</option>
           <option value="P0">P0</option>
           <option value="P1">P1</option>
           <option value="P2">P2</option>
           <option value="P3">P3</option>
         </select>
-        <select
-          v-model="filterCategory"
-          class="px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:bg-white transition-all"
-        >
+        <select v-model="filterCategory"
+          class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm outline-none transition-all focus:border-blue-500 focus:bg-white">
           <option value="">全部分类</option>
           <option value="FUNCTIONAL">FUNCTIONAL</option>
           <option value="UI">UI</option>
@@ -295,199 +357,215 @@ onMounted(fetchItems)
           <option value="PERFORMANCE">PERFORMANCE</option>
           <option value="SECURITY">SECURITY</option>
         </select>
-        <button
-          v-if="selectedIds.size > 0"
-          @click="runSelectedSuite"
-          :disabled="suiteRunning"
-          class="flex items-center gap-2 px-4 py-2 bg-gray-900 hover:bg-black disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-all shadow-sm"
-        >
+        <button v-if="selectedIds.size > 0" @click="runSelectedSuite" :disabled="suiteRunning"
+          class="flex items-center gap-2 rounded-lg bg-gray-900 px-4 py-2 text-xs font-bold text-white shadow-sm transition-all hover:bg-black disabled:opacity-50">
           <Play :size="14" />
           {{ suiteRunning ? '提交中...' : `运行选中 (${selectedIds.size})` }}
         </button>
-        <button
-          v-if="selectedIds.size > 0"
-          @click="confirmBulkDelete = true"
-          class="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold transition-all shadow-md shadow-red-600/10"
-        >
+        <button v-if="selectedIds.size > 0" @click="confirmBulkDelete = true"
+          class="flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-xs font-bold text-white shadow-md shadow-red-600/10 transition-all hover:bg-red-700">
           <Trash2 :size="14" />
           删除选中 ({{ selectedIds.size }})
         </button>
       </div>
     </div>
 
-    <!-- Table -->
-    <div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+    <div class="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
       <LoadingSpinner v-if="loading" text="加载中..." />
       <template v-else-if="items.length === 0">
-        <EmptyState
-          :icon="FileCode"
-          title="暂无用例"
-          description="还没有任何测试用例，请稍后再试或调整筛选条件。"
-        />
+        <EmptyState :icon="FileCode" title="暂无用例" description="还没有任何测试用例，请稍后再试或调整筛选条件。" />
       </template>
       <template v-else>
         <div class="overflow-x-auto">
           <table class="w-full text-left text-sm">
             <thead>
-              <tr class="bg-gray-50 text-gray-500 border-b border-gray-100">
+              <tr class="border-b border-gray-100 bg-gray-50 text-gray-500">
                 <th class="w-10 px-4 py-3">
-                  <button @click="toggleSelectAll" class="text-gray-400 hover:text-blue-600 transition-colors">
+                  <button @click="toggleSelectAll" class="text-gray-400 transition-colors hover:text-blue-600">
                     <CheckSquare v-if="allSelected" :size="16" />
                     <MinusSquare v-else-if="someSelected" :size="16" />
                     <Square v-else :size="16" />
                   </button>
                 </th>
-                <th class="px-4 py-3 font-bold uppercase tracking-widest text-[10px]">标题</th>
-                <th class="px-4 py-3 font-bold uppercase tracking-widest text-[10px] w-32">分类</th>
-                <th class="px-4 py-3 font-bold uppercase tracking-widest text-[10px] w-20">优先级</th>
-                <th class="px-4 py-3 font-bold uppercase tracking-widest text-[10px]">步骤预览</th>
-                <th class="px-4 py-3 font-bold uppercase tracking-widest text-[10px] w-24 text-right">操作</th>
+                <th class="px-4 py-3 text-[10px] font-bold uppercase tracking-widest">标题</th>
+                <th class="px-4 py-3 text-[10px] font-bold uppercase tracking-widest">归类</th>
+                <th class="px-4 py-3 text-[10px] font-bold uppercase tracking-widest">来源</th>
+                <th class="px-4 py-3 text-[10px] font-bold uppercase tracking-widest">套件</th>
+                <th class="px-4 py-3 text-right text-[10px] font-bold uppercase tracking-widest">操作</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-gray-100">
-              <tr
-                v-for="item in items"
-                :key="item.id"
-                class="hover:bg-gray-50 transition-colors"
-                :class="{ 'bg-blue-50/40': selectedIds.has(item.id) }"
-              >
-                <!-- Checkbox -->
+              <tr v-for="item in items" :key="item.id" class="transition-colors hover:bg-gray-50" :class="{ 'bg-blue-50/40': selectedIds.has(item.id) }">
                 <td class="px-4 py-3">
-                  <button @click="toggleSelect(item.id)" class="text-gray-400 hover:text-blue-600 transition-colors">
+                  <button @click="toggleSelect(item.id)" class="text-gray-400 transition-colors hover:text-blue-600">
                     <CheckSquare v-if="selectedIds.has(item.id)" :size="16" class="text-blue-600" />
                     <Square v-else :size="16" />
                   </button>
                 </td>
-
-                <!-- Title -->
-                <td class="px-4 py-3">
-                  <template v-if="editingId === item.id">
-                    <input
-                      v-model="editForm.title"
-                      class="w-full px-2 py-1 bg-white border border-blue-400 rounded text-sm outline-none"
-                    />
-                  </template>
-                  <template v-else>
-                    <span class="font-medium text-gray-900">{{ item.title }}</span>
-                  </template>
+                <td class="min-w-[260px] px-4 py-3">
+                  <div class="font-medium text-gray-900">{{ item.title }}</div>
+                  <div class="mt-1 max-w-md truncate text-xs text-gray-500">{{ previewText(item) }}</div>
                 </td>
-
-                <!-- Category -->
                 <td class="px-4 py-3">
-                  <template v-if="editingId === item.id">
-                    <select v-model="editForm.category" class="w-full px-2 py-1 bg-white border border-blue-400 rounded text-xs outline-none">
-                      <option value="FUNCTIONAL">FUNCTIONAL</option>
-                      <option value="UI">UI</option>
-                      <option value="API">API</option>
-                      <option value="PERFORMANCE">PERFORMANCE</option>
-                      <option value="SECURITY">SECURITY</option>
-                    </select>
-                  </template>
-                  <template v-else>
-                    <span class="text-xs font-mono text-gray-500">{{ item.category }}</span>
-                  </template>
-                </td>
-
-                <!-- Priority -->
-                <td class="px-4 py-3">
-                  <template v-if="editingId === item.id">
-                    <select v-model="editForm.priority" class="w-full px-2 py-1 bg-white border border-blue-400 rounded text-xs outline-none">
-                      <option value="P0">P0</option>
-                      <option value="P1">P1</option>
-                      <option value="P2">P2</option>
-                      <option value="P3">P3</option>
-                    </select>
-                  </template>
-                  <template v-else>
-                    <span
-                      class="inline-block px-2 py-0.5 rounded text-[10px] font-bold"
+                  <div class="flex flex-wrap gap-1.5">
+                    <span class="rounded px-2 py-0.5 text-[10px] font-bold uppercase"
+                      :class="caseType(item) === 'api' ? 'bg-blue-50 text-blue-700' : caseType(item) === 'ui' ? 'bg-indigo-50 text-indigo-700' : 'bg-gray-100 text-gray-600'">
+                      {{ caseType(item) }}
+                    </span>
+                    <span class="rounded border border-gray-200 bg-white px-2 py-0.5 text-[10px] font-bold uppercase text-gray-500">{{ item.category }}</span>
+                    <span class="rounded px-2 py-0.5 text-[10px] font-bold"
                       :class="{
                         'bg-red-100 text-red-700': item.priority === 'P0',
                         'bg-orange-100 text-orange-700': item.priority === 'P1',
                         'bg-yellow-100 text-yellow-700': item.priority === 'P2',
                         'bg-gray-100 text-gray-600': item.priority === 'P3',
-                      }"
-                    >{{ item.priority }}</span>
-                  </template>
+                      }">
+                      {{ item.priority }}
+                    </span>
+                  </div>
                 </td>
-
-                <!-- Steps preview -->
-                <td class="px-4 py-3">
-                  <template v-if="editingId === item.id">
-                    <div class="space-y-1">
-                      <input
-                        v-model="editForm.stepsText"
-                        class="w-full px-2 py-1 bg-white border border-blue-400 rounded text-xs font-mono outline-none"
-                        placeholder='["步骤1", "步骤2"]'
-                      />
-                      <input
-                        v-model="editForm.expectedText"
-                        class="w-full px-2 py-1 bg-white border border-blue-400 rounded text-xs font-mono outline-none"
-                        placeholder='["预期结果"]'
-                      />
-                    </div>
-                  </template>
-                  <template v-else>
-                    <div class="text-xs text-gray-500 truncate max-w-sm">
-                      {{ (item.steps || []).slice(0, 2).map((s: any) => typeof s === 'string' ? s : JSON.stringify(s)).join(' → ') }}
-                      <span v-if="(item.steps || []).length > 2" class="text-gray-400"> ...</span>
-                    </div>
-                  </template>
+                <td class="max-w-[260px] px-4 py-3 text-xs text-gray-500">
+                  <div class="font-semibold text-gray-700">{{ sourceKind(item) }}</div>
+                  <div class="mt-1 truncate font-mono text-[11px] text-gray-400">{{ sourceDetail(item) }}</div>
+                  <div v-if="sourceRunId(item)" class="mt-1 truncate font-mono text-[11px] text-gray-400">run {{ sourceRunId(item).slice(0, 8) }}</div>
+                  <div v-if="sourceProject(item)" class="mt-1 truncate font-mono text-[11px] text-gray-400">{{ sourceProject(item) }}</div>
                 </td>
-
-                <!-- Actions -->
+                <td class="max-w-[220px] px-4 py-3">
+                  <div v-if="sourceSuiteNames(item).length" class="flex flex-wrap gap-1">
+                    <span v-for="suite in sourceSuiteNames(item).slice(0, 2)" :key="suite" class="max-w-[180px] truncate rounded border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700">
+                      {{ suite }}
+                    </span>
+                    <span v-if="sourceSuiteNames(item).length > 2" class="text-[10px] text-gray-400">+{{ sourceSuiteNames(item).length - 2 }}</span>
+                  </div>
+                  <span v-else class="text-xs text-gray-400">未入套件</span>
+                </td>
                 <td class="px-4 py-3 text-right">
-                  <template v-if="editingId === item.id">
-                    <div class="flex items-center justify-end gap-1">
-                      <button
-                        @click="saveEdit(item.id)"
-                        class="p-1.5 rounded-lg text-green-600 hover:bg-green-50 transition-all"
-                        title="保存"
-                      >
-                        <Check :size="14" />
-                      </button>
-                      <button
-                        @click="cancelEdit"
-                        class="p-1.5 rounded-lg text-gray-400 hover:bg-gray-100 transition-all"
-                        title="取消"
-                      >
-                        <X :size="14" />
-                      </button>
-                    </div>
-                  </template>
-                  <template v-else>
-                    <div class="flex items-center justify-end gap-1">
-                      <button
-                        @click="startEdit(item)"
-                        class="p-1.5 rounded-lg text-gray-400 hover:text-blue-600 hover:bg-blue-50 transition-all"
-                        title="编辑"
-                      >
-                        <Pencil :size="14" />
-                      </button>
-                      <button
-                        @click="confirmDelete = item.id"
-                        class="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 transition-all"
-                        title="删除"
-                      >
-                        <Trash2 :size="14" />
-                      </button>
-                    </div>
-                  </template>
+                  <div class="flex items-center justify-end gap-1">
+                    <button @click="openDetail(item)" class="rounded-lg p-1.5 text-gray-400 transition-all hover:bg-gray-100 hover:text-gray-700" title="查看详情">
+                      <Eye :size="14" />
+                    </button>
+                    <button @click="startEdit(item)" class="rounded-lg p-1.5 text-gray-400 transition-all hover:bg-blue-50 hover:text-blue-600" title="编辑">
+                      <Pencil :size="14" />
+                    </button>
+                    <button @click="confirmDelete = item.id" class="rounded-lg p-1.5 text-gray-400 transition-all hover:bg-red-50 hover:text-red-600" title="删除">
+                      <Trash2 :size="14" />
+                    </button>
+                  </div>
                 </td>
               </tr>
             </tbody>
           </table>
         </div>
-        <Pagination
-          :page="page"
-          :page-size="pageSize"
-          :total="total"
-          @update:page="page = $event"
-        />
+        <Pagination :page="page" :page-size="pageSize" :total="total" @update:page="page = $event" />
       </template>
     </div>
 
-    <!-- Single Delete Confirm -->
+    <Teleport to="body">
+      <aside v-if="detailItem" class="fixed inset-y-0 right-0 z-50 flex w-full max-w-xl flex-col border-l border-gray-200 bg-white shadow-2xl">
+        <div class="flex items-start justify-between gap-4 border-b border-gray-100 px-6 py-4">
+          <div class="min-w-0">
+            <h3 class="truncate text-lg font-bold text-gray-900">{{ editingId === detailItem.id ? '编辑用例' : detailItem.title }}</h3>
+            <p class="mt-1 text-xs text-gray-500">{{ sourceKind(detailItem) }} / {{ detailItem.category }} / {{ detailItem.priority }}</p>
+          </div>
+          <button @click="detailItem = null; editingId = null" class="rounded-lg p-2 text-gray-400 transition-all hover:bg-gray-100 hover:text-gray-700">
+            <X :size="18" />
+          </button>
+        </div>
+
+        <div class="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+          <template v-if="editingId === detailItem.id">
+            <div class="space-y-4">
+              <div>
+                <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">标题</label>
+                <input v-model="editForm.title" class="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:bg-white" />
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">分类</label>
+                  <select v-model="editForm.category" class="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500">
+                    <option value="FUNCTIONAL">FUNCTIONAL</option>
+                    <option value="UI">UI</option>
+                    <option value="API">API</option>
+                    <option value="PERFORMANCE">PERFORMANCE</option>
+                    <option value="SECURITY">SECURITY</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">优先级</label>
+                  <select v-model="editForm.priority" class="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500">
+                    <option value="P0">P0</option>
+                    <option value="P1">P1</option>
+                    <option value="P2">P2</option>
+                    <option value="P3">P3</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">步骤 JSON 或逐行文本</label>
+                <textarea v-model="editForm.stepsText" rows="10" class="w-full resize-none rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 font-mono text-xs outline-none transition-all focus:border-blue-500 focus:bg-white" />
+              </div>
+              <div>
+                <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">预期 JSON 或逐行文本</label>
+                <textarea v-model="editForm.expectedText" rows="6" class="w-full resize-none rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 font-mono text-xs outline-none transition-all focus:border-blue-500 focus:bg-white" />
+              </div>
+            </div>
+          </template>
+          <template v-else>
+            <div class="space-y-5">
+              <div class="grid gap-3 sm:grid-cols-2">
+                <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                  <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">来源</div>
+                  <div class="mt-1 text-sm font-semibold text-gray-900">{{ sourceKind(detailItem) }}</div>
+                  <div class="mt-1 break-all font-mono text-[11px] text-gray-400">{{ sourceDetail(detailItem) }}</div>
+                </div>
+                <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                  <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">运行 / 项目</div>
+                  <div class="mt-1 break-all font-mono text-xs text-gray-600">{{ sourceRunId(detailItem) || '无关联运行' }}</div>
+                  <div class="mt-1 break-all font-mono text-[11px] text-gray-400">{{ sourceProject(detailItem) || '无项目信息' }}</div>
+                </div>
+              </div>
+
+              <div>
+                <h4 class="mb-2 text-xs font-bold uppercase tracking-widest text-gray-400">步骤</h4>
+                <div class="max-h-80 space-y-2 overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-3">
+                  <div v-for="(step, index) in (detailItem.steps || [])" :key="index" class="grid grid-cols-[28px_minmax(0,1fr)] gap-2 text-sm">
+                    <span class="font-mono text-xs text-gray-400">{{ index + 1 }}</span>
+                    <p class="whitespace-pre-wrap break-words text-gray-700">{{ formatStep(step) }}</p>
+                  </div>
+                  <p v-if="!(detailItem.steps || []).length" class="text-xs text-gray-400">未记录步骤</p>
+                </div>
+              </div>
+
+              <div>
+                <h4 class="mb-2 text-xs font-bold uppercase tracking-widest text-gray-400">预期结果</h4>
+                <div class="max-h-60 space-y-2 overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-3">
+                  <div v-for="(expected, index) in parseListText(arrayText(detailItem.expected))" :key="index" class="grid grid-cols-[28px_minmax(0,1fr)] gap-2 text-sm">
+                    <span class="font-mono text-xs text-gray-400">{{ index + 1 }}</span>
+                    <p class="whitespace-pre-wrap break-words text-gray-700">{{ formatStep(expected) }}</p>
+                  </div>
+                  <p v-if="!arrayText(detailItem.expected)" class="text-xs text-gray-400">未记录预期结果</p>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+
+        <div class="flex justify-end gap-2 border-t border-gray-100 px-6 py-4">
+          <template v-if="editingId === detailItem.id">
+            <button @click="cancelEdit" class="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-bold text-gray-600 transition-all hover:bg-gray-50">取消</button>
+            <button @click="saveEdit(detailItem.id)" class="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white transition-all hover:bg-blue-700">
+              <Check :size="15" /> 保存
+            </button>
+          </template>
+          <template v-else>
+            <button @click="startEdit(detailItem)" class="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white transition-all hover:bg-blue-700">
+              <Pencil :size="15" /> 编辑
+            </button>
+          </template>
+        </div>
+      </aside>
+    </Teleport>
+
     <ConfirmDialog
       :show="confirmDelete !== null"
       title="删除用例"
@@ -498,7 +576,6 @@ onMounted(fetchItems)
       @cancel="confirmDelete = null"
     />
 
-    <!-- Bulk Delete Confirm -->
     <ConfirmDialog
       :show="confirmBulkDelete"
       title="批量删除"
@@ -509,24 +586,23 @@ onMounted(fetchItems)
       @cancel="confirmBulkDelete = false"
     />
 
-    <!-- Create Modal -->
     <Teleport to="body">
-      <div v-if="showCreate" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" @click.self="showCreate = false">
-        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[85vh] overflow-y-auto">
-          <div class="sticky top-0 bg-white border-b border-gray-100 px-6 py-4 flex items-center justify-between rounded-t-2xl">
+      <div v-if="showCreate" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" @click.self="showCreate = false">
+        <div class="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white shadow-2xl">
+          <div class="sticky top-0 flex items-center justify-between border-b border-gray-100 bg-white px-6 py-4">
             <h3 class="text-lg font-bold text-gray-900">创建测试用例</h3>
-            <button @click="showCreate = false" class="p-1 text-gray-400 hover:text-gray-600 transition-colors"><X :size="20" /></button>
+            <button @click="showCreate = false" class="p-1 text-gray-400 transition-colors hover:text-gray-600"><X :size="20" /></button>
           </div>
-          <div class="p-6 space-y-4">
+          <div class="space-y-4 p-6">
             <div>
-              <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">标题 *</label>
+              <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">标题 *</label>
               <input v-model="createForm.title" placeholder="用例标题"
-                class="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:bg-white transition-all" />
+                class="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:bg-white" />
             </div>
             <div class="grid grid-cols-2 gap-4">
               <div>
-                <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">分类</label>
-                <select v-model="createForm.category" class="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 transition-all">
+                <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">分类</label>
+                <select v-model="createForm.category" class="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500">
                   <option value="FUNCTIONAL">FUNCTIONAL</option>
                   <option value="UI">UI</option>
                   <option value="API">API</option>
@@ -535,8 +611,8 @@ onMounted(fetchItems)
                 </select>
               </div>
               <div>
-                <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">优先级</label>
-                <select v-model="createForm.priority" class="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 transition-all">
+                <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">优先级</label>
+                <select v-model="createForm.priority" class="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500">
                   <option value="P0">P0 - 阻塞</option>
                   <option value="P1">P1 - 严重</option>
                   <option value="P2">P2 - 一般</option>
@@ -545,34 +621,34 @@ onMounted(fetchItems)
               </div>
             </div>
             <div>
-              <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">测试步骤 *</label>
+              <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">测试步骤 *</label>
               <div class="space-y-2">
-                <div v-for="(step, i) in createForm.steps" :key="i" class="flex items-center gap-2">
-                  <span class="text-xs text-gray-400 font-mono w-5">{{ i + 1 }}</span>
-                  <input v-model="createForm.steps[i]" :placeholder="`步骤 ${i + 1}`"
-                    class="flex-1 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:bg-white transition-all" />
-                  <button v-if="createForm.steps.length > 1" @click="removeStep(i)" class="p-1 text-gray-400 hover:text-red-500 transition-colors"><X :size="14" /></button>
+                <div v-for="(step, index) in createForm.steps" :key="index" class="flex items-center gap-2">
+                  <span class="w-5 font-mono text-xs text-gray-400">{{ index + 1 }}</span>
+                  <input v-model="createForm.steps[index]" :placeholder="`步骤 ${index + 1}`"
+                    class="flex-1 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm outline-none transition-all focus:border-blue-500 focus:bg-white" />
+                  <button v-if="createForm.steps.length > 1" @click="removeStep(index)" class="p-1 text-gray-400 transition-colors hover:text-red-500"><X :size="14" /></button>
                 </div>
-                <button @click="addStep" class="text-xs text-blue-600 hover:text-blue-800 font-bold transition-colors">+ 添加步骤</button>
+                <button @click="addStep" class="text-xs font-bold text-blue-600 transition-colors hover:text-blue-800">+ 添加步骤</button>
               </div>
             </div>
             <div>
-              <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">预期结果</label>
+              <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">预期结果</label>
               <div class="space-y-2">
-                <div v-for="(exp, i) in createForm.expected" :key="i" class="flex items-center gap-2">
-                  <span class="text-xs text-gray-400 font-mono w-5">{{ i + 1 }}</span>
-                  <input v-model="createForm.expected[i]" :placeholder="`预期结果 ${i + 1}`"
-                    class="flex-1 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:bg-white transition-all" />
-                  <button v-if="createForm.expected.length > 1" @click="removeExpected(i)" class="p-1 text-gray-400 hover:text-red-500 transition-colors"><X :size="14" /></button>
+                <div v-for="(expected, index) in createForm.expected" :key="index" class="flex items-center gap-2">
+                  <span class="w-5 font-mono text-xs text-gray-400">{{ index + 1 }}</span>
+                  <input v-model="createForm.expected[index]" :placeholder="`预期结果 ${index + 1}`"
+                    class="flex-1 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm outline-none transition-all focus:border-blue-500 focus:bg-white" />
+                  <button v-if="createForm.expected.length > 1" @click="removeExpected(index)" class="p-1 text-gray-400 transition-colors hover:text-red-500"><X :size="14" /></button>
                 </div>
-                <button @click="addExpected" class="text-xs text-blue-600 hover:text-blue-800 font-bold transition-colors">+ 添加预期结果</button>
+                <button @click="addExpected" class="text-xs font-bold text-blue-600 transition-colors hover:text-blue-800">+ 添加预期结果</button>
               </div>
             </div>
           </div>
-          <div class="sticky bottom-0 bg-white border-t border-gray-100 px-6 py-4 flex justify-end gap-3 rounded-b-2xl">
-            <button @click="showCreate = false" class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg text-sm font-bold transition-all">取消</button>
+          <div class="sticky bottom-0 flex justify-end gap-3 border-t border-gray-100 bg-white px-6 py-4">
+            <button @click="showCreate = false" class="rounded-lg px-4 py-2 text-sm font-bold text-gray-600 transition-all hover:bg-gray-100">取消</button>
             <button @click="submitCreate" :disabled="creating"
-              class="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-sm font-bold transition-all shadow-md shadow-blue-600/10">
+              class="rounded-lg bg-blue-600 px-6 py-2 text-sm font-bold text-white shadow-md shadow-blue-600/10 transition-all hover:bg-blue-700 disabled:opacity-50">
               {{ creating ? '创建中...' : '创建' }}
             </button>
           </div>

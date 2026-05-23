@@ -12,6 +12,10 @@ class KnowledgeCreate(BaseModel):
     source_script_id: str | None = None
 
 
+class KnowledgeUpdate(BaseModel):
+    content: str
+
+
 def _knowledge_payload(entry: Any) -> dict[str, Any]:
     return {
         "id": entry.id,
@@ -43,6 +47,18 @@ async def get_knowledge(entry_id: str, db: DbSession, _: CurrentUser):
     if entry is None:
         raise HTTPException(status_code=404, detail="Knowledge entry not found")
     return _knowledge_payload(entry)
+
+
+@router.put("/{entry_id}")
+async def update_knowledge(entry_id: str, payload: KnowledgeUpdate, db: DbSession, _: CurrentUser):
+    content = payload.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="content is required")
+    entry = await knowledge_service.update(db, entry_id, content=content)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Knowledge entry not found")
+    return _knowledge_payload(entry)
+
 
 @router.delete("/{entry_id}")
 async def delete_knowledge(entry_id: str, db: DbSession, _: CurrentUser):
