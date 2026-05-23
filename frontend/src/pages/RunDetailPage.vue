@@ -5,7 +5,7 @@ import api, { apiUrl } from '../lib/api'
 import StatusBadge from '../components/StatusBadge.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import { useToast } from '../composables/useToast'
-import { Activity, AlertTriangle, ArrowLeft, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCopy, Clock, Download, FileText, Loader2, Monitor, RotateCcw, Save, Terminal, XCircle, XCircleIcon, Zap } from 'lucide-vue-next'
+import { Activity, AlertTriangle, ArrowLeft, BookOpen, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCopy, Clock, Download, FileText, Loader2, Monitor, RotateCcw, Save, Terminal, XCircle, XCircleIcon, Zap } from 'lucide-vue-next'
 
 const expandedApiRow = ref<number | null>(null)
 const lightboxUrl = ref<string | null>(null)
@@ -96,6 +96,8 @@ const snapshotKeys = [
   'last_error',
   'scene_hints',
   'auth_chain',
+  'rag_context',
+  'rag_retrieval',
   'setup_instructions',
   'setup_result',
   'login_instructions',
@@ -614,7 +616,10 @@ const hasScreenshots = computed(() => hasUiSurface.value && uiScreenshotCount.va
 const toolCalls = computed(() => ensureList(run.value?.tool_calls || run.value?.artifacts?.tool_calls))
 const skillPlan = computed(() => ensureList(run.value?.skill_plan || run.value?.final_report?.skill_plan))
 const toolSummary = computed(() => run.value?.tool_summary || run.value?.final_report?.tool_summary || run.value?.artifacts?.tool_summary || null)
-const hasToolSurface = computed(() => toolCalls.value.length > 0 || skillPlan.value.length > 0 || Boolean(toolSummary.value))
+const ragRetrieval = computed(() => run.value?.rag_retrieval || null)
+const ragSources = computed(() => ensureList(ragRetrieval.value?.sources))
+const hasRagSurface = computed(() => Boolean(ragRetrieval.value || run.value?.rag_context))
+const hasToolSurface = computed(() => toolCalls.value.length > 0 || skillPlan.value.length > 0 || Boolean(toolSummary.value) || hasRagSurface.value)
 const triageSummary = computed(() => run.value?.triage_summary || null)
 const interventionSummary = computed(() => run.value?.intervention_summary || null)
 const showInterventionPanel = computed(() => Boolean(interventionSummary.value?.useful))
@@ -842,6 +847,9 @@ watch(visibleTabs, (tabs) => {
       </span>
       <span v-if="run.input_type" class="px-2 py-1 bg-blue-50 text-blue-600 rounded-lg text-[10px] font-bold border border-blue-100">
         {{ run.input_type }}
+      </span>
+      <span v-if="hasRagSurface" class="px-2 py-1 bg-emerald-50 text-emerald-700 rounded-lg text-[10px] font-bold border border-emerald-100">
+        RAG {{ ragSources.length ? `${ragSources.length} sources` : (ragRetrieval?.status || 'checked') }}
       </span>
       <span v-if="run.created_at" class="px-2 py-1 bg-gray-50 text-gray-500 rounded-lg text-[10px] font-mono">
         {{ new Date(run.created_at).toLocaleString('zh-CN') }}
@@ -1621,6 +1629,50 @@ watch(visibleTabs, (tabs) => {
 
     <!-- Tab: Tools -->
     <div v-if="activeTab === 'tools'" class="space-y-4">
+      <div v-if="hasRagSurface" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+        <div class="mb-4 flex items-center justify-between gap-3">
+          <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
+            <BookOpen :size="14" /> RAG / LangChain Context
+          </h3>
+          <span class="rounded bg-emerald-100 px-2 py-1 text-[10px] font-bold text-emerald-700">
+            {{ ragRetrieval?.status || 'available' }}
+          </span>
+        </div>
+
+        <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px]">
+          <div class="rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3">
+            <div class="text-xs font-bold text-emerald-900">{{ ragRetrieval?.effect || 'Retrieved context was injected into planner prompts.' }}</div>
+            <div v-if="ragRetrieval?.query" class="mt-2 truncate font-mono text-[11px] text-emerald-700">{{ ragRetrieval.query }}</div>
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+              <div class="text-[10px] font-bold text-gray-400">匹配</div>
+              <div class="mt-1 text-sm font-bold text-gray-900">{{ ragRetrieval?.match_count || 0 }}</div>
+            </div>
+            <div class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+              <div class="text-[10px] font-bold text-gray-400">注入片段</div>
+              <div class="mt-1 text-sm font-bold text-gray-900">{{ ragSources.length }}</div>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="ragSources.length" class="mt-4 grid gap-3 md:grid-cols-2">
+          <div
+            v-for="source in ragSources"
+            :key="source.id"
+            class="rounded-lg border border-gray-100 bg-gray-50 p-3"
+          >
+            <div class="mb-2 flex items-center justify-between gap-2">
+              <span class="truncate font-mono text-[10px] font-bold text-gray-500">{{ source.source_script_id || source.id }}</span>
+              <span class="shrink-0 rounded bg-white px-2 py-0.5 text-[10px] font-bold text-gray-500">score {{ source.score }}</span>
+            </div>
+            <p class="line-clamp-3 text-xs leading-5 text-gray-600">{{ source.snippet }}</p>
+          </div>
+        </div>
+
+        <pre v-if="run.rag_context" class="mt-4 max-h-44 overflow-auto rounded-lg border border-gray-100 bg-gray-950 p-3 text-[11px] leading-relaxed text-gray-100">{{ run.rag_context }}</pre>
+      </div>
+
       <div v-if="skillPlan.length" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
         <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-2">
           <Activity :size="14" /> Skill 调度

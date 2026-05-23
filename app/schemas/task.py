@@ -108,6 +108,8 @@ def parse_task_detail(task_orm) -> dict:
         "tool_summary": parsed.get("tool_summary"),
         "input_type": parsed.get("input_type"),
         "source_input": parsed.get("source_input"),
+        "rag_context": parsed.get("rag_context"),
+        "rag_retrieval": parsed.get("rag_retrieval"),
         "cancelled": parsed.get("cancelled", False),
         "cancelled_at": parsed.get("cancelled_at"),
         "last_error": parsed.get("last_error"),

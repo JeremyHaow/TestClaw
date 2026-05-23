@@ -43,6 +43,8 @@ EXECUTION_LOG_KEYS = (
     "last_error",
     "scene_hints",
     "auth_chain",
+    "rag_context",
+    "rag_retrieval",
     "setup_instructions",
     "setup_result",
     "login_instructions",

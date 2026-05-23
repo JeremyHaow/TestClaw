@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import api from '../lib/api'
 import { useToast } from '../composables/useToast'
-import { BookOpen, Plus, Trash2, Search, X } from 'lucide-vue-next'
+import { BookOpen, Plus, Trash2, Search, X, Play, GitBranch } from 'lucide-vue-next'
 import EmptyState from '../components/EmptyState.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const toast = useToast()
+const router = useRouter()
 const items = ref<any[]>([])
 const loading = ref(false)
 const searchQuery = ref('')
@@ -16,6 +18,9 @@ const searching = ref(false)
 const newContent = ref('')
 const adding = ref(false)
 const deleteTarget = ref<any>(null)
+const sourcedCount = computed(() => items.value.filter((item) => item.source_script_id).length)
+const manualCount = computed(() => Math.max(items.value.length - sourcedCount.value, 0))
+const latestKnowledge = computed(() => items.value[0] || null)
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -87,14 +92,69 @@ async function doDelete() {
   }
 }
 
+function startRagRun() {
+  router.push({
+    path: '/run',
+    query: {
+      test_type: 'auto',
+      objective: '结合 RAG 知识库中的历史缺陷、测试经验和目标记忆，规划一次 API/UI 回归检查。',
+    },
+  })
+}
+
 onMounted(fetchItems)
 </script>
 
 <template>
   <div class="space-y-8 pb-12">
     <div class="flex flex-col gap-1">
-      <h2 class="text-2xl font-bold tracking-tight text-gray-900">知识库</h2>
-      <p class="text-gray-500 text-sm">管理和搜索测试知识，支持全文检索。</p>
+      <h2 class="text-2xl font-bold tracking-tight text-gray-900">RAG 知识库</h2>
+      <p class="text-gray-500 text-sm">管理测试经验、缺陷根因和修复建议；运行时会先检索相关知识，再注入 Planner 和用例生成上下文。</p>
+    </div>
+
+    <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+      <div class="grid gap-3 md:grid-cols-4">
+        <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">知识条目</div>
+          <div class="mt-2 text-2xl font-semibold text-gray-900">{{ items.length }}</div>
+          <div class="mt-1 text-xs text-gray-500">候选 RAG 文档</div>
+        </div>
+        <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">运行沉淀</div>
+          <div class="mt-2 text-2xl font-semibold text-gray-900">{{ sourcedCount }}</div>
+          <div class="mt-1 text-xs text-gray-500">来自缺陷/失败运行</div>
+        </div>
+        <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">手动补充</div>
+          <div class="mt-2 text-2xl font-semibold text-gray-900">{{ manualCount }}</div>
+          <div class="mt-1 text-xs text-gray-500">测试策略和经验</div>
+        </div>
+        <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">最近更新</div>
+          <div class="mt-2 truncate text-sm font-semibold text-gray-900">{{ latestKnowledge?.created_at || '暂无' }}</div>
+          <div class="mt-1 text-xs text-gray-500">运行前检索会按目标相关性筛选</div>
+        </div>
+      </div>
+      <button
+        @click="startRagRun"
+        class="inline-flex items-center justify-center gap-2 rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-bold text-white transition-all hover:bg-black"
+      >
+        <Play :size="16" /> 去验证 RAG 效果
+      </button>
+    </div>
+
+    <div class="rounded-xl border border-emerald-100 bg-emerald-50 p-5 shadow-sm">
+      <div class="flex items-start gap-3">
+        <div class="rounded-lg bg-white p-2 text-emerald-700">
+          <GitBranch :size="18" />
+        </div>
+        <div>
+          <div class="text-sm font-bold text-emerald-900">Runtime path: knowledge_retriever -> planner -> tc_generator</div>
+          <p class="mt-1 text-xs leading-5 text-emerald-800">
+            匹配到的条目会作为 redacted RAG context 写入运行详情，并在 Agent Cockpit 的工具页签显示来源、命中数和注入效果。
+          </p>
+        </div>
+      </div>
     </div>
 
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">

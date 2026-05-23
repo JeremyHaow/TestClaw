@@ -288,6 +288,7 @@ async def run(state: AgentState) -> AgentState:
     test_type = (state.get("test_type") or "auto").lower()
     scene_hints = state.get("scene_hints") or []
     auth_info = state.get("auth_chain")
+    rag_context = state.get("rag_context") or "No relevant prior testing knowledge"
     base_url = (state.get("base_url_override") or state.get("target_url") or "").rstrip("/")
     db = state.get("db_session")
 
@@ -324,6 +325,7 @@ async def run(state: AgentState) -> AgentState:
                 test_plan=plan_summary,
                 api_schema=schema_str,
                 input_type=input_type,
+                rag_context=rag_context,
             )
             resp = await llm.ainvoke([HumanMessage(content=prompt)])
             content = resp.content if hasattr(resp, "content") else str(resp)

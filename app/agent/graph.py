@@ -7,6 +7,7 @@ from app.agent.nodes import (
     executor,
     healer,
     input_classifier,
+    knowledge_retriever,
     knowledge_sink,
     planner,
     reporter,
@@ -103,6 +104,7 @@ def build_graph():
     # Core workflow nodes
     graph.add_node("input_classifier", input_classifier.run)
     graph.add_node("source_loader", source_loader.run)
+    graph.add_node("knowledge_retriever", knowledge_retriever.run)
     graph.add_node("planner", planner.run)
     graph.add_node("tc_generator", tc_generator.run)
     graph.add_node("api_runner", api_runner.run)
@@ -123,7 +125,8 @@ def build_graph():
 
     # Linear edges
     graph.add_edge("input_classifier", "source_loader")
-    graph.add_edge("source_loader", "planner")
+    graph.add_edge("source_loader", "knowledge_retriever")
+    graph.add_edge("knowledge_retriever", "planner")
     graph.add_edge("planner", "tc_generator")
     graph.add_conditional_edges(
         "ui_login",

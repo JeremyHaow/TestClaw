@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import api from '../lib/api'
 import { useToast } from '../composables/useToast'
 import SearchInput from '../components/SearchInput.vue'
@@ -7,9 +8,10 @@ import Pagination from '../components/Pagination.vue'
 import EmptyState from '../components/EmptyState.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { FileCode, Pencil, Trash2, X, Check, Square, CheckSquare, MinusSquare, Plus } from 'lucide-vue-next'
+import { FileCode, Pencil, Trash2, X, Check, Square, CheckSquare, MinusSquare, Plus, Play } from 'lucide-vue-next'
 
 const toast = useToast()
+const router = useRouter()
 
 // --- State ---
 const items = ref<any[]>([])
@@ -36,10 +38,17 @@ const createForm = reactive({
   expected: [''],
 })
 const creating = ref(false)
+const suiteRunning = ref(false)
 
 // --- Computed ---
 const allSelected = computed(() => items.value.length > 0 && items.value.every((i) => selectedIds.value.has(i.id)))
 const someSelected = computed(() => items.value.some((i) => selectedIds.value.has(i.id)) && !allSelected.value)
+const apiCaseCount = computed(() => items.value.filter((item) => String(item.category || '').toUpperCase().includes('API')).length)
+const uiCaseCount = computed(() => items.value.filter((item) => {
+  const category = String(item.category || '').toUpperCase()
+  return category.includes('UI') || category.includes('PAGE') || category.includes('NAVIGATION')
+}).length)
+const agentGeneratedCount = computed(() => items.value.filter((item) => String(item.source || '').startsWith('agent:')).length)
 
 // --- API ---
 async function fetchItems() {
@@ -92,6 +101,30 @@ async function bulkDelete() {
     toast.error('批量删除失败')
   }
   confirmBulkDelete.value = false
+}
+
+async function runSelectedSuite() {
+  const ids = [...selectedIds.value]
+  if (!ids.length) {
+    toast.warning('请先选择要复用的测试用例')
+    return
+  }
+  suiteRunning.value = true
+  try {
+    const suiteName = `Selected suite ${new Date().toLocaleString('zh-CN')}`
+    const { data: suite } = await api.post('/test-cases/suites', {
+      name: suiteName,
+      test_case_ids: ids,
+    })
+    const { data } = await api.post(`/test-cases/suites/${suite.id}/run`)
+    selectedIds.value = new Set()
+    toast.success(`已提交 ${data.total || ids.length} 条用例执行`)
+    router.push(`/runs/${data.task_id}`)
+  } catch (e: any) {
+    toast.error(e?.response?.data?.detail || '执行套件失败')
+  } finally {
+    suiteRunning.value = false
+  }
 }
 
 // --- Selection ---
@@ -200,8 +233,8 @@ onMounted(fetchItems)
     <!-- Header -->
     <div class="flex items-center justify-between">
       <div class="flex flex-col gap-1">
-        <h2 class="text-2xl font-bold tracking-tight text-gray-900">用例库</h2>
-        <p class="text-gray-500 text-sm">管理和生成测试用例，支持手动创建与 AI 自动生成。</p>
+        <h2 class="text-2xl font-bold tracking-tight text-gray-900">用例资产</h2>
+        <p class="text-gray-500 text-sm">复核 Agent 生成的 API/UI 用例，接受为资产后可重新组成套件并交给 LangGraph 执行。</p>
       </div>
       <div class="flex items-center gap-3">
         <span class="text-xs text-gray-400 font-mono">{{ total }} 条</span>
@@ -209,6 +242,29 @@ onMounted(fetchItems)
           class="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-bold transition-all shadow-md shadow-blue-600/10">
           <Plus :size="16" /> 创建用例
         </button>
+      </div>
+    </div>
+
+    <div class="grid gap-3 md:grid-cols-4">
+      <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+        <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">当前结果</div>
+        <div class="mt-2 text-2xl font-semibold text-gray-900">{{ items.length }}</div>
+        <div class="mt-1 text-xs text-gray-500">按筛选加载</div>
+      </div>
+      <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+        <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">API / UI</div>
+        <div class="mt-2 text-2xl font-semibold text-gray-900">{{ apiCaseCount }} / {{ uiCaseCount }}</div>
+        <div class="mt-1 text-xs text-gray-500">套件会自动分流执行</div>
+      </div>
+      <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+        <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Agent 生成</div>
+        <div class="mt-2 text-2xl font-semibold text-gray-900">{{ agentGeneratedCount }}</div>
+        <div class="mt-1 text-xs text-gray-500">来自历史运行沉淀</div>
+      </div>
+      <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+        <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">已选择</div>
+        <div class="mt-2 text-2xl font-semibold text-gray-900">{{ selectedIds.size }}</div>
+        <div class="mt-1 text-xs text-gray-500">可一键组成套件运行</div>
       </div>
     </div>
 
@@ -239,6 +295,15 @@ onMounted(fetchItems)
           <option value="PERFORMANCE">PERFORMANCE</option>
           <option value="SECURITY">SECURITY</option>
         </select>
+        <button
+          v-if="selectedIds.size > 0"
+          @click="runSelectedSuite"
+          :disabled="suiteRunning"
+          class="flex items-center gap-2 px-4 py-2 bg-gray-900 hover:bg-black disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-all shadow-sm"
+        >
+          <Play :size="14" />
+          {{ suiteRunning ? '提交中...' : `运行选中 (${selectedIds.size})` }}
+        </button>
         <button
           v-if="selectedIds.size > 0"
           @click="confirmBulkDelete = true"

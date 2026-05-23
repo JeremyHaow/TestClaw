@@ -72,6 +72,7 @@ class AgentState(TypedDict, total=False):
     last_error: str | None
     old_locator: str | None
     rag_context: str | None
+    rag_retrieval: dict | None
     bug_report: dict | None
     messages: Annotated[list[BaseMessage], add_messages]
     workflow_steps: list[dict]

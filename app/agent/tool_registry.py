@@ -47,6 +47,15 @@ TOOL_CAPABILITIES: tuple[ToolCapability, ...] = (
         output_schema={"api_plan": "object", "ui_plan": "object"},
     ),
     ToolCapability(
+        name="memory.retrieve_rag_context",
+        layer="memory",
+        skill="rag-knowledge-retrieval",
+        description="Retrieve redacted historical testing knowledge and feed the most relevant snippets into planning and case generation.",
+        risk="read_only",
+        input_schema={"objective": "string", "target": "string", "schema_paths": "array"},
+        output_schema={"rag_context": "string", "sources": "array", "match_count": "number"},
+    ),
+    ToolCapability(
         name="planner.analyze_ui_execution_context",
         layer="planner",
         skill="test-planning",
@@ -179,6 +188,13 @@ AUTOMATION_SKILLS: tuple[AutomationSkill, ...] = (
         ],
     ),
     AutomationSkill(
+        name="rag-knowledge-retrieval",
+        layer="memory",
+        description="Search prior bug knowledge and tester notes, then inject relevant context into LangChain planner/case-generator prompts.",
+        triggers=["any run with matching knowledge", "re-run on known target", "historical failure themes"],
+        tools=["memory.retrieve_rag_context"],
+    ),
+    AutomationSkill(
         name="api-contract-testing",
         layer="api",
         description="Run traditional API automation: request construction, response assertions, schema checks, and safe write gating.",
@@ -258,6 +274,8 @@ def select_skills_for_state(state: dict[str, Any]) -> list[dict[str, Any]]:
     )
 
     selected = ["test-planning"]
+    if state.get("rag_retrieval") or state.get("rag_context"):
+        selected.append("rag-knowledge-retrieval")
     if test_type in {"api", "full"} or (test_type == "auto" and has_api):
         selected.append("api-contract-testing")
     if has_api and has_request_body_schema:

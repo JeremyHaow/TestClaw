@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import api from '../lib/api'
 import { useToast } from '../composables/useToast'
 import {
   AlertTriangle,
+  BookOpen,
   Bot,
   CheckCircle2,
   FileJson,
@@ -138,6 +139,7 @@ type PreflightResponse = {
 }
 
 const router = useRouter()
+const route = useRoute()
 const toast = useToast()
 const submitting = ref(false)
 const preflightLoading = ref(false)
@@ -189,6 +191,13 @@ const apiPolicies = [
 const authModes = [
   { value: 'auto', label: '自动获取 Token', desc: '填写登录凭据，运行前自动换取鉴权 Header。', icon: RefreshCw },
   { value: 'manual', label: '手动提供 Token/Header', desc: '直接粘贴当前 Token 或自定义 Header。', icon: KeyRound },
+]
+
+const architectureCards = [
+  { label: 'LangGraph', value: '状态图编排', desc: 'input -> source -> RAG -> planner -> executor -> reporter -> memory', icon: Route, tone: 'bg-blue-50 text-blue-700 border-blue-100' },
+  { label: 'RAG', value: '运行前检索', desc: '命中历史缺陷/测试知识后注入 Planner 和用例生成提示词', icon: BookOpen, tone: 'bg-emerald-50 text-emerald-700 border-emerald-100' },
+  { label: 'ReAct-style', value: '工具调用轨迹', desc: 'API/浏览器动作会记录 tool call、输入摘要、输出摘要和证据', icon: Terminal, tone: 'bg-amber-50 text-amber-700 border-amber-100' },
+  { label: 'Plan-Executor', value: '计划后执行', desc: 'Planner 产出策略，用例生成器和 API/UI Runner 分工执行', icon: Bot, tone: 'bg-violet-50 text-violet-700 border-violet-100' },
 ]
 
 const advancedAuthInputs = new Set(['base_url', 'login_url', 'login_body', 'login_headers', 'token_path', 'method', 'content_type'])
@@ -301,6 +310,27 @@ function detectInputType(source: string): string {
     return '网页 URL'
   }
   return '文本输入'
+}
+
+function queryString(value: unknown) {
+  return Array.isArray(value) ? String(value[0] || '') : String(value || '')
+}
+
+function applyRoutePrefill() {
+  const source = queryString(route.query.source)
+  const objective = queryString(route.query.objective)
+  const testType = queryString(route.query.test_type)
+  const baseUrl = queryString(route.query.base_url)
+  const setupInstructions = queryString(route.query.setup_instructions)
+  const apiPolicy = queryString(route.query.api_execution_policy)
+
+  if (source) form.source = source
+  if (objective) form.objective = objective
+  if (['auto', 'api', 'ui'].includes(testType)) form.test_type = testType
+  if (baseUrl) form.base_url = baseUrl
+  if (setupInstructions) form.setup_instructions = setupInstructions
+  if (apiPolicies.some((policy) => policy.value === apiPolicy)) form.api_execution_policy = apiPolicy
+  if (source || objective || testType || baseUrl || setupInstructions || apiPolicy) resetPreflight()
 }
 
 function resetPreflight() {
@@ -494,6 +524,8 @@ async function submit() {
     submitting.value = false
   }
 }
+
+onMounted(applyRoutePrefill)
 </script>
 
 <template>
@@ -522,6 +554,22 @@ async function submit() {
             查看历史
           </button>
         </div>
+      </div>
+    </section>
+
+    <section class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <div
+        v-for="card in architectureCards"
+        :key="card.label"
+        class="rounded-xl border bg-white p-4 shadow-sm"
+        :class="card.tone"
+      >
+        <div class="mb-3 flex items-center justify-between gap-3">
+          <span class="text-xs font-bold">{{ card.label }}</span>
+          <component :is="card.icon" :size="16" />
+        </div>
+        <div class="text-sm font-bold text-gray-900">{{ card.value }}</div>
+        <p class="mt-1 text-xs leading-5 text-gray-600">{{ card.desc }}</p>
       </div>
     </section>
 

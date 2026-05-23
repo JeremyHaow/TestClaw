@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import api from '../lib/api'
-import { Globe, Shield, Plus, Pencil, Trash2, Copy, X } from 'lucide-vue-next'
+import { Globe, Shield, Plus, Pencil, Trash2, Copy, X, Play } from 'lucide-vue-next'
 import { useToast } from '../composables/useToast'
 import EmptyState from '../components/EmptyState.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const toast = useToast()
+const router = useRouter()
 const items = ref<any[]>([])
 const loading = ref(false)
 const submitting = ref(false)
@@ -25,6 +27,9 @@ const form = reactive({
   variables: [{ key: 'TOKEN', value: 'demo' }] as KeyValue[],
   is_production: false,
 })
+const productionCount = computed(() => items.value.filter((item) => item.is_production).length)
+const variableCount = computed(() => items.value.reduce((total, item) => total + (item.variables ? Object.keys(item.variables).length : 0), 0))
+const runnableEnvironmentCount = computed(() => items.value.filter((item) => item.base_url).length)
 
 function resetForm() {
   form.name = ''
@@ -142,14 +147,57 @@ async function copyEnvironment(item: any) {
   }
 }
 
+function startEnvironmentRun(item?: any) {
+  router.push({
+    path: '/run',
+    query: {
+      test_type: 'auto',
+      base_url: item?.base_url || '',
+      source: item?.base_url || '',
+      objective: item
+        ? `在「${item.name}」环境执行 API/UI 冒烟与回归检查。`
+        : '选择测试环境后执行 API/UI 冒烟与回归检查。',
+      setup_instructions: item
+        ? `使用测试环境「${item.name}」。变量已在环境管理中维护，运行日志只显示脱敏值。${item.is_production ? '这是生产环境，保持安全只读策略。' : ''}`
+        : '',
+    },
+  })
+}
+
 onMounted(fetchItems)
 </script>
 
 <template>
   <div class="space-y-8 pb-12">
     <div class="flex flex-col gap-1">
-      <h2 class="text-2xl font-bold tracking-tight text-gray-900">环境管理</h2>
-      <p class="text-gray-500 text-sm">管理测试环境和变量配置，支持多环境切换。</p>
+      <h2 class="text-2xl font-bold tracking-tight text-gray-900">测试环境</h2>
+      <p class="text-gray-500 text-sm">维护 Base URL 和变量，运行预检会把目标、环境和安全边界一起交给测试智能体。</p>
+    </div>
+
+    <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+      <div class="grid gap-3 md:grid-cols-3">
+        <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">可运行环境</div>
+          <div class="mt-2 text-2xl font-semibold text-gray-900">{{ runnableEnvironmentCount }}</div>
+          <div class="mt-1 text-xs text-gray-500">可一键带入 Run Workspace</div>
+        </div>
+        <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">变量</div>
+          <div class="mt-2 text-2xl font-semibold text-gray-900">{{ variableCount }}</div>
+          <div class="mt-1 text-xs text-gray-500">列表展示为脱敏值</div>
+        </div>
+        <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">生产环境</div>
+          <div class="mt-2 text-2xl font-semibold text-gray-900">{{ productionCount }}</div>
+          <div class="mt-1 text-xs text-gray-500">建议保持安全只读</div>
+        </div>
+      </div>
+      <button
+        @click="startEnvironmentRun()"
+        class="inline-flex items-center justify-center gap-2 rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-bold text-white transition-all hover:bg-black"
+      >
+        <Play :size="16" /> 去创建环境运行
+      </button>
     </div>
 
     <div class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
@@ -255,6 +303,11 @@ onMounted(fetchItems)
                     class="p-1.5 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all"
                     title="复制">
                     <Copy :size="14" />
+                  </button>
+                  <button @click="startEnvironmentRun(item)"
+                    class="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
+                    title="带入运行">
+                    <Play :size="14" />
                   </button>
                   <button @click="confirmDelete(item)"
                     class="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"

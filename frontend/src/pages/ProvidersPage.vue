@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import api from '../lib/api'
 import { useToast } from '../composables/useToast'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
-import { Edit3, Save, Search, Trash2, X, Zap } from 'lucide-vue-next'
+import { Bot, Edit3, Save, Search, Trash2, X, Zap } from 'lucide-vue-next'
 
 const toast = useToast()
+const router = useRouter()
 const loading = ref(false)
 const items = ref<any[]>([])
 const discoveredModels = ref<any[]>([])
@@ -34,6 +36,21 @@ const editForm = reactive({
   system_prompt: '',
   agent_type: '',
 })
+const activeProviderCount = computed(() => items.value.length)
+const defaultRoleCount = computed(() => {
+  const roles = new Set<string>()
+  for (const item of items.value) {
+    if (item.is_default_planner) roles.add('Planner')
+    if (item.is_default_coder) roles.add('Coder')
+    if (item.is_default_vision) roles.add('Vision')
+  }
+  return roles.size
+})
+const roleCards = computed(() => [
+  { label: 'Planner', ready: items.value.some((item) => item.is_default_planner), detail: '生成 LangGraph 测试计划' },
+  { label: 'Coder', ready: items.value.some((item) => item.is_default_coder), detail: '生成脚本与用例内容' },
+  { label: 'Vision', ready: items.value.some((item) => item.is_default_vision), detail: '保留给视觉/截图理解' },
+])
 
 async function fetchItems() {
   loading.value = true
@@ -175,8 +192,43 @@ onMounted(fetchItems)
 <template>
   <div class="space-y-8 pb-12">
     <div class="flex flex-col gap-1">
-      <h2 class="text-2xl font-bold tracking-tight text-gray-900">模型配置</h2>
-      <p class="text-gray-500 text-sm">管理 AI 模型提供者，发现可用模型并配置默认角色。</p>
+      <h2 class="text-2xl font-bold tracking-tight text-gray-900">模型与 Agent</h2>
+      <p class="text-gray-500 text-sm">配置 LangChain 模型提供者和 Planner/Coder/Vision 角色，运行预检会读取这些默认角色。</p>
+    </div>
+
+    <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+      <div class="grid gap-3 md:grid-cols-4">
+        <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Provider</div>
+          <div class="mt-2 text-2xl font-semibold text-gray-900">{{ activeProviderCount }}</div>
+          <div class="mt-1 text-xs text-gray-500">可用于 LangChain Gateway</div>
+        </div>
+        <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">默认角色</div>
+          <div class="mt-2 text-2xl font-semibold text-gray-900">{{ defaultRoleCount }}/3</div>
+          <div class="mt-1 text-xs text-gray-500">Planner / Coder / Vision</div>
+        </div>
+        <div
+          v-for="role in roleCards"
+          :key="role.label"
+          class="rounded-xl border p-4 shadow-sm"
+          :class="role.ready ? 'border-emerald-100 bg-emerald-50' : 'border-amber-100 bg-amber-50'"
+        >
+          <div class="flex items-center justify-between gap-3">
+            <div class="text-sm font-bold text-gray-900">{{ role.label }}</div>
+            <span class="rounded px-2 py-0.5 text-[10px] font-bold" :class="role.ready ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'">
+              {{ role.ready ? 'Ready' : 'Missing' }}
+            </span>
+          </div>
+          <div class="mt-2 text-xs leading-5 text-gray-600">{{ role.detail }}</div>
+        </div>
+      </div>
+      <button
+        @click="router.push('/run')"
+        class="inline-flex items-center justify-center gap-2 rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-bold text-white transition-all hover:bg-black"
+      >
+        <Bot :size="16" /> 去运行预检
+      </button>
     </div>
 
     <div class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">

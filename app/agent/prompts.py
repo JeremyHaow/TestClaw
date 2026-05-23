@@ -39,6 +39,7 @@ PLANNER_PROMPT = """你是测试策略专家。根据以下信息制定测试计
 测试目标：{objective}
 目标 URL：{target_url}
 API Schema 摘要：{api_schema_summary}
+RAG 上下文：{rag_context}
 
 请输出 JSON 格式的测试计划，包含 API 测试计划和 UI 测试计划两部分：
 
@@ -70,6 +71,7 @@ CASE_GENERATOR_PROMPT = """你是测试用例设计专家。根据以下测试�
 测试计划：{test_plan}
 API Schema：{api_schema}
 输入类型：{input_type}
+RAG 上下文：{rag_context}
 
 请分别输出 API 测试用例和 UI 测试用例。
 

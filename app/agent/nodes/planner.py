@@ -21,6 +21,8 @@ async def run(state: AgentState) -> AgentState:
     test_type = state.get("test_type", "auto")
     input_type = state.get("input_type", "unknown")
     parsed_api_schema = state.get("parsed_api_schema")
+    rag_context = state.get("rag_context") or "No relevant prior testing knowledge"
+    rag_retrieval = state.get("rag_retrieval") or {}
     db = state.get("db_session")
     install_tool_context(state)
 
@@ -87,6 +89,7 @@ async def run(state: AgentState) -> AgentState:
                 objective=objective,
                 target_url=target_url,
                 api_schema_summary=schema_summary,
+                rag_context=rag_context,
             )
             resp = await llm.ainvoke([HumanMessage(content=prompt)])
             content = resp.content if hasattr(resp, "content") else str(resp)
@@ -143,6 +146,7 @@ async def run(state: AgentState) -> AgentState:
                 for skill in state.get("skill_plan", [])
                 if skill.get("layer") == "api"
             ],
+            "rag_source_count": len(rag_retrieval.get("sources") or []),
         }
 
     if not ui_plan:
@@ -166,6 +170,7 @@ async def run(state: AgentState) -> AgentState:
                 for skill in state.get("skill_plan", [])
                 if skill.get("layer") == "ui"
             ],
+            "rag_source_count": len(rag_retrieval.get("sources") or []),
         }
 
     if test_type == "ui":
@@ -178,11 +183,13 @@ async def run(state: AgentState) -> AgentState:
             "skills",
             [skill["name"] for skill in state.get("skill_plan", []) if skill.get("layer") == "api"],
         )
+        api_plan.setdefault("rag_source_count", len(rag_retrieval.get("sources") or []))
     if isinstance(ui_plan, dict):
         ui_plan.setdefault(
             "skills",
             [skill["name"] for skill in state.get("skill_plan", []) if skill.get("layer") == "ui"],
         )
+        ui_plan.setdefault("rag_source_count", len(rag_retrieval.get("sources") or []))
 
     state["api_plan"] = api_plan
     state["ui_plan"] = ui_plan
@@ -235,6 +242,7 @@ async def run(state: AgentState) -> AgentState:
             "api_plan": bool(api_plan),
             "ui_plan": bool(ui_plan),
             "selected_skills": [skill.get("name") for skill in state.get("skill_plan", [])],
+            "rag_source_count": len(rag_retrieval.get("sources") or []),
         },
     )
 

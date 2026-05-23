@@ -30,7 +30,7 @@ def _to_text(value: Any, fallback: str = "") -> str:
 async def run(state: AgentState) -> AgentState:
     if not state.get("last_error"):
         state.setdefault("workflow_steps", []).append(
-            {"node": "knowledge_sink", "status": "done", "detail": "Task completed successfully, knowledge stored"}
+            {"node": "knowledge_sink", "status": "done", "detail": "Task completed successfully; no failure knowledge to store"}
         )
         return state
 

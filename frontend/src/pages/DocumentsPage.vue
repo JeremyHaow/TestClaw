@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import api from '../lib/api'
 import { useToast } from '../composables/useToast'
-import { Upload, Database, FileCode, Pencil, Trash2, Check, X } from 'lucide-vue-next'
+import { Upload, Database, FileCode, Pencil, Trash2, Check, X, Play } from 'lucide-vue-next'
 import EmptyState from '../components/EmptyState.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const toast = useToast()
+const router = useRouter()
 
 const items = ref<any[]>([])
 const loading = ref(true)
@@ -33,6 +35,11 @@ const methodColors: Record<string, string> = {
   OPTIONS: 'bg-gray-100 text-gray-600 border-gray-200',
   HEAD: 'bg-gray-100 text-gray-600 border-gray-200',
 }
+const endpointTotal = computed(() => items.value.reduce((total, item) => total + (item.parsed_endpoints?.length || 0), 0))
+const readEndpointTotal = computed(() => items.value.reduce((total, item) => {
+  return total + (item.parsed_endpoints || []).filter((ep: any) => String(ep.method || '').toUpperCase() === 'GET').length
+}, 0))
+const writeEndpointTotal = computed(() => Math.max(endpointTotal.value - readEndpointTotal.value, 0))
 
 function getMethodColor(method: string) {
   return methodColors[method?.toUpperCase()] || 'bg-gray-100 text-gray-600 border-gray-200'
@@ -126,6 +133,13 @@ function confirmDelete(item: any) {
   deleteDialog.show = true
 }
 
+function startApiRun(item?: any) {
+  const objective = item
+    ? `基于已导入文档「${item.name || `Document-${item.format}`}」进行 API 契约、鉴权、边界值和错误分支检查。`
+    : '基于已导入 OpenAPI / Postman 文档进行 API 契约、鉴权、边界值和错误分支检查。'
+  router.push({ path: '/run', query: { test_type: 'api', objective } })
+}
+
 async function executeDelete() {
   try {
     await api.delete(`/documents/${deleteDialog.id}`)
@@ -145,8 +159,34 @@ onMounted(fetchItems)
 <template>
   <div class="space-y-8 pb-12">
     <div class="flex flex-col gap-1">
-      <h2 class="text-2xl font-bold tracking-tight text-gray-900">文档导入</h2>
-      <p class="text-gray-500 text-sm">导入 OpenAPI / Postman 文档，自动解析接口端点。</p>
+      <h2 class="text-2xl font-bold tracking-tight text-gray-900">接口文档</h2>
+      <p class="text-gray-500 text-sm">导入 OpenAPI / Postman 文档，让智能体在 source_loader 中解析端点并生成 API 测试计划。</p>
+    </div>
+
+    <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+      <div class="grid gap-3 md:grid-cols-3">
+        <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">文档</div>
+          <div class="mt-2 text-2xl font-semibold text-gray-900">{{ items.length }}</div>
+          <div class="mt-1 text-xs text-gray-500">可作为 API source</div>
+        </div>
+        <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">端点</div>
+          <div class="mt-2 text-2xl font-semibold text-gray-900">{{ endpointTotal }}</div>
+          <div class="mt-1 text-xs text-gray-500">Planner 会按场景分组</div>
+        </div>
+        <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">安全策略影响</div>
+          <div class="mt-2 text-2xl font-semibold text-gray-900">{{ writeEndpointTotal }}</div>
+          <div class="mt-1 text-xs text-gray-500">写入端点默认需确认/跳过</div>
+        </div>
+      </div>
+      <button
+        @click="startApiRun()"
+        class="inline-flex items-center justify-center gap-2 rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-bold text-white transition-all hover:bg-black"
+      >
+        <Play :size="16" /> 去创建 API 运行
+      </button>
     </div>
 
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
@@ -247,6 +287,9 @@ onMounted(fetchItems)
                 </button>
                 <button @click="confirmDelete(item)" class="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all flex-shrink-0" title="删除">
                   <Trash2 :size="14" />
+                </button>
+                <button @click="startApiRun(item)" class="p-1.5 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all flex-shrink-0" title="创建 API 运行">
+                  <Play :size="14" />
                 </button>
               </template>
             </div>

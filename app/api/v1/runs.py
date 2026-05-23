@@ -3661,6 +3661,8 @@ async def get_run_detail(run_id: str, db: DbSession, _: CurrentUser):
     detail["ui_reproducible_script"] = parsed.get("ui_reproducible_script")
     detail["scene_hints"] = parsed.get("scene_hints")
     detail["auth_chain"] = parsed.get("auth_chain")
+    detail["rag_context"] = parsed.get("rag_context")
+    detail["rag_retrieval"] = parsed.get("rag_retrieval")
     detail["api_execution_policy"] = parsed.get("api_execution_policy")
     detail["api_path_prefix_rewrite"] = parsed.get("api_path_prefix_rewrite")
     detail["triage_summary"] = _build_run_triage_summary(str(detail.get("status") or ""), parsed)

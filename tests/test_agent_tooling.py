@@ -1,6 +1,9 @@
+from datetime import datetime
+from types import SimpleNamespace
+
 import pytest
 
-from app.agent.nodes import api_runner, reporter
+from app.agent.nodes import api_runner, knowledge_retriever, reporter
 from app.agent.nodes.ui_runner import _build_ui_case_batches
 from app.agent.tool_registry import build_tool_registry, select_skills_for_state
 from app.core.redaction import REDACTED_VALUE
@@ -105,6 +108,60 @@ def test_tool_registry_does_not_show_api_chain_for_ui_only_auth_setup() -> None:
 
     assert "browser-ui-testing" in skill_names
     assert "api-chain-orchestration" not in skill_names
+
+
+def test_tool_registry_selects_rag_skill_after_retrieval() -> None:
+    skills = select_skills_for_state(
+        {
+            "test_type": "api",
+            "input_type": "swagger_url",
+            "rag_retrieval": {"status": "matched", "sources": [{"id": "k1"}]},
+        }
+    )
+
+    assert "rag-knowledge-retrieval" in {skill["name"] for skill in skills}
+
+
+@pytest.mark.asyncio
+async def test_knowledge_retriever_sets_redacted_rag_context() -> None:
+    class FakeResult:
+        def scalars(self):
+            return [
+                SimpleNamespace(
+                    id="knowledge-1",
+                    source_script_id="run-1",
+                    content="Checkout failure root cause password=secret-token",
+                    created_at=datetime(2026, 5, 23),
+                ),
+                SimpleNamespace(
+                    id="knowledge-2",
+                    source_script_id=None,
+                    content="Unrelated profile note",
+                    created_at=datetime(2026, 5, 22),
+                ),
+            ]
+
+    class FakeDb:
+        async def execute(self, _stmt):
+            return FakeResult()
+
+    state = await knowledge_retriever.run(
+        {
+            "db_session": FakeDb(),
+            "objective": "checkout regression",
+            "target_url": "https://shop.example.test/checkout",
+            "source_input": "https://shop.example.test/checkout",
+            "test_type": "ui",
+            "input_type": "url",
+            "workflow_steps": [],
+        }
+    )
+
+    assert state["rag_retrieval"]["status"] == "matched"
+    assert state["rag_retrieval"]["sources"][0]["id"] == "knowledge-1"
+    assert "secret-token" not in state["rag_context"]
+    assert "[REDACTED]" in state["rag_context"]
+    assert "rag-knowledge-retrieval" in {skill["name"] for skill in state["skill_plan"]}
 
 
 def test_ui_runner_adds_smart_waits_after_actions() -> None:
