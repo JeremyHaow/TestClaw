@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
-  Bot, BrainCircuit, History, Settings2, ChevronLeft, ChevronRight
+  Bot, BrainCircuit, History, Cpu, FileCode, Globe, Layers, BookOpen, ChevronLeft, ChevronRight
 } from 'lucide-vue-next'
 import { useSidebar } from '../composables/useSidebar'
 
@@ -15,7 +15,11 @@ const navItems = [
   { path: '/run', label: '测试智能体', icon: Bot },
   { path: '/history', label: '运行历史', icon: History },
   { path: '/quality-memory', label: '质量记忆', icon: BrainCircuit },
-  { path: '/settings', label: '系统设置', icon: Settings2 },
+  { path: '/providers', label: '模型与 Agent', icon: Cpu },
+  { path: '/documents', label: '接口文档', icon: FileCode },
+  { path: '/environments', label: '测试环境', icon: Globe },
+  { path: '/test-cases', label: '用例资产', icon: Layers },
+  { path: '/knowledge', label: 'RAG 知识库', icon: BookOpen },
 ]
 
 function isActive(path: string) {

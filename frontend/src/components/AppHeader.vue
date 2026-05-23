@@ -15,12 +15,12 @@ const pageTitle = computed(() => {
     '/run': 'Testing Agent Workspace',
     '/history': '运行历史',
     '/quality-memory': '质量记忆',
-    '/settings': '系统设置',
-    '/providers': '模型管理',
-    '/documents': '文档管理',
-    '/environments': '环境管理',
-    '/test-cases': '用例库',
-    '/knowledge': '知识库',
+    '/settings': '模型与 Agent',
+    '/providers': '模型与 Agent',
+    '/documents': '接口文档',
+    '/environments': '测试环境',
+    '/test-cases': '用例资产',
+    '/knowledge': 'RAG 知识库',
   }
   for (const [path, title] of Object.entries(titles)) {
     if (route.path === path || route.path.startsWith(path + '/')) return title
