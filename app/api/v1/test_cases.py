@@ -11,6 +11,7 @@ from sqlalchemy import func, or_, select
 from app.agent.prompts import TC_GEN_PROMPT
 from app.core.dependencies import CurrentUser, DbSession
 from app.core.llm_gateway import llm_gateway
+from app.core.redaction import redact_sensitive_data
 from app.models.test_case import TestCase, TestSuite
 from app.schemas.test_case import TestCaseCreate, TestCaseRead
 
@@ -65,6 +66,87 @@ _PLAYWRIGHT_COMMAND_PREFIXES = (
     "assert snapshot",
     "expect snapshot",
 )
+_LIST_TEST_DATA_KEYS = (
+    "case_asset",
+    "project",
+    "project_id",
+    "target_url",
+    "base_url",
+    "url",
+    "request_template",
+    "playwright_commands",
+    "commands",
+)
+_LIST_TEMPLATE_KEYS = (
+    "method",
+    "path",
+    "endpoint",
+    "base_url",
+    "url",
+    "headers",
+    "query_params",
+    "params",
+    "body",
+    "json",
+    "expected_status",
+)
+_MAX_LIST_JSON_VALUE_BYTES = 3000
+
+
+def _bounded_list_value(value: Any) -> Any:
+    safe = redact_sensitive_data(value)
+    try:
+        size = len(json.dumps(safe, ensure_ascii=False, default=str))
+    except Exception:
+        return safe
+    if size <= _MAX_LIST_JSON_VALUE_BYTES:
+        return safe
+    return {"omitted": "large value omitted from list response", "size": size}
+
+
+def _safe_request_template_for_list(value: Any) -> dict[str, Any]:
+    template = _request_template_from_mapping(value)
+    if not template:
+        return {}
+    safe: dict[str, Any] = {}
+    for key in _LIST_TEMPLATE_KEYS:
+        if key in template:
+            safe[key] = _bounded_list_value(template.get(key))
+    return safe
+
+
+def _safe_test_data_for_list(value: Any) -> dict[str, Any] | list[Any] | None:
+    if isinstance(value, list):
+        return _bounded_list_value(value)
+    if not isinstance(value, dict):
+        return None
+
+    safe: dict[str, Any] = {}
+    for key in _LIST_TEST_DATA_KEYS:
+        if key not in value:
+            continue
+        if key == "request_template":
+            template = _safe_request_template_for_list(value)
+            if template:
+                safe[key] = template
+        elif key in {"playwright_commands", "commands"}:
+            commands = _string_list(value.get(key))[:50]
+            if commands:
+                safe[key] = [_bounded_list_value(command) for command in commands]
+        else:
+            safe[key] = _bounded_list_value(value.get(key))
+
+    if "request_template" not in safe:
+        template = _safe_request_template_for_list(value)
+        if template:
+            safe["request_template"] = template
+    return safe or None
+
+
+def _safe_test_case_for_list(test_case: TestCase) -> dict[str, Any]:
+    data = TestCaseRead.model_validate(test_case).model_dump()
+    data["test_data"] = _safe_test_data_for_list(data.get("test_data"))
+    return data
 
 
 def _ensure_array(value) -> list[str]:
@@ -355,7 +437,7 @@ async def list_test_cases(
     response.headers["X-Total-Count"] = str(total)
     offset = (page - 1) * page_size
     result = await db.execute(stmt.order_by(TestCase.created_at.desc()).offset(offset).limit(page_size))
-    return list(result.scalars())
+    return [_safe_test_case_for_list(test_case) for test_case in result.scalars()]
 
 
 @router.put("/{test_case_id}", response_model=TestCaseRead)

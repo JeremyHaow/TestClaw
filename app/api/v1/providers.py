@@ -12,6 +12,8 @@ from app.schemas.provider import ProviderCreate, ProviderRead, ProviderUpdate
 
 router = APIRouter()
 
+_DEFAULT_ROLE_FIELDS = ("is_default_coder", "is_default_vision", "is_default_planner")
+
 
 def _mask_api_key(encrypted: str) -> str | None:
     try:
@@ -30,8 +32,24 @@ def _to_schema(provider: LLMProvider) -> ProviderRead:
     )
 
 
+async def _clear_conflicting_defaults(
+    db: DbSession,
+    payload: ProviderCreate | ProviderUpdate,
+    *,
+    exclude_id: str | None = None,
+) -> None:
+    for field in _DEFAULT_ROLE_FIELDS:
+        if not getattr(payload, field):
+            continue
+        stmt = update(LLMProvider).values(**{field: False})
+        if exclude_id is not None:
+            stmt = stmt.where(LLMProvider.id != exclude_id)
+        await db.execute(stmt)
+
+
 @router.post("", response_model=ProviderRead)
 async def create_provider(payload: ProviderCreate, db: DbSession, _: CurrentUser):
+    await _clear_conflicting_defaults(db, payload)
     provider = LLMProvider(
         name=payload.name,
         type=ProviderType(payload.type),
@@ -63,6 +81,7 @@ async def update_provider(provider_id: str, payload: ProviderUpdate, db: DbSessi
     provider = await db.get(LLMProvider, provider_id)
     if provider is None:
         raise HTTPException(status_code=404, detail="Provider not found")
+    await _clear_conflicting_defaults(db, payload, exclude_id=provider_id)
     provider.name = payload.name
     provider.type = ProviderType(payload.type)
     if payload.api_key:

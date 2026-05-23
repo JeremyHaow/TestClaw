@@ -70,15 +70,19 @@ const modelForm = reactive({
   agent_type: '',
 })
 
+function providerKeyFor(item: Pick<ProviderModel, 'name' | 'type' | 'base_url' | 'api_key_masked'>) {
+  return [
+    item.name || '未命名 Provider',
+    item.type || 'openai',
+    item.base_url || '',
+    item.api_key_masked || '',
+  ].join('||')
+}
+
 const providerGroups = computed<ProviderGroup[]>(() => {
   const groups = new Map<string, ProviderGroup>()
   for (const item of items.value) {
-    const key = [
-      item.name || '未命名 Provider',
-      item.type || 'openai',
-      item.base_url || '',
-      item.api_key_masked || '',
-    ].join('||')
+    const key = providerKeyFor(item)
     if (!groups.has(key)) {
       groups.set(key, {
         key,
@@ -103,6 +107,7 @@ const selectedProvider = computed(() => {
 })
 
 function resetModelForm() {
+  const firstModel = items.value.length === 0
   Object.assign(modelForm, {
     id: '',
     name: '',
@@ -110,9 +115,9 @@ function resetModelForm() {
     api_key: '',
     model_name: '',
     base_url: '',
-    is_default_coder: items.value.length === 0,
+    is_default_coder: firstModel,
     is_default_vision: false,
-    is_default_planner: false,
+    is_default_planner: firstModel,
     max_tokens: 4096,
     temperature: 0.2,
     system_prompt: '',
@@ -199,6 +204,7 @@ function modelPayload() {
 async function saveModel() {
   try {
     const payload = modelPayload()
+    let saved: ProviderModel | null = null
     if (!payload.name || !payload.model_name) {
       toast.warning('Provider 名称和模型名不能为空')
       return
@@ -208,20 +214,17 @@ async function saveModel() {
       return
     }
     if (modelFormMode.value === 'edit') {
-      await api.put(`/providers/${modelForm.id}`, payload)
+      const { data } = await api.put(`/providers/${modelForm.id}`, payload)
+      saved = data
       toast.success('模型配置已更新')
     } else {
-      await api.post('/providers', payload)
+      const { data } = await api.post('/providers', payload)
+      saved = data
       toast.success('模型配置已保存')
     }
     closeModelForm()
     await fetchItems()
-    selectedProviderKey.value = [
-      payload.name,
-      payload.type,
-      payload.base_url || '',
-      modelForm.api_key ? '' : selectedProvider.value?.api_key_masked || '',
-    ].join('||')
+    if (saved) selectedProviderKey.value = providerKeyFor(saved)
   } catch (err: any) {
     toast.error(err?.response?.data?.detail || (modelFormMode.value === 'edit' ? '更新模型配置失败' : '保存模型配置失败'))
   }

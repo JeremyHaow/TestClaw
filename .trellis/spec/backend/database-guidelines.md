@@ -88,6 +88,7 @@ await db.commit()
 - `PUT /knowledge/{id}` replaces content and regenerates the embedding when an embedding provider is available. If embeddings are unavailable, the update still succeeds and returns `embedding_available=false`.
 - Environment list responses return masked variable values only.
 - Environment updates must preserve an existing encrypted value when the submitted value equals the current masked display value. This allows editing names/base URLs without replacing a secret with its mask.
+- Provider create/update and `/providers/{id}/set-default` must keep at most one active default model per role (`planner`, `coder`, `vision`). Duplicate role defaults can break runtime model lookup and make UI defaults misleading.
 - UI actions must not display fake capabilities: do not show arbitrary headers for providers if the backend cannot store them, do not show a global environment run action without a base URL, and do not label knowledge as vector-ready unless `embedding_available=true`.
 
 ### 4. Validation & Error Matrix
@@ -113,6 +114,7 @@ await db.commit()
 - Integration: `/knowledge/{id}` update changes content and regenerates embeddings when available.
 - Regression: knowledge update succeeds without embeddings and reports `embedding_available=false`.
 - Regression: environment update preserves existing encrypted values when submitted values match the masked display value.
+- Regression: provider create/update with a role default clears conflicting defaults for that role.
 - Frontend build/type-check: provider, environment, case asset, and knowledge pages compile against the real API contracts.
 
 ### 7. Wrong vs Correct

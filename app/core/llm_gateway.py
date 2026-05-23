@@ -44,8 +44,12 @@ class LLMGateway:
         )
 
     async def _get_default(self, db: AsyncSession, field: str) -> BaseChatModel:
-        stmt = select(LLMProvider).where(getattr(LLMProvider, field).is_(True), LLMProvider.is_active.is_(True))
-        provider = (await db.execute(stmt)).scalar_one_or_none()
+        stmt = (
+            select(LLMProvider)
+            .where(getattr(LLMProvider, field).is_(True), LLMProvider.is_active.is_(True))
+            .order_by(LLMProvider.created_at.desc())
+        )
+        provider = (await db.execute(stmt)).scalars().first()
         if provider is None:
             raise RuntimeError(f"No active default provider for role: {field}")
         return self.build_client(provider)
