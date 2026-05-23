@@ -12,6 +12,7 @@ class ApiDocument(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name: Mapped[str] = mapped_column(String(255))
+    source_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     raw_content: Mapped[str] = mapped_column(Text)
     format: Mapped[str] = mapped_column(String(50))
     parsed_endpoints: Mapped[list[dict]] = mapped_column(JSON, default=list)

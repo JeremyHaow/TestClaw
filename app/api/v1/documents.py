@@ -46,7 +46,7 @@ async def import_document(payload: DocumentCreate, db: DbSession, _: CurrentUser
     if not raw_content:
         raise HTTPException(status_code=400, detail="Either raw_content or url must be provided")
 
-    return await doc_service.create(db, name, raw_content, payload.format)
+    return await doc_service.create(db, name, raw_content, payload.format, source_url=payload.url)
 
 
 @router.get("", response_model=list[DocumentRead])
@@ -64,7 +64,14 @@ async def get_document(document_id: str, db: DbSession, _: CurrentUser):
 
 @router.put("/{document_id}", response_model=DocumentRead)
 async def update_document(document_id: str, payload: DocumentUpdate, db: DbSession, _: CurrentUser):
-    document = await doc_service.update(db, document_id, payload.name)
+    document = await doc_service.update(
+        db,
+        document_id,
+        name=payload.name,
+        raw_content=payload.raw_content,
+        format=payload.format,
+        source_url=payload.source_url,
+    )
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return document
