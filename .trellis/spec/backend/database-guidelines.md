@@ -54,6 +54,102 @@ await db.delete(task)
 await db.commit()
 ```
 
+## Scenario: Management Settings Asset API Contract
+
+### 1. Scope / Trigger
+
+- Trigger: settings pages for providers, environments, test cases, and knowledge are product workflows, not static admin dashboards.
+- Applies to `app/api/v1/environments.py`, `app/api/v1/test_cases.py`, `app/api/v1/knowledge.py`, `app/services/knowledge_service.py`, and their Vue management pages.
+- Purpose: keep management UI actions backed by real API capabilities and prevent masked secrets, fake pagination, or fake vector status from corrupting stored data.
+
+### 2. Signatures
+
+- Test case list:
+  ```text
+  GET /api/v1/test-cases?page=1&page_size=20&search=checkout&priority=P1&category=API&source=agent
+  X-Total-Count: 42
+  ```
+- Knowledge update:
+  ```text
+  PUT /api/v1/knowledge/{id}
+  {"content": "Updated tester knowledge"}
+  ```
+- Environment update:
+  ```text
+  PUT /api/v1/environments/{id}
+  {"name": "...", "base_url": "...", "variables": {"TOKEN": "********1234"}, "is_production": false}
+  ```
+
+### 3. Contracts
+
+- Test case list must apply `page`, `page_size`, `search`, `priority`, `category`, and `source` server-side and return `X-Total-Count` for the same filters.
+- Test case list rows may include safe asset metadata such as `test_data.case_asset`, `source`, `created_at`, `category`, and suite-facing runner metadata. Do not include secret-bearing request headers or raw execution logs.
+- Knowledge create and update attempt embedding generation through `knowledge_service`; `embedding_available` must reflect whether `KnowledgeEntry.embedding` is present after the write.
+- `PUT /knowledge/{id}` replaces content and regenerates the embedding when an embedding provider is available. If embeddings are unavailable, the update still succeeds and returns `embedding_available=false`.
+- Environment list responses return masked variable values only.
+- Environment updates must preserve an existing encrypted value when the submitted value equals the current masked display value. This allows editing names/base URLs without replacing a secret with its mask.
+- UI actions must not display fake capabilities: do not show arbitrary headers for providers if the backend cannot store them, do not show a global environment run action without a base URL, and do not label knowledge as vector-ready unless `embedding_available=true`.
+
+### 4. Validation & Error Matrix
+
+- `GET /test-cases?page=2&page_size=10&search=x` -> returns only page 2 rows and the full filtered `X-Total-Count`.
+- `PUT /knowledge/{missing}` -> `404 Knowledge entry not found`.
+- `PUT /knowledge/{id}` with blank content -> `400 content is required`.
+- `PUT /knowledge/{id}` when embedding provider is missing -> `200` with updated content and `embedding_available=false`.
+- `PUT /environments/{id}` with `variables.TOKEN` equal to the masked value returned by `GET /environments` -> keep the existing encrypted secret.
+
+### 5. Good/Base/Bad Cases
+
+- Good: a case asset table pages through filtered API rows, opens long steps in a detail panel, and uses backend totals for pagination.
+- Good: editing a knowledge entry updates the content and reports true vector status based on regenerated embedding.
+- Base: no embedding provider is configured; knowledge editing still works and the UI says no vector is available.
+- Bad: frontend paginates a full unbounded `/test-cases` response while claiming backend pagination.
+- Bad: saving an environment after editing only `base_url` stores `********1234` as the real token.
+- Bad: knowledge UI displays "Vector RAG ready" for rows where `embedding_available=false`.
+
+### 6. Tests Required
+
+- Integration: `/test-cases` filters and paginates server-side, returns `X-Total-Count`, and exposes safe asset metadata.
+- Integration: `/knowledge/{id}` update changes content and regenerates embeddings when available.
+- Regression: knowledge update succeeds without embeddings and reports `embedding_available=false`.
+- Regression: environment update preserves existing encrypted values when submitted values match the masked display value.
+- Frontend build/type-check: provider, environment, case asset, and knowledge pages compile against the real API contracts.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+result = await db.execute(select(TestCase).order_by(TestCase.created_at.desc()))
+return list(result.scalars())
+```
+
+#### Correct
+
+```python
+total = (await db.execute(count_stmt)).scalar_one()
+response.headers["X-Total-Count"] = str(total)
+result = await db.execute(stmt.offset(offset).limit(page_size))
+return list(result.scalars())
+```
+
+#### Wrong
+
+```python
+environment.variables_encrypted = {
+    key: encrypt_value(value) for key, value in payload.variables.items()
+}
+```
+
+#### Correct
+
+```python
+if mask_secret(decrypt_value(existing_value)) == submitted_value:
+    encrypted[key] = existing_value
+else:
+    encrypted[key] = encrypt_value(submitted_value)
+```
+
 ## Migrations
 
 - Alembic for migrations: `alembic/versions/`
