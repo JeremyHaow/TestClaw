@@ -822,6 +822,84 @@ except asyncio.TimeoutError:
     stdout, stderr = await proc.communicate()
 ```
 
+## Scenario: Runtime RAG Knowledge Retrieval Contract
+
+### 1. Scope / Trigger
+
+- Trigger: agent runs should make the knowledge base visibly affect planning instead of leaving RAG as an isolated settings page.
+- Applies to `app/agent/graph.py`, `app/agent/nodes/knowledge_retriever.py`, `app/agent/nodes/planner.py`, `app/agent/nodes/tc_generator.py`, `app/agent/progress.py`, run detail parsing, and the Run Detail tools/RAG surface.
+- Purpose: retrieve safe historical test knowledge before planning, inject it into LangChain prompts, persist a redacted retrieval summary, and show testers what context influenced the run.
+
+### 2. Signatures
+
+- Graph order:
+  ```text
+  input_classifier -> source_loader -> knowledge_retriever -> planner -> tc_generator -> ...
+  ```
+- Agent state fields:
+  ```python
+  rag_context: str | None
+  rag_retrieval: dict | None
+  ```
+- Tool capability:
+  ```text
+  memory.retrieve_rag_context
+  ```
+- Execution log keys:
+  ```text
+  rag_context, rag_retrieval
+  ```
+
+### 3. Contracts
+
+- `knowledge_retriever` reads recent `KnowledgeEntry` rows, scores them against objective, target, source input, input type, test type, and parsed endpoint hints.
+- Retrieval runs after source loading so parsed API paths can influence matching, and before planner/case generation so prompts can receive `rag_context`.
+- `rag_retrieval` is a JSON object with at least `status`, `query`, `match_count`, `sources`, and `effect`.
+- `sources[]` may include safe identifiers, score, snippet, source run id, and created timestamp. Snippets must be redacted before persistence.
+- Prompt templates for planner and case generation must accept `rag_context`; fallback text is required when no relevant knowledge exists.
+- Run detail and SSE snapshots may expose `rag_retrieval` and `rag_context` only after existing redaction helpers have processed execution logs.
+- Tool/skill surfaces should include `rag-knowledge-retrieval` only when a run has retrieval state or injected context.
+
+### 4. Validation & Error Matrix
+
+- No DB session -> `rag_retrieval.status="skipped"`, graph continues.
+- DB session but no matching entries -> `status="empty"`, planner receives fallback context.
+- Matching entries found -> `status="matched"`, `rag_context` contains bounded redacted snippets.
+- Retrieval exception -> `status="error"`, graph continues without blocking the run.
+- Legacy unredacted knowledge content -> persisted snippets/context contain `[REDACTED]` for credentials and secret-looking values.
+
+### 5. Good/Base/Bad Cases
+
+- Good: a checkout regression run retrieves a prior checkout failure note, planner/case generator receive that note, and Run Detail shows RAG source count and snippets.
+- Base: a new target has no matching knowledge; the run still plans from live input and the UI says no relevant prior knowledge matched.
+- Bad: RAG page text claims runtime influence but no graph node injects context into prompts.
+- Bad: raw passwords, tokens, cookies, Playwright fill/type values, or auth headers appear in `rag_context`, `rag_retrieval.sources[]`, SSE, or Run Detail.
+
+### 6. Tests Required
+
+- Unit: `knowledge_retriever.run(...)` sets `rag_context` and `rag_retrieval.status="matched"` for relevant knowledge.
+- Unit: retrieved context/snippets redact secret-looking values.
+- Unit: skill selection includes `rag-knowledge-retrieval` only when retrieval/context exists.
+- Unit: graph imports and compiles with `knowledge_retriever` between source loading and planning.
+- Frontend build: Run Page and Run Detail compile with RAG architecture and retrieval surfaces.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+graph.add_edge("source_loader", "planner")
+prompt = PLANNER_PROMPT.format(..., rag_context="No additional context")
+```
+
+#### Correct
+
+```python
+graph.add_edge("source_loader", "knowledge_retriever")
+graph.add_edge("knowledge_retriever", "planner")
+prompt = PLANNER_PROMPT.format(..., rag_context=state.get("rag_context") or "No relevant prior testing knowledge")
+```
+
 ## Common Mistakes
 
 - Don't forget `await` on all DB operations
@@ -833,3 +911,4 @@ except asyncio.TimeoutError:
 - Don't collapse page URL and API base URL into one field; keep `target_url`/`ui_seed_url` for browser execution and `base_url_override` for API execution.
 - Don't hardcode UI execution context from a specific website; use `planner.analyze_ui_execution_context` and current snapshots.
 - Don't let timed-out `playwright-cli` subprocesses keep running after returning a timeout result.
+- Don't describe RAG as runtime behavior unless `knowledge_retriever` persists `rag_retrieval` and injects `rag_context` before planning.
