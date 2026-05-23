@@ -1,4 +1,13 @@
-from app.agent.graph import _after_api_runner, _after_tc_generator, _after_ui_login
+from app.agent.graph import _after_api_runner, _after_tc_generator, _after_ui_login, build_graph
+
+
+def test_graph_routes_source_loader_through_rag_before_planning() -> None:
+    graph = build_graph().get_graph()
+    edges = {(edge.source, edge.target) for edge in graph.edges}
+
+    assert ("source_loader", "knowledge_retriever") in edges
+    assert ("knowledge_retriever", "planner") in edges
+    assert ("source_loader", "planner") not in edges
 
 
 def test_after_tc_generator_routes_ui_runs_through_login_chain() -> None:
