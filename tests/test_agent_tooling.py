@@ -2,13 +2,17 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
+from langchain_openai import OpenAIEmbeddings
 
 from app.agent.nodes import api_runner, knowledge_retriever, reporter
 from app.agent.nodes.ui_runner import _build_ui_case_batches
 from app.agent.tool_registry import build_tool_registry, select_skills_for_state
+from app.core.llm_gateway import LLMGateway
 from app.core.redaction import REDACTED_VALUE
+from app.models.llm_provider import LLMProvider, ProviderType
 from app.services.api_auth import AuthResolution
 from app.services.embedding_service import EmbeddingService, EmbeddingUnavailableError
+from app.services.knowledge_service import KnowledgeService
 from app.tools.mock_data import generate_mock_json_body
 
 
@@ -141,6 +145,67 @@ async def test_embedding_service_redacts_text_before_provider() -> None:
     assert vectors == [[1.0, 0.0]]
     assert "secret-token" not in client.embedded_texts[0]
     assert "[REDACTED]" in client.embedded_texts[0]
+
+
+def test_llm_gateway_builds_openai_embeddings_client(monkeypatch) -> None:
+    monkeypatch.setattr("app.core.llm_gateway.decrypt_value", lambda _value: "sk-test")
+    provider = LLMProvider(
+        name="OpenAI-compatible",
+        type=ProviderType.OPENAI,
+        base_url="https://llm.example.test/v1",
+        api_key_encrypted="encrypted",
+        model_name="gpt-4o",
+    )
+
+    client = LLMGateway().build_embeddings_client(provider)
+
+    assert isinstance(client, OpenAIEmbeddings)
+    assert client.model == "text-embedding-3-small"
+    assert client.openai_api_base == "https://llm.example.test/v1"
+
+
+@pytest.mark.asyncio
+async def test_knowledge_service_stores_embedding_for_new_entries(monkeypatch) -> None:
+    class FakeEmbeddingService:
+        calls: list[tuple[object, str]]
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def embed_document(self, db, text):
+            self.calls.append((db, text))
+            return [0.25, 0.75]
+
+    class FakeDb:
+        added: object | None = None
+        committed = False
+        refreshed: object | None = None
+
+        def add(self, entry) -> None:
+            self.added = entry
+
+        async def commit(self) -> None:
+            self.committed = True
+
+        async def refresh(self, entry) -> None:
+            self.refreshed = entry
+
+    fake_embeddings = FakeEmbeddingService()
+    monkeypatch.setattr("app.services.knowledge_service.embedding_service", fake_embeddings)
+    db = FakeDb()
+
+    entry = await KnowledgeService().create(
+        db,
+        content="Checkout failure with token=secret-token",
+        source_script_id="run-1",
+    )
+
+    assert fake_embeddings.calls == [(db, "Checkout failure with token=secret-token")]
+    assert db.added is entry
+    assert db.committed is True
+    assert db.refreshed is entry
+    assert entry.embedding == [0.25, 0.75]
+    assert entry.source_script_id == "run-1"
 
 
 @pytest.mark.asyncio

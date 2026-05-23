@@ -618,6 +618,21 @@ const skillPlan = computed(() => ensureList(run.value?.skill_plan || run.value?.
 const toolSummary = computed(() => run.value?.tool_summary || run.value?.final_report?.tool_summary || run.value?.artifacts?.tool_summary || null)
 const ragRetrieval = computed(() => run.value?.rag_retrieval || null)
 const ragSources = computed(() => ensureList(ragRetrieval.value?.sources))
+const ragDisplayStatus = computed(() => ragRetrieval.value?.status || 'metadata_unavailable')
+const ragDisplayMode = computed(() => ragRetrieval.value?.mode || 'unavailable')
+const ragPanelTitle = computed(() => {
+  const mode = String(ragDisplayMode.value || '').toLowerCase()
+  if (mode === 'vector') return 'Vector RAG Retrieval'
+  if (mode === 'lexical_fallback') return 'Lexical Fallback Retrieval'
+  if (mode === 'skipped') return 'RAG Retrieval Skipped'
+  if (mode === 'error') return 'RAG Retrieval Error'
+  return 'RAG Retrieval Unavailable'
+})
+const ragDisplayEffect = computed(() => {
+  if (ragRetrieval.value?.effect) return ragRetrieval.value.effect
+  if (run.value?.rag_context) return 'RAG context is present, but retrieval metadata is unavailable; this is not labeled as vector RAG.'
+  return 'RAG retrieval metadata is unavailable.'
+})
 function ragModeLabel(mode: string) {
   const value = String(mode || '').toLowerCase()
   if (value === 'vector') return 'Vector'
@@ -630,7 +645,7 @@ function ragModeLabel(mode: string) {
 function ragStatusClass(status: string) {
   const value = String(status || '').toLowerCase()
   if (value === 'matched') return 'bg-emerald-100 text-emerald-700'
-  if (['fallback_lexical', 'empty', 'skipped', 'unavailable'].includes(value)) return 'bg-amber-100 text-amber-700'
+  if (['fallback_lexical', 'empty', 'skipped', 'unavailable', 'metadata_unavailable'].includes(value)) return 'bg-amber-100 text-amber-700'
   if (value === 'error') return 'bg-red-100 text-red-700'
   return 'bg-gray-100 text-gray-600'
 }
@@ -882,7 +897,7 @@ watch(visibleTabs, (tabs) => {
         {{ run.input_type }}
       </span>
       <span v-if="hasRagSurface" class="px-2 py-1 bg-emerald-50 text-emerald-700 rounded-lg text-[10px] font-bold border border-emerald-100">
-        RAG {{ ragSources.length ? `${ragSources.length} sources` : (ragRetrieval?.status || 'checked') }}
+        RAG {{ ragSources.length ? `${ragSources.length} sources` : ragDisplayStatus }}
       </span>
       <span v-if="run.created_at" class="px-2 py-1 bg-gray-50 text-gray-500 rounded-lg text-[10px] font-mono">
         {{ new Date(run.created_at).toLocaleString('zh-CN') }}
@@ -1665,17 +1680,17 @@ watch(visibleTabs, (tabs) => {
       <div v-if="hasRagSurface" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
         <div class="mb-4 flex items-center justify-between gap-3">
           <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
-            <BookOpen :size="14" /> Vector RAG Retrieval
+            <BookOpen :size="14" /> {{ ragPanelTitle }}
           </h3>
-          <span class="rounded px-2 py-1 text-[10px] font-bold" :class="ragStatusClass(ragRetrieval?.status)">
-            {{ ragRetrieval?.status || 'available' }}
+          <span class="rounded px-2 py-1 text-[10px] font-bold" :class="ragStatusClass(ragDisplayStatus)">
+            {{ ragDisplayStatus }}
           </span>
         </div>
 
         <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_300px]">
-          <div class="rounded-lg border px-4 py-3" :class="ragEffectClass(ragRetrieval?.mode)">
-            <div class="text-xs font-bold">{{ ragRetrieval?.effect || 'Vector context was injected into planner prompts.' }}</div>
-            <div v-if="ragRetrieval?.query" class="mt-2 truncate font-mono text-[11px]" :class="ragQueryClass(ragRetrieval?.mode)">{{ ragRetrieval.query }}</div>
+          <div class="rounded-lg border px-4 py-3" :class="ragEffectClass(ragDisplayMode)">
+            <div class="text-xs font-bold">{{ ragDisplayEffect }}</div>
+            <div v-if="ragRetrieval?.query" class="mt-2 truncate font-mono text-[11px]" :class="ragQueryClass(ragDisplayMode)">{{ ragRetrieval.query }}</div>
             <div v-if="ragRetrieval?.fallback_reason" class="mt-2 text-[11px] font-semibold">
               {{ ragRetrieval.fallback_reason }}
             </div>
@@ -1683,7 +1698,7 @@ watch(visibleTabs, (tabs) => {
           <div class="grid grid-cols-3 gap-2">
             <div class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
               <div class="text-[10px] font-bold text-gray-400">模式</div>
-              <div class="mt-1 truncate text-xs font-bold text-gray-900">{{ ragModeLabel(ragRetrieval?.mode) }}</div>
+              <div class="mt-1 truncate text-xs font-bold text-gray-900">{{ ragModeLabel(ragDisplayMode) }}</div>
             </div>
             <div class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
               <div class="text-[10px] font-bold text-gray-400">向量源</div>
