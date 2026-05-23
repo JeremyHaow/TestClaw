@@ -26,12 +26,15 @@ const runs = ref<any[]>([])
 const insights = ref<any | null>(null)
 const loading = ref(false)
 const insightsLoading = ref(false)
+const hasLoadedRuns = ref(false)
+const hasLoadedInsights = ref(false)
 const filterStatus = ref('')
 const filterType = ref('')
 const page = ref(1)
 const pageSize = 20
 const total = ref(0)
 
+const initialPageLoading = computed(() => !hasLoadedRuns.value || !hasLoadedInsights.value)
 const statusCounts = computed(() => insights.value?.status_counts || {})
 const trend = computed(() => insights.value?.quality_trend || {})
 const trendBuckets = computed(() => (trend.value?.buckets || []).slice(-14))
@@ -115,6 +118,7 @@ async function fetchRuns() {
     toast.error(err?.response?.data?.detail || '加载历史记录失败')
   } finally {
     loading.value = false
+    hasLoadedRuns.value = true
   }
 }
 
@@ -127,6 +131,7 @@ async function fetchInsights() {
     toast.error(err?.response?.data?.detail || '加载质量记忆失败')
   } finally {
     insightsLoading.value = false
+    hasLoadedInsights.value = true
   }
 }
 
@@ -178,7 +183,7 @@ onUnmounted(() => stopPolling())
       <p class="text-gray-500 text-sm">近期趋势、反复问题、影响面和可复用证据。</p>
     </div>
 
-    <LoadingSpinner v-if="insightsLoading && !insights" text="加载质量记忆中..." />
+    <LoadingSpinner v-if="initialPageLoading" text="加载运行历史中..." />
     <template v-else>
       <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
         <div
@@ -338,67 +343,66 @@ onUnmounted(() => stopPolling())
           <p v-else class="text-sm text-gray-400 py-6 text-center">暂无受影响测试面</p>
         </div>
       </div>
-    </template>
-
-    <!-- Filters -->
-    <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-4 flex flex-wrap gap-4 items-center">
-      <div class="flex items-center gap-2">
-        <Filter :size="14" class="text-gray-400" />
-        <span class="text-xs text-gray-500 font-bold">筛选</span>
+      <!-- Filters -->
+      <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-4 flex flex-wrap gap-4 items-center">
+        <div class="flex items-center gap-2">
+          <Filter :size="14" class="text-gray-400" />
+          <span class="text-xs text-gray-500 font-bold">筛选</span>
+        </div>
+        <select v-model="filterStatus" @change="page = 1; fetchRuns()"
+          class="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:border-blue-500">
+          <option value="">全部状态</option>
+          <option value="succeeded">通过</option>
+          <option value="failed">失败</option>
+          <option value="bug_found">缺陷</option>
+          <option value="queued">排队中</option>
+          <option value="running">运行中</option>
+        </select>
+        <select v-model="filterType" @change="page = 1; fetchRuns()"
+          class="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:border-blue-500">
+          <option value="">全部类型</option>
+          <option value="AUTO">自动</option>
+          <option value="API">API</option>
+          <option value="UI">UI</option>
+        </select>
+        <span class="text-xs text-gray-400 ml-auto">{{ total }} 条记录</span>
       </div>
-      <select v-model="filterStatus" @change="page = 1; fetchRuns()"
-        class="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:border-blue-500">
-        <option value="">全部状态</option>
-        <option value="succeeded">通过</option>
-        <option value="failed">失败</option>
-        <option value="bug_found">缺陷</option>
-        <option value="queued">排队中</option>
-        <option value="running">运行中</option>
-      </select>
-      <select v-model="filterType" @change="page = 1; fetchRuns()"
-        class="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:border-blue-500">
-        <option value="">全部类型</option>
-        <option value="AUTO">自动</option>
-        <option value="API">API</option>
-        <option value="UI">UI</option>
-      </select>
-      <span class="text-xs text-gray-400 ml-auto">{{ total }} 条记录</span>
-    </div>
 
-    <!-- Run List -->
-    <LoadingSpinner v-if="loading" text="加载中..." />
-    <EmptyState
-      v-else-if="!runs.length"
-      :icon="Filter"
-      :title="total ? '没有匹配的记录' : '暂无运行记录'"
-      :description="total ? '请尝试调整筛选条件' : '点击开始测试创建第一次运行'"
-    />
-    <div v-else class="space-y-3">
-      <div v-for="run in runs" :key="run.id"
-        @click="router.push(`/runs/${run.id}`)"
-        class="bg-white border border-gray-200 rounded-xl p-5 shadow-sm hover:border-blue-200 transition-all cursor-pointer group">
-        <div class="flex items-start justify-between">
-          <div class="flex-1 min-w-0">
-            <div class="flex items-center gap-3 mb-2">
-              <StatusBadge :status="run.status" />
-              <span class="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px] font-bold uppercase">{{ run.test_type }}</span>
+      <!-- Run List -->
+      <LoadingSpinner v-if="loading" text="加载中..." />
+      <EmptyState
+        v-else-if="!runs.length"
+        :icon="Filter"
+        :title="total ? '没有匹配的记录' : '暂无运行记录'"
+        :description="total ? '请尝试调整筛选条件' : '点击开始测试创建第一次运行'"
+      />
+      <div v-else class="space-y-3">
+        <div v-for="run in runs" :key="run.id"
+          @click="router.push(`/runs/${run.id}`)"
+          class="bg-white border border-gray-200 rounded-xl p-5 shadow-sm hover:border-blue-200 transition-all cursor-pointer group">
+          <div class="flex items-start justify-between">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-3 mb-2">
+                <StatusBadge :status="run.status" />
+                <span class="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px] font-bold uppercase">{{ run.test_type }}</span>
+              </div>
+              <div class="font-bold text-gray-900 text-sm truncate">{{ run.objective }}</div>
+              <div class="text-xs font-mono text-gray-400 mt-0.5 truncate">{{ run.target_url }}</div>
+              <div class="text-xs text-gray-400 mt-1">{{ run.created_at ? new Date(run.created_at).toLocaleString('zh-CN') : '' }}</div>
             </div>
-            <div class="font-bold text-gray-900 text-sm truncate">{{ run.objective }}</div>
-            <div class="text-xs font-mono text-gray-400 mt-0.5 truncate">{{ run.target_url }}</div>
-            <div class="text-xs text-gray-400 mt-1">{{ run.created_at ? new Date(run.created_at).toLocaleString('zh-CN') : '' }}</div>
-          </div>
-          <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-            <button @click="deleteRun(run.id, $event)" class="p-2 text-gray-400 hover:text-red-600 transition-colors">
-              <Trash2 :size="14" />
-            </button>
-            <button class="p-2 text-gray-400 group-hover:text-blue-600 transition-colors">
-              <Eye :size="16" />
-            </button>
+            <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+              <button @click="deleteRun(run.id, $event)" class="p-2 text-gray-400 hover:text-red-600 transition-colors">
+                <Trash2 :size="14" />
+              </button>
+              <button class="p-2 text-gray-400 group-hover:text-blue-600 transition-colors">
+                <Eye :size="16" />
+              </button>
+            </div>
           </div>
         </div>
       </div>
-    </div>
 
-    <Pagination :page="page" :page-size="pageSize" :total="total" @update:page="page = $event; fetchRuns()" />
+      <Pagination :page="page" :page-size="pageSize" :total="total" @update:page="page = $event; fetchRuns()" />
+    </template>
   </div>
 </template>
