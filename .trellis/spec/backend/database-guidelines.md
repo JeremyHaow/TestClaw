@@ -869,6 +869,7 @@ except asyncio.TimeoutError:
 - `sources[]` may include safe identifiers, score/similarity, retrieval mode, snippet, source run id, and created timestamp. Snippets must be redacted before persistence.
 - Prompt templates for planner and case generation must accept `rag_context`; fallback text is required when no relevant knowledge exists.
 - Run detail and SSE snapshots may expose `rag_retrieval` and `rag_context` only after existing redaction helpers have processed execution logs.
+- Run Detail must derive display labels from `rag_retrieval.mode` and `rag_retrieval.status`. If legacy data has `rag_context` but no `rag_retrieval`, show metadata unavailable/context-only copy; never default that state to Vector RAG.
 - Tool/skill surfaces should include `rag-knowledge-retrieval` only when a run has retrieval state or injected context.
 
 ### 4. Validation & Error Matrix
@@ -880,13 +881,16 @@ except asyncio.TimeoutError:
 - Legacy entries without embeddings -> backfill embeddings when the provider is available; if backfill fails, expose `fallback_reason` and do not claim vector retrieval.
 - Retrieval exception -> `status="error"`, graph continues without blocking the run.
 - Legacy unredacted knowledge content -> embedding input, persisted snippets, and context contain `[REDACTED]` for credentials and secret-looking values.
+- Legacy `rag_context` without `rag_retrieval` -> Run Detail labels the panel as retrieval metadata unavailable/context-only, not Vector RAG.
 
 ### 5. Good/Base/Bad Cases
 
 - Good: a checkout regression run vector-matches a prior checkout failure note, planner/case generator receive that note, and Run Detail shows mode, vector source count, source snippets, and similarity scores.
 - Base: a new target has no similar vector knowledge; the run still plans from live input and the UI says vector retrieval found no similar prior knowledge.
 - Base: no embedding provider is configured; Run Detail says vector retrieval is unavailable or explicitly shows lexical fallback with the reason.
+- Base: an older run only has `rag_context`; Run Detail can show the context but labels the retrieval metadata as unavailable.
 - Bad: RAG page text claims vector runtime influence while the graph uses only keyword matching.
+- Bad: Run Detail uses `rag_context` alone as proof that vector retrieval ran.
 - Bad: raw passwords, tokens, cookies, Playwright fill/type values, or auth headers appear in `rag_context`, `rag_retrieval.sources[]`, SSE, or Run Detail.
 
 ### 6. Tests Required
@@ -894,6 +898,7 @@ except asyncio.TimeoutError:
 - Unit: `knowledge_retriever.run(...)` chooses the highest cosine-similarity knowledge vector and sets `rag_retrieval.status="matched"` with `mode="vector"`.
 - Unit: embedding input and retrieved context/snippets redact secret-looking values.
 - Unit: embedding-provider unavailability sets `status="fallback_lexical"` or `status="unavailable"` with `fallback_reason` and `vector_source_count=0`.
+- Unit/frontend: context-only legacy RAG state renders as metadata unavailable, not Vector RAG or available.
 - Unit: skill selection includes `rag-knowledge-retrieval` only when retrieval/context exists.
 - Unit: graph imports and compiles with `knowledge_retriever` between source loading and planning.
 - Frontend build: Run Page and Run Detail compile with RAG architecture and retrieval surfaces.
