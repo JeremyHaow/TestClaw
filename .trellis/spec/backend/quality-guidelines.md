@@ -39,6 +39,13 @@
 - [ ] DB operations use `async/await`
 - [ ] No secrets in logs or error messages
 
+## Product Wording: Agent Architecture
+
+- UI may describe ReAct-style behavior when the product exposes tool-call traces, input/output summaries, and execution evidence.
+- UI may describe Plan-Executor behavior when the flow is Planner -> generated cases/scripts -> API/UI runners -> reporter.
+- UI may describe Multi-Agent only as role-based agent orchestration: Planner/Coder/Vision model defaults plus LangGraph nodes for planning, case generation, execution, reporting, and memory.
+- Do not imply autonomous peer-to-peer agent collaboration unless the backend implements that behavior.
+
 ## Scenario: Automatic API Auth Preflight
 
 ### 1. Scope / Trigger

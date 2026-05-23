@@ -47,9 +47,9 @@ const defaultRoleCount = computed(() => {
   return roles.size
 })
 const roleCards = computed(() => [
-  { label: 'Planner', ready: items.value.some((item) => item.is_default_planner), detail: '生成 LangGraph 测试计划' },
-  { label: 'Coder', ready: items.value.some((item) => item.is_default_coder), detail: '生成脚本与用例内容' },
-  { label: 'Vision', ready: items.value.some((item) => item.is_default_vision), detail: '保留给视觉/截图理解' },
+  { label: 'Planner', ready: items.value.some((item) => item.is_default_planner), detail: '负责测试计划、范围和执行策略' },
+  { label: 'Coder', ready: items.value.some((item) => item.is_default_coder), detail: '用于脚本、用例和修复建议生成' },
+  { label: 'Vision', ready: items.value.some((item) => item.is_default_vision), detail: '保留给视觉和截图理解任务' },
 ])
 
 async function fetchItems() {
@@ -193,7 +193,7 @@ onMounted(fetchItems)
   <div class="space-y-8 pb-12">
     <div class="flex flex-col gap-1">
       <h2 class="text-2xl font-bold tracking-tight text-gray-900">模型与 Agent</h2>
-      <p class="text-gray-500 text-sm">配置 LangChain 模型提供者和 Planner/Coder/Vision 角色，运行预检会读取这些默认角色。</p>
+      <p class="text-gray-500 text-sm">配置 LangChain 模型提供者和 Planner/Coder/Vision 默认角色，用于角色化 Multi-Agent 编排与运行预检。</p>
     </div>
 
     <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
@@ -206,7 +206,7 @@ onMounted(fetchItems)
         <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
           <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">默认角色</div>
           <div class="mt-2 text-2xl font-semibold text-gray-900">{{ defaultRoleCount }}/3</div>
-          <div class="mt-1 text-xs text-gray-500">Planner / Coder / Vision</div>
+          <div class="mt-1 text-xs text-gray-500">Multi-Agent 角色槽位</div>
         </div>
         <div
           v-for="role in roleCards"

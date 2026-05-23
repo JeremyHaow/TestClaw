@@ -194,10 +194,11 @@ const authModes = [
 ]
 
 const architectureCards = [
-  { label: 'LangGraph', value: '状态图编排', desc: 'input -> source -> RAG -> planner -> executor -> reporter -> memory', icon: Route, tone: 'bg-blue-50 text-blue-700 border-blue-100' },
+  { label: 'LangGraph', value: '状态图编排', desc: 'input -> source -> RAG -> planner -> cases -> API/UI runner -> reporter -> memory', icon: Route, tone: 'bg-blue-50 text-blue-700 border-blue-100' },
   { label: 'RAG', value: '运行前检索', desc: '命中历史缺陷/测试知识后注入 Planner 和用例生成提示词', icon: BookOpen, tone: 'bg-emerald-50 text-emerald-700 border-emerald-100' },
   { label: 'ReAct-style', value: '工具调用轨迹', desc: 'API/浏览器动作会记录 tool call、输入摘要、输出摘要和证据', icon: Terminal, tone: 'bg-amber-50 text-amber-700 border-amber-100' },
   { label: 'Plan-Executor', value: '计划后执行', desc: 'Planner 产出策略，用例生成器和 API/UI Runner 分工执行', icon: Bot, tone: 'bg-violet-50 text-violet-700 border-violet-100' },
+  { label: 'Multi-Agent', value: '角色化编排', desc: 'Planner/Coder/Vision 默认模型接入，规划、生成、执行、报告和记忆节点依序流转', icon: SlidersHorizontal, tone: 'bg-cyan-50 text-cyan-700 border-cyan-100' },
 ]
 
 const advancedAuthInputs = new Set(['base_url', 'login_url', 'login_body', 'login_headers', 'token_path', 'method', 'content_type'])
@@ -557,7 +558,7 @@ onMounted(applyRoutePrefill)
       </div>
     </section>
 
-    <section class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+    <section class="grid gap-3 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
       <div
         v-for="card in architectureCards"
         :key="card.label"
