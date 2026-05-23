@@ -107,6 +107,7 @@ const endpointRangeLabel = computed(() => {
   const end = Math.min(endpointPage.value * endpointPageSize, filteredEndpoints.value.length)
   return `${start}-${end} / ${filteredEndpoints.value.length}`
 })
+const selectedRawContent = computed(() => formatRawContent(selectedDoc.value?.raw_content))
 
 watch([selectedId, endpointSearch, methodFilter], () => {
   endpointPage.value = 1
@@ -136,6 +137,48 @@ function prettyJson(value: any) {
   } catch {
     return String(value)
   }
+}
+
+function formatJsonText(raw: string) {
+  const text = raw || ''
+  const trimmed = text.trim()
+  if (!trimmed) {
+    return { ok: false, value: text, message: '原文为空，无法格式化 JSON' }
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed)
+    return { ok: true, value: JSON.stringify(parsed, null, 2) || text, message: '' }
+  } catch {
+    return { ok: false, value: text, message: '当前原文不是合法 JSON，已保留原文不变；YAML 可直接保存或导入。' }
+  }
+}
+
+function formatRawContent(value: any) {
+  if (value === undefined || value === null) return ''
+  if (typeof value !== 'string') return prettyJson(value)
+  const result = formatJsonText(value)
+  return result.ok ? result.value : value
+}
+
+function formatImportRawJson() {
+  const result = formatJsonText(form.raw_content)
+  if (!result.ok) {
+    toast.warning(result.message)
+    return
+  }
+  form.raw_content = result.value
+  toast.success('JSON 已格式化')
+}
+
+function formatEditRawJson() {
+  const result = formatJsonText(editForm.raw_content)
+  if (!result.ok) {
+    toast.warning(result.message)
+    return
+  }
+  editForm.raw_content = result.value
+  toast.success('JSON 已格式化')
 }
 
 function inferBaseUrl(item: any) {
@@ -252,7 +295,7 @@ function startEdit(item: any) {
   editForm.id = item.id
   editForm.name = item.name || ''
   editForm.source_url = item.source_url || ''
-  editForm.raw_content = item.raw_content || ''
+  editForm.raw_content = formatRawContent(item.raw_content)
   editForm.format = item.format || 'openapi'
   editing.value = true
 }
@@ -415,11 +458,20 @@ onMounted(fetchItems)
               />
             </div>
             <div v-else>
-              <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">原始内容</label>
+              <div class="mb-1.5 flex items-center justify-between gap-2">
+                <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-400">原始内容</label>
+                <button
+                  type="button"
+                  @click="formatImportRawJson"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2 py-1 text-[10px] font-bold text-gray-500 transition-all hover:border-blue-200 hover:text-blue-700"
+                >
+                  <FileCode :size="12" /> 格式化 JSON
+                </button>
+              </div>
               <textarea
                 v-model="form.raw_content"
                 rows="10"
-                class="w-full resize-none rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 font-mono text-xs outline-none transition-all focus:border-blue-500 focus:bg-white"
+                class="max-h-[420px] min-h-48 w-full resize-y overflow-auto rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 font-mono text-xs leading-5 outline-none transition-all focus:border-blue-500 focus:bg-white"
                 placeholder="粘贴 OpenAPI / Postman JSON 或 YAML"
               />
             </div>
@@ -598,7 +650,7 @@ onMounted(fetchItems)
           </div>
 
           <div v-if="viewMode === 'raw'" class="min-h-0 p-5 lg:flex-1">
-            <pre class="max-h-[640px] overflow-auto rounded-lg border border-gray-200 bg-gray-950 p-4 text-xs leading-5 text-gray-100">{{ selectedDoc.raw_content }}</pre>
+            <pre class="max-h-[640px] min-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-gray-200 bg-gray-950 p-4 font-mono text-xs leading-5 text-gray-100">{{ selectedRawContent }}</pre>
           </div>
 
           <div v-else class="grid min-h-[520px] gap-0 lg:min-h-0 lg:flex-1 xl:grid-cols-[minmax(0,1fr)_340px]">
@@ -762,11 +814,20 @@ onMounted(fetchItems)
             />
           </div>
           <div class="mt-4">
-            <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">原始内容</label>
+            <div class="mb-1.5 flex items-center justify-between gap-2">
+              <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-400">原始内容</label>
+              <button
+                type="button"
+                @click="formatEditRawJson"
+                class="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2 py-1 text-[10px] font-bold text-gray-500 transition-all hover:border-blue-200 hover:text-blue-700"
+              >
+                <FileCode :size="12" /> 格式化 JSON
+              </button>
+            </div>
             <textarea
               v-model="editForm.raw_content"
               rows="22"
-              class="w-full resize-none rounded-lg border border-gray-200 bg-gray-950 px-4 py-3 font-mono text-xs leading-5 text-gray-100 outline-none transition-all focus:border-blue-500"
+              class="max-h-[52vh] min-h-[360px] w-full resize-y overflow-auto rounded-lg border border-gray-200 bg-gray-950 px-4 py-3 font-mono text-xs leading-5 text-gray-100 outline-none transition-all focus:border-blue-500"
             />
           </div>
         </div>
