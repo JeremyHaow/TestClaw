@@ -163,15 +163,6 @@ def _make_skipped_result(req: dict, reason: str) -> dict:
     }
 
 
-def _make_budget_skipped_result(req: dict, max_requests: int) -> dict:
-    result = _make_skipped_result(
-        req,
-        f"已达到本次 API 执行预算上限 {max_requests} 个真实 HTTP 请求，剩余请求未继续发送",
-    )
-    result["skip_type"] = "execution_budget_exhausted"
-    return result
-
-
 def _make_environment_skipped_result(
     req: dict,
     reason: str,
@@ -407,6 +398,64 @@ def _payload_status_code(payload) -> int | None:
 def _is_auth_failure(resp_status: int, payload) -> bool:
     payload_status = _payload_status_code(payload)
     return resp_status in {401, 403} or payload_status in {401, 403}
+
+
+def _business_error_message(payload) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("msg", "message", "error", "error_description", "detail", "reason"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    errors = payload.get("errors")
+    if isinstance(errors, list) and errors:
+        return str(errors[0]).strip()
+    if isinstance(errors, dict) and errors:
+        first_value = next(iter(errors.values()))
+        return str(first_value).strip()
+    return ""
+
+
+def _payload_success_false(payload) -> bool:
+    if not isinstance(payload, dict) or "success" not in payload:
+        return False
+    value = payload.get("success")
+    if isinstance(value, bool):
+        return value is False
+    if isinstance(value, str):
+        return value.strip().lower() in {"false", "0", "no", "failed", "fail"}
+    if isinstance(value, (int, float)):
+        return value == 0
+    return False
+
+
+def _param_validation_business_rejection(req: dict, resp_status: int, payload) -> str | None:
+    if str(req.get("category") or "").upper() != "PARAM_VALIDATION":
+        return None
+    if not (200 <= resp_status < 300):
+        return None
+    if _is_auth_failure(resp_status, payload):
+        return None
+    message = _business_error_message(payload)
+    if not message:
+        return None
+    payload_status = _payload_status_code(payload)
+    has_error_status = payload_status is not None and payload_status >= 400
+    if not (has_error_status or _payload_success_false(payload)):
+        return None
+    if payload_status is not None and payload_status >= 500:
+        return "无效参数已通过业务错误信封拒绝；业务 code/status 为 5xx，建议后端评估是否改为明确的 4xx 校验错误。"
+    return "无效参数已通过业务错误信封拒绝，按负向参数校验通过处理。"
+
+
+def _mark_business_rejection_assertions(assertion_results: list[dict], warning: str) -> None:
+    for assertion_result in assertion_results:
+        if assertion_result.get("type") != "status_code":
+            continue
+        if assertion_result.get("passed") is False:
+            assertion_result["passed"] = True
+            assertion_result["accepted_error_envelope"] = True
+            assertion_result["warning"] = warning
 
 
 def _status_matches(expected_status, http_status: int, payload) -> bool:
@@ -791,6 +840,141 @@ async def _refresh_auth_for_request(
     return resolution.headers
 
 
+def _build_case_test_requests(
+    api_cases: list[dict],
+    base_url: str,
+    target_url: str,
+    auth_headers: dict | None,
+    *,
+    write_allowed: bool,
+) -> list[dict]:
+    requests = []
+    default_headers = auth_headers or {}
+    for case in api_cases:
+        if not isinstance(case, dict):
+            continue
+        tmpl = _request_template_from_case(case)
+        if not tmpl:
+            continue
+        method = str(tmpl.get("method", "GET")).upper()
+        url = tmpl.get("url") or tmpl.get("path") or tmpl.get("endpoint") or ""
+        url = _build_request_url(base_url, url)
+        url = _resolve_path_params(url, {"path_params": tmpl.get("path_params", [])})
+        if not url:
+            continue
+        if method in WRITE_API_METHODS and not write_allowed:
+            requests.append({
+                "label": case.get("title", f"SKIPPED_WRITE {method} {url}"),
+                "method": method,
+                "url": url,
+                "headers": {},
+                "body": None,
+                "expected_status": None,
+                "category": "SKIPPED",
+                "skip_reason": "当前策略为安全只读，未执行会创建、修改或删除数据的请求",
+            })
+            continue
+        content_type = (
+            tmpl.get("content_type")
+            or tmpl.get("request_body_content_type")
+            or case.get("request_body_content_type")
+            or "application/json"
+        )
+        body = tmpl.get("body", tmpl.get("json"))
+        body_generation = None
+        request_body_schema = tmpl.get("request_body_schema") or case.get("request_body_schema")
+        if body is None and isinstance(request_body_schema, dict) and _is_json_content_type(content_type):
+            body = generate_mock_json_body(
+                request_body_schema,
+                required_fields=case.get("required_fields") or [],
+                field_context=f"{method} {tmpl.get('path') or tmpl.get('url') or ''}",
+            )
+            if body is not None:
+                body_generation = {
+                    "source": "faker_json_schema",
+                    "method": method,
+                    "path": tmpl.get("path") or tmpl.get("url") or "",
+                    "content_type": content_type,
+                    "required_fields": case.get("required_fields") or [],
+                    "summary": summarize_mock_body(body),
+                }
+        request_headers = {**default_headers, **(tmpl.get("headers") or {})}
+        if body is not None:
+            request_headers.setdefault("Content-Type", content_type)
+        request = {
+            "label": case.get("title", f"{method} {url}"),
+            "method": method,
+            "url": url or target_url,
+            "headers": request_headers,
+            "body": body,
+            "query_params": tmpl.get("query_params") or tmpl.get("params") or {},
+            "expected_status": tmpl.get("expected_status", case.get("expected_status", 200)),
+            "response_schema": tmpl.get("response_schema") or case.get("response_schema"),
+            "auto_schema_assertion": bool(tmpl.get("response_schema") or case.get("response_schema")),
+            "schema_assertion_mode": tmpl.get(
+                "schema_assertion_mode",
+                case.get("schema_assertion_mode", "blocking"),
+            ),
+            "depends_on": tmpl.get("depends_on") or case.get("depends_on"),
+            "extract": tmpl.get("extract") or case.get("extract"),
+            "category": case.get("category", "SMOKE"),
+            "assertions": case.get("assertions") or tmpl.get("assertions") or [],
+            "request_body_source": "faker_json_schema" if body_generation else "case_template",
+        }
+        if body_generation:
+            request["mock_body_generation"] = body_generation
+        requests.append(request)
+    return requests
+
+
+def _has_executable_request(requests: list[dict]) -> bool:
+    return any(not request.get("skip_reason") for request in requests)
+
+
+def _safe_schema_subset(api_schema: list[dict], limit: int | None) -> list[dict]:
+    subset = []
+    for endpoint in api_schema:
+        if str(endpoint.get("method") or "GET").upper() not in SAFE_API_METHODS:
+            continue
+        subset.append(endpoint)
+        if limit is not None and len(subset) >= limit:
+            break
+    return subset
+
+
+def _select_requests_for_execution(
+    requests: list[dict],
+    execution_budget: int | None,
+    *,
+    source: str,
+    fallback_reason: str | None = None,
+) -> tuple[list[dict], dict]:
+    candidate_total = len(requests)
+    if execution_budget is None or candidate_total <= execution_budget:
+        selected = list(requests)
+    else:
+        executable = [request for request in requests if not request.get("skip_reason")]
+        skipped = [request for request in requests if request.get("skip_reason")]
+        selected = executable[:execution_budget]
+        if len(selected) < execution_budget:
+            selected.extend(skipped[: execution_budget - len(selected)])
+
+    budget_omitted = max(candidate_total - len(selected), 0)
+    metadata = {
+        "source": source,
+        "candidate_total": candidate_total,
+        "selected_total": len(selected),
+        "budget_limit": execution_budget,
+        "budget_omitted": budget_omitted,
+        "runtime_budget_omitted": 0,
+        "omitted": budget_omitted,
+        "bounded": budget_omitted > 0,
+    }
+    if fallback_reason:
+        metadata["fallback_reason"] = fallback_reason
+    return selected, metadata
+
+
 def _build_test_requests(
     api_schema: list[dict],
     base_url: str,
@@ -987,16 +1171,22 @@ def _update_api_execution_state(
     execution_budget: int | None = None,
 ) -> None:
     safe_results = redact_sensitive_data(results)
+    request_selection = state.get("api_request_selection") or {}
+    budget_omitted_count = int(request_selection.get("omitted") or 0)
+    candidate_total = int(request_selection.get("candidate_total") or total_requests)
     skipped_count = sum(1 for r in results if r.get("skipped"))
     advisory_count = sum(1 for r in results if r.get("advisory"))
     environment_skipped_count = sum(1 for r in results if r.get("skip_type") == "environment_not_executable")
-    budget_skipped_count = sum(1 for r in results if r.get("skip_type") == "execution_budget_exhausted")
+    budget_skipped_count = (
+        sum(1 for r in results if r.get("skip_type") == "execution_budget_exhausted")
+        + budget_omitted_count
+    )
     executed_count = len(results) - skipped_count
     passed_count = sum(1 for r in results if r.get("passed") is True)
     completed = len(results)
     failed_count = max(executed_count - passed_count, 0)
-    pending_count = max(total_requests - completed, 0)
-    all_passed = complete and total_requests > 0 and completed == total_requests and failed_count == 0
+    pending_count = 0 if complete else max(total_requests - completed, 0)
+    all_passed = complete and total_requests > 0 and failed_count == 0
     stderr = ""
     if complete and total_requests == 0:
         stderr = "No executable API requests were built"
@@ -1005,6 +1195,9 @@ def _update_api_execution_state(
 
     state["api_execution_result"] = {
         "total": total_requests,
+        "candidate_total": candidate_total,
+        "selected_total": total_requests,
+        "omitted": budget_omitted_count,
         "completed": completed,
         "executed": executed_count,
         "passed": passed_count,
@@ -1017,6 +1210,7 @@ def _update_api_execution_state(
         "http_executed": http_executed_count if http_executed_count is not None else sum(1 for r in results if r.get("http_executed")),
         "execution_budget": execution_budget,
         "budget_exhausted": budget_skipped_count > 0,
+        "request_selection": request_selection,
         "pass_rate": f"{round(passed_count / executed_count * 100, 1)}%" if executed_count else "0%",
         "results": safe_results,
         "all_passed": all_passed,
@@ -1052,89 +1246,55 @@ async def run(state: AgentState) -> AgentState:
 
     results = []
 
-    # If we have API schema, generate requests from it
-    if api_schema:
-        test_requests = _build_test_requests(api_schema, base_url, auth_headers, execution_policy)
-    elif api_cases:
-        # Generate from api_cases (from case_generator)
-        test_requests = []
-        for case in api_cases:
-            tmpl = _request_template_from_case(case)
-            if tmpl:
-                method = tmpl.get("method", "GET").upper()
-                url = tmpl.get("url") or tmpl.get("path") or tmpl.get("endpoint") or ""
-                url = _build_request_url(base_url, url)
-                url = _resolve_path_params(url, {"path_params": tmpl.get("path_params", [])})
-                if not url:
-                    continue
-                if method in WRITE_API_METHODS and not write_allowed:
-                    test_requests.append({
-                        "label": case.get("title", f"SKIPPED_WRITE {method} {url}"),
-                        "method": method,
-                        "url": url,
-                        "headers": {},
-                        "body": None,
-                        "expected_status": None,
-                        "category": "SKIPPED",
-                        "skip_reason": "当前策略为安全只读，未执行会创建、修改或删除数据的请求",
-                    })
-                    continue
-                content_type = (
-                    tmpl.get("content_type")
-                    or tmpl.get("request_body_content_type")
-                    or case.get("request_body_content_type")
-                    or "application/json"
+    request_candidates = []
+    selection_source = "fallback_url"
+    fallback_reason = None
+    if api_cases:
+        case_requests = _build_case_test_requests(
+            api_cases,
+            base_url,
+            target_url,
+            auth_headers,
+            write_allowed=write_allowed,
+        )
+        if case_requests and (write_allowed or _has_executable_request(case_requests)):
+            request_candidates = case_requests
+            selection_source = "api_cases"
+        else:
+            fallback_reason = "curated_api_cases_not_executable_under_policy"
+            if api_schema and not write_allowed:
+                safe_schema = _safe_schema_subset(api_schema, execution_budget)
+                fallback_requests = _build_test_requests(
+                    safe_schema,
+                    base_url,
+                    auth_headers,
+                    execution_policy,
                 )
-                body = tmpl.get("body", tmpl.get("json"))
-                body_generation = None
-                request_body_schema = tmpl.get("request_body_schema") or case.get("request_body_schema")
-                if body is None and isinstance(request_body_schema, dict) and _is_json_content_type(content_type):
-                    body = generate_mock_json_body(
-                        request_body_schema,
-                        required_fields=case.get("required_fields") or [],
-                        field_context=f"{method} {tmpl.get('path') or tmpl.get('url') or ''}",
-                    )
-                    if body is not None:
-                        body_generation = {
-                            "source": "faker_json_schema",
-                            "method": method,
-                            "path": tmpl.get("path") or tmpl.get("url") or "",
-                            "content_type": content_type,
-                            "required_fields": case.get("required_fields") or [],
-                            "summary": summarize_mock_body(body),
-                        }
-                request_headers = {**auth_headers, **(tmpl.get("headers") or {})}
-                if body is not None:
-                    request_headers.setdefault("Content-Type", content_type)
-                request = {
-                    "label": case.get("title", f"{method} {url}"),
-                    "method": method,
-                    "url": url or target_url,
-                    "headers": request_headers,
-                    "body": body,
-                    "query_params": tmpl.get("query_params") or tmpl.get("params") or {},
-                    "expected_status": tmpl.get("expected_status", case.get("expected_status", 200)),
-                    "response_schema": tmpl.get("response_schema") or case.get("response_schema"),
-                    "auto_schema_assertion": bool(tmpl.get("response_schema") or case.get("response_schema")),
-                    "schema_assertion_mode": tmpl.get(
-                        "schema_assertion_mode",
-                        case.get("schema_assertion_mode", "blocking"),
-                    ),
-                    "depends_on": tmpl.get("depends_on") or case.get("depends_on"),
-                    "extract": tmpl.get("extract") or case.get("extract"),
-                    "category": case.get("category", "SMOKE"),
-                    "assertions": case.get("assertions") or tmpl.get("assertions") or [],
-                    "request_body_source": "faker_json_schema" if body_generation else "case_template",
-                }
-                if body_generation:
-                    request["mock_body_generation"] = body_generation
-                test_requests.append(request)
+                if _has_executable_request(fallback_requests):
+                    request_candidates = fallback_requests
+                    selection_source = "safe_schema_fallback"
+                else:
+                    request_candidates = case_requests
+                    selection_source = "api_cases"
+            elif api_schema:
+                request_candidates = _build_test_requests(
+                    api_schema,
+                    base_url,
+                    auth_headers,
+                    execution_policy,
+                )
+                selection_source = "schema_fallback"
+            else:
+                request_candidates = case_requests
+                selection_source = "api_cases"
+    elif api_schema:
+        request_candidates = _build_test_requests(api_schema, base_url, auth_headers, execution_policy)
+        selection_source = "parsed_api_schema"
     else:
         # Fallback: just hit the target URL
         fallback_url = _build_request_url("", base_url or target_url)
-        test_requests = []
         if fallback_url:
-            test_requests.append({
+            request_candidates.append({
                 "label": f"GET {fallback_url}",
                 "method": "GET",
                 "url": fallback_url,
@@ -1144,6 +1304,13 @@ async def run(state: AgentState) -> AgentState:
                 "category": "SMOKE",
             })
 
+    test_requests, request_selection = _select_requests_for_execution(
+        request_candidates,
+        execution_budget,
+        source=selection_source,
+        fallback_reason=fallback_reason,
+    )
+    state["api_request_selection"] = request_selection
     total_requests = len(test_requests)
     state["tool_summary"] = None
     artifacts = state.get("artifacts") or {}
@@ -1152,6 +1319,7 @@ async def run(state: AgentState) -> AgentState:
         "api_retry_count": retry_count,
         "api_execution_policy": execution_policy,
         "api_max_executed_requests": execution_budget,
+        "api_request_selection": request_selection,
     }
     state["artifacts"] = artifacts
     _update_api_execution_state(
@@ -1166,7 +1334,14 @@ async def run(state: AgentState) -> AgentState:
         state,
         "api_runner",
         "running",
-        f"Executing {total_requests} API request(s)",
+        (
+            f"Executing {total_requests} API request(s)"
+            if not request_selection.get("omitted")
+            else (
+                f"Executing {total_requests} selected API request(s); "
+                f"{request_selection.get('omitted')} omitted by execution budget"
+            )
+        ),
     )
 
     # Execute all test requests
@@ -1294,8 +1469,16 @@ async def run(state: AgentState) -> AgentState:
                 continue
             if execution_budget is not None and http_executed_count >= execution_budget:
                 remaining = test_requests[index:]
-                for pending_req in remaining:
-                    results.append(_make_budget_skipped_result(pending_req, execution_budget))
+                request_selection = dict(state.get("api_request_selection") or {})
+                request_selection["runtime_budget_omitted"] = (
+                    int(request_selection.get("runtime_budget_omitted") or 0) + len(remaining)
+                )
+                request_selection["omitted"] = (
+                    int(request_selection.get("budget_omitted") or 0)
+                    + int(request_selection.get("runtime_budget_omitted") or 0)
+                )
+                request_selection["bounded"] = request_selection["omitted"] > 0
+                state["api_request_selection"] = request_selection
                 record_tool_call(
                     state,
                     tool_name="api.execution_budget",
@@ -1305,7 +1488,7 @@ async def run(state: AgentState) -> AgentState:
                         "max_executed_requests": execution_budget,
                         "http_executed": http_executed_count,
                     },
-                    output_summary={"skipped_remaining": len(remaining)},
+                    output_summary={"omitted_remaining": len(remaining)},
                 )
                 _update_api_execution_state(
                     state,
@@ -1319,7 +1502,7 @@ async def run(state: AgentState) -> AgentState:
                     state,
                     "api_runner",
                     "running",
-                    f"Skipped remaining {len(remaining)} API request(s) after execution budget was reached",
+                    f"Omitted remaining {len(remaining)} API request(s) after execution budget was reached",
                 )
                 break
             _record_mock_body_generation(state, req)
@@ -1426,6 +1609,9 @@ async def run(state: AgentState) -> AgentState:
 
                 assertion_results = _evaluate_assertions(req, resp.status_code, payload)
                 auth_advisory_reason = _auth_negative_success_advisory(req, resp.status_code, payload)
+                business_rejection_warning = _param_validation_business_rejection(req, resp.status_code, payload)
+                if business_rejection_warning:
+                    _mark_business_rejection_assertions(assertion_results, business_rejection_warning)
                 if auth_advisory_reason:
                     _mark_assertions_advisory(assertion_results, auth_advisory_reason)
                 for assertion_result in assertion_results:
@@ -1457,6 +1643,9 @@ async def run(state: AgentState) -> AgentState:
 
                 if auth_advisory_reason:
                     passed = None
+                    failure_classification = None
+                elif business_rejection_warning:
+                    passed = True
                     failure_classification = None
                 else:
                     passed = _assertions_pass(assertion_results, passed)
@@ -1515,6 +1704,14 @@ async def run(state: AgentState) -> AgentState:
                             "advisory": True,
                             "advisory_type": "auth_negative_unexpected_success",
                             "warning": auth_advisory_reason,
+                        }
+                    )
+                elif business_rejection_warning:
+                    result_entry.update(
+                        {
+                            "accepted_error_envelope": True,
+                            "warning": business_rejection_warning,
+                            "warning_type": "validation_business_error_envelope",
                         }
                     )
                 if failure_classification:
@@ -1579,6 +1776,9 @@ async def run(state: AgentState) -> AgentState:
     )
     state["tool_summary"] = summarize_tool_calls(state.get("tool_calls"))
     artifacts = state.get("artifacts") or {}
+    execution_config = artifacts.get("execution_config")
+    if isinstance(execution_config, dict):
+        execution_config["api_request_selection"] = state.get("api_request_selection") or {}
     artifacts["tool_calls"] = state.get("tool_calls", [])
     artifacts["tool_summary"] = state["tool_summary"]
     state["artifacts"] = artifacts

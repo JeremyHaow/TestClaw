@@ -88,4 +88,5 @@ class AgentState(TypedDict, total=False):
     custom_headers: dict[str, str] | None
     base_url_override: str | None
     api_execution_policy: Literal["safe_read_only", "safe_with_auth", "write_allowed"] | None
+    api_request_selection: dict[str, Any] | None
     api_path_prefix_rewrite: dict[str, str] | None

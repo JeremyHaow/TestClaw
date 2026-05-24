@@ -691,7 +691,7 @@ async def test_api_runner_refreshes_expired_auth_and_retries_once(monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_api_runner_classifies_validation_envelope_500_as_backend_contract(monkeypatch) -> None:
+async def test_api_runner_accepts_validation_business_error_envelope_500(monkeypatch) -> None:
     calls = []
 
     class FakeResponse:
@@ -745,15 +745,127 @@ async def test_api_runner_classifies_validation_envelope_500_as_backend_contract
         }
     )
 
-    failed_validation = [
+    validation_results = [
         item for item in result["api_execution_result"]["results"]
-        if item.get("category") == "PARAM_VALIDATION" and not item.get("passed")
+        if item.get("category") == "PARAM_VALIDATION"
     ]
 
     assert calls
-    assert failed_validation
-    assert {item.get("failure_type") for item in failed_validation} == {"backend_validation_contract"}
-    assert all(item.get("envelope_status_code") == 500 for item in failed_validation)
+    assert validation_results
+    assert all(item.get("passed") is True for item in validation_results)
+    assert all(item.get("accepted_error_envelope") is True for item in validation_results)
+    assert all(item.get("envelope_status_code") == 500 for item in validation_results)
+    assert all(item.get("warning_type") == "validation_business_error_envelope" for item in validation_results)
+
+
+@pytest.mark.asyncio
+async def test_api_runner_prefers_curated_api_cases_over_schema(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"ok": true}'
+        headers = {"content-type": "application/json"}
+        content = text.encode()
+
+        def json(self) -> dict:
+            return {"ok": True}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "api_cases": [
+                {"title": "curated health", "request_template": {"method": "GET", "path": "/health"}}
+            ],
+            "parsed_api_schema": [
+                {"method": "GET", "path": f"/schema/{index}", "response_status": "200"}
+                for index in range(5)
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+
+    assert [call["url"] for call in calls] == ["https://api.example.test/health"]
+    assert api_result["total"] == 1
+    assert api_result["candidate_total"] == 1
+    assert api_result["request_selection"]["source"] == "api_cases"
+    assert api_result["results"][0]["label"] == "curated health"
+
+
+@pytest.mark.asyncio
+async def test_api_runner_falls_back_to_safe_schema_when_cases_are_not_safe_executable(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"ok": true}'
+        headers = {"content-type": "application/json"}
+        content = text.encode()
+
+        def json(self) -> dict:
+            return {"ok": True}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "api_execution_policy": "safe_read_only",
+            "api_cases": [
+                {"title": "curated create", "request_template": {"method": "POST", "path": "/items"}}
+            ],
+            "parsed_api_schema": [
+                {"method": "GET", "path": "/health", "response_status": "200"},
+                {"method": "POST", "path": "/items", "response_status": "200"},
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+
+    assert [call["url"] for call in calls] == ["https://api.example.test/health"]
+    assert api_result["total"] == 1
+    assert api_result["executed"] == 1
+    assert api_result["skipped"] == 0
+    assert api_result["request_selection"]["source"] == "safe_schema_fallback"
+    assert api_result["request_selection"]["fallback_reason"] == "curated_api_cases_not_executable_under_policy"
 
 
 @pytest.mark.asyncio
@@ -836,7 +948,7 @@ async def test_api_runner_skips_same_method_writes_after_environment_405(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_api_runner_respects_http_execution_budget_and_skips_remainder(monkeypatch) -> None:
+async def test_api_runner_respects_http_execution_budget_and_omits_remainder(monkeypatch) -> None:
     calls = []
 
     class FakeResponse:
@@ -880,16 +992,23 @@ async def test_api_runner_respects_http_execution_budget_and_skips_remainder(mon
     api_result = result["api_execution_result"]
 
     assert len(calls) == 2
-    assert api_result["total"] == 5
+    assert api_result["total"] == 2
+    assert api_result["candidate_total"] == 5
+    assert len(api_result["results"]) == 2
     assert api_result["http_executed"] == 2
     assert api_result["executed"] == 2
     assert api_result["passed"] == 2
     assert api_result["failed"] == 0
-    assert api_result["skipped"] == 3
+    assert api_result["skipped"] == 0
     assert api_result["budget_skipped"] == 3
+    assert api_result["omitted"] == 3
     assert api_result["budget_exhausted"] is True
     assert api_result["complete"] is True
-    assert all(item.get("skip_type") == "execution_budget_exhausted" for item in api_result["results"][2:])
+    assert api_result["request_selection"]["budget_omitted"] == 3
+    assert not any(
+        item.get("skip_type") == "execution_budget_exhausted"
+        for item in api_result["results"]
+    )
 
 
 @pytest.mark.asyncio
@@ -942,9 +1061,16 @@ async def test_api_runner_execution_budget_caps_retries(monkeypatch) -> None:
     assert api_result["http_executed"] == 2
     assert api_result["executed"] == 1
     assert api_result["failed"] == 1
+    assert len(api_result["results"]) == 1
     assert api_result["budget_skipped"] == 2
+    assert api_result["omitted"] == 2
     assert api_result["budget_exhausted"] is True
-    assert all(item.get("skip_type") == "execution_budget_exhausted" for item in api_result["results"][1:])
+    assert api_result["request_selection"]["budget_omitted"] == 1
+    assert api_result["request_selection"]["runtime_budget_omitted"] == 1
+    assert not any(
+        item.get("skip_type") == "execution_budget_exhausted"
+        for item in api_result["results"]
+    )
 
 
 @pytest.mark.asyncio

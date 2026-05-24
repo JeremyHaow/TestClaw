@@ -133,12 +133,16 @@ def _collect_api_advisories(state: AgentState) -> list[dict]:
 def _api_skip_note_counts(state: AgentState) -> dict[str, int]:
     api_result = state.get("api_execution_result") or {}
     results = api_result.get("results") or []
+    budget_summary_count = int(api_result.get("budget_skipped") or 0)
     return {
         "environment_not_executable": sum(
             1 for result in results if result.get("skip_type") == "environment_not_executable"
         ),
-        "execution_budget_exhausted": sum(
-            1 for result in results if result.get("skip_type") == "execution_budget_exhausted"
+        "execution_budget_exhausted": max(
+            budget_summary_count,
+            sum(
+                1 for result in results if result.get("skip_type") == "execution_budget_exhausted"
+            ),
         ),
     }
 
