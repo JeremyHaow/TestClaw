@@ -331,7 +331,7 @@ function startApiRun(item: any) {
   router.push({
     path: '/run',
     query: {
-      source,
+      document_id: item.id,
       test_type: 'api',
       objective: `基于接口文档「${item.name || 'OpenAPI 文档'}」执行 API 契约、鉴权、参数边界和错误分支检查。`,
       api_execution_policy: 'safe_read_only',
@@ -356,7 +356,7 @@ onMounted(fetchItems)
       <div>
         <h2 class="text-xl font-semibold tracking-tight text-gray-950">接口文档</h2>
         <p class="mt-1 max-w-3xl text-sm leading-6 text-gray-500">
-          导入 OpenAPI / Postman 文档后，可以在线修订原文、按端点检索浏览，并把真实文档 source 带入 Testing Agent 运行页。
+          导入 OpenAPI / Postman 文档后，可以在线修订原文、按端点检索浏览，并把已保存文档交给 Testing Agent 运行。
         </p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
@@ -544,7 +544,7 @@ onMounted(fetchItems)
                   {{ selectedDoc.source_url || 'manual content' }}
                 </div>
                 <div class="mt-2 text-xs text-gray-500">
-                  {{ selectedEndpoints.length }} 个端点，运行时 source 将使用 {{ selectedDoc.source_url ? '文档 URL' : '当前原始内容' }}。
+                  {{ selectedEndpoints.length }} 个端点，运行页会直接选中此文档。
                 </div>
               </div>
               <div class="flex shrink-0 flex-wrap items-center gap-2">
@@ -752,7 +752,7 @@ onMounted(fetchItems)
         <div class="flex items-center justify-between border-b border-gray-100 px-5 py-4">
           <div>
             <h3 class="text-sm font-bold text-gray-900">在线编辑接口文档</h3>
-            <p class="mt-1 text-xs text-gray-500">保存后后端会重新解析端点；运行交接会使用 source URL 或当前原文。</p>
+            <p class="mt-1 text-xs text-gray-500">保存后后端会重新解析端点；运行页会直接选择这个已保存文档。</p>
           </div>
           <button @click="editing = false" class="rounded-lg p-2 text-gray-400 transition-all hover:bg-gray-100 hover:text-gray-700">
             <X :size="18" />
@@ -784,7 +784,7 @@ onMounted(fetchItems)
             <input
               v-model="editForm.source_url"
               class="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 font-mono text-xs outline-none transition-all focus:border-blue-500 focus:bg-white"
-              placeholder="可选；保留 URL 后运行页会优先使用 URL source"
+              placeholder="可选；执行时优先使用此 URL 拉取文档"
             />
           </div>
           <div class="mt-4">

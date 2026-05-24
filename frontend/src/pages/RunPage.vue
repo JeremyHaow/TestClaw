@@ -189,8 +189,9 @@ const showAuthChoices = ref(false)
 const preflight = ref<PreflightResponse | null>(null)
 const documents = ref<ApiDocument[]>([])
 const documentsLoading = ref(false)
-const selectedDocumentId = ref('manual')
+const selectedDocumentId = ref('')
 const routeSourceForDocumentMatch = ref('')
+const routeDocumentIdForSelection = ref('')
 const credentialFieldsEdited = ref(false)
 
 const form = reactive({
@@ -265,9 +266,17 @@ const authInputLabels: Record<string, string> = {
 
 const defaultFlow = ['识别目标', '制定测试计划', '生成用例', '执行并采集证据', '输出报告']
 
-const localInputType = computed(() => detectInputType(form.source))
 const flow = computed(() => preflight.value?.expected_flow?.length ? preflight.value.expected_flow : defaultFlow)
 const isApiMode = computed(() => form.test_type !== 'ui')
+const selectedDocument = computed(() => documents.value.find((doc) => doc.id === selectedDocumentId.value) || null)
+const localInputType = computed(() => {
+  if (isApiMode.value) return selectedDocument.value ? '已保存 API 文档' : '等待选择文档'
+  return detectInputType(form.source)
+})
+const sourceReady = computed(() => {
+  if (isApiMode.value) return Boolean(selectedDocument.value && form.source.trim())
+  return Boolean(form.source.trim())
+})
 const manualAuthSupplied = computed(() => Boolean(form.token.trim() || form.custom_headers.trim()))
 const isAutoAuthMode = computed(() => form.auth_mode === 'auto')
 const isManualAuthMode = computed(() => form.auth_mode === 'manual')
@@ -302,18 +311,25 @@ const showLoginRequestSettings = computed(() => ['login_url', 'method', 'content
 const showTokenSettings = computed(() => ['token_path', 'header_name', 'token_prefix'].some((key) => shouldShowAdvancedField(key)))
 const showLoginPayloadSettings = computed(() => ['login_body', 'login_headers'].some((key) => shouldShowAdvancedField(key)))
 const showAuthPrompt = computed(() => Boolean(preflight.value?.auth_error) && authMissingInputs.value.length > 0)
-const readiness = computed(() => preflight.value?.readiness || (form.source.trim() ? 'needs_review' : 'blocked'))
+const readiness = computed(() => preflight.value?.readiness || (sourceReady.value ? 'needs_review' : 'blocked'))
 const readinessLabel = computed(() => {
   if (readiness.value === 'ready') return 'Ready'
   if (readiness.value === 'blocked') return 'Blocked'
   return 'Needs review'
 })
+const sourceMissingMessage = computed(() => (isApiMode.value ? '请选择已保存接口文档' : '请输入目标页面 URL'))
 const hasBlockingPreflight = computed(() => preflight.value?.readiness === 'blocked')
-const canRun = computed(() => Boolean(form.source.trim()) && !submitting.value && !hasBlockingPreflight.value)
-const selectedDocument = computed(() => documents.value.find((doc) => doc.id === selectedDocumentId.value) || null)
+const canRun = computed(() => sourceReady.value && !submitting.value && !hasBlockingPreflight.value)
 const baseUrlRootWarning = computed(() => shouldOmitRootBaseUrlOverride(form.source, form.base_url))
 const baseUrlForPayload = computed(() => normalizedBaseUrlOverrideForPayload(form.source, form.base_url))
-const inferredTarget = computed(() => preflight.value?.target_url || baseUrlForPayload.value || form.source.trim() || '等待输入目标')
+const inferredTarget = computed(() => {
+  if (preflight.value?.target_url) return preflight.value.target_url
+  if (baseUrlForPayload.value) return baseUrlForPayload.value
+  if (isApiMode.value) {
+    return selectedDocument.value ? `${documentDisplayName(selectedDocument.value)}（已保存接口文档）` : '请选择接口文档'
+  }
+  return form.source.trim() || '等待输入目标'
+})
 const endpointCountLabel = computed(() => {
   const count = preflight.value?.endpoint_count
   if (count === null || count === undefined) return '运行时解析'
@@ -395,26 +411,35 @@ function queryString(value: unknown) {
 
 function applyRoutePrefill() {
   const source = queryString(route.query.source)
+  const documentId = queryString(route.query.document_id)
   const objective = queryString(route.query.objective)
   const testType = queryString(route.query.test_type)
   const baseUrl = queryString(route.query.base_url)
   const setupInstructions = queryString(route.query.setup_instructions)
   const apiPolicy = queryString(route.query.api_execution_policy)
 
+  if (['api', 'ui'].includes(testType)) form.test_type = testType
   if (source) {
-    form.source = source
-    selectedDocumentId.value = 'manual'
-    routeSourceForDocumentMatch.value = source
+    if (form.test_type === 'ui') {
+      form.source = source
+    } else {
+      form.source = ''
+      selectedDocumentId.value = ''
+      routeSourceForDocumentMatch.value = source
+    }
+  }
+  if (documentId && form.test_type !== 'ui') {
+    selectedDocumentId.value = documentId
+    routeDocumentIdForSelection.value = documentId
   }
   if (objective) form.objective = objective
-  if (['api', 'ui'].includes(testType)) form.test_type = testType
   if (baseUrl) {
     form.base_url = baseUrl
     showTargetSettings.value = true
   }
   if (setupInstructions) form.setup_instructions = setupInstructions
   if (apiPolicies.some((policy) => policy.value === apiPolicy)) form.api_execution_policy = apiPolicy
-  if (source || objective || testType || baseUrl || setupInstructions || apiPolicy) resetPreflight()
+  if (source || documentId || objective || testType || baseUrl || setupInstructions || apiPolicy) resetPreflight()
 }
 
 function resetPreflight() {
@@ -433,12 +458,6 @@ function documentDisplayName(doc: ApiDocument) {
   return doc.name || `Document-${doc.format || 'openapi'}`
 }
 
-function documentSourceLabel(doc: ApiDocument) {
-  if (doc.source_url?.trim()) return doc.source_url.trim()
-  if (doc.raw_content?.trim()) return 'manual content'
-  return 'source not available'
-}
-
 function normalizeSourceMatch(value: string | null | undefined) {
   return String(value || '').trim()
 }
@@ -455,7 +474,8 @@ function findMatchingDocument(source: string) {
 function applySavedDocument(doc: ApiDocument) {
   const source = documentSource(doc)
   if (!source) {
-    selectedDocumentId.value = 'manual'
+    selectedDocumentId.value = ''
+    form.source = ''
     toast.warning('文档没有可用于运行的 source')
     return
   }
@@ -467,17 +487,23 @@ function applySavedDocument(doc: ApiDocument) {
 
 function handleDocumentSelection() {
   routeSourceForDocumentMatch.value = ''
-  if (selectedDocumentId.value === 'manual') {
+  routeDocumentIdForSelection.value = ''
+  if (!selectedDocumentId.value) {
+    form.source = ''
     resetPreflight()
     return
   }
   const doc = selectedDocument.value
   if (doc) applySavedDocument(doc)
+  else {
+    form.source = ''
+    resetPreflight()
+  }
 }
 
 function handleSourceInput() {
-  selectedDocumentId.value = 'manual'
   routeSourceForDocumentMatch.value = ''
+  routeDocumentIdForSelection.value = ''
   resetPreflight()
 }
 
@@ -486,11 +512,28 @@ async function fetchDocuments() {
   try {
     const { data } = await api.get('/documents')
     documents.value = Array.isArray(data) ? data : []
+    const routeDocumentId = routeDocumentIdForSelection.value
+    if (routeDocumentId && isApiMode.value) {
+      const match = documents.value.find((doc) => doc.id === routeDocumentId)
+      if (match) applySavedDocument(match)
+      else {
+        selectedDocumentId.value = ''
+        form.source = ''
+        toast.warning('未找到已保存接口文档，请先在接口文档页面导入')
+      }
+      routeDocumentIdForSelection.value = ''
+      routeSourceForDocumentMatch.value = ''
+      return
+    }
     const routeSource = routeSourceForDocumentMatch.value
     if (routeSource && isApiMode.value) {
       const match = findMatchingDocument(routeSource)
       if (match) applySavedDocument(match)
-      else selectedDocumentId.value = 'manual'
+      else {
+        selectedDocumentId.value = ''
+        form.source = ''
+        toast.warning('当前目标没有匹配的已保存接口文档，请先在接口文档页面导入')
+      }
       routeSourceForDocumentMatch.value = ''
     }
   } catch {
@@ -501,11 +544,34 @@ async function fetchDocuments() {
 }
 
 function setExample(source: string, objective: string, mode = 'api') {
-  selectedDocumentId.value = 'manual'
   routeSourceForDocumentMatch.value = ''
-  form.source = source
+  routeDocumentIdForSelection.value = ''
+  if (mode === 'api') {
+    selectedDocumentId.value = ''
+    form.source = ''
+  } else {
+    form.source = source
+  }
   form.objective = objective
   form.test_type = mode
+  resetPreflight()
+}
+
+function selectTestType(mode: string) {
+  if (form.test_type === mode) return
+  const previousDocument = selectedDocument.value
+  const previousDocumentSource = previousDocument ? documentSource(previousDocument) : ''
+  const switchingFromApiDocument = isApiMode.value && previousDocumentSource && form.source.trim() === previousDocumentSource
+
+  form.test_type = mode
+  routeSourceForDocumentMatch.value = ''
+  routeDocumentIdForSelection.value = ''
+
+  if (mode === 'api') {
+    form.source = previousDocument ? previousDocumentSource : ''
+  } else if (switchingFromApiDocument) {
+    form.source = ''
+  }
   resetPreflight()
 }
 
@@ -747,8 +813,8 @@ function buildRunPayload() {
 }
 
 async function runPreflight(showToast = true) {
-  if (!form.source.trim()) {
-    if (showToast) toast.warning('请输入目标入口或 Swagger 文档')
+  if (!sourceReady.value) {
+    if (showToast) toast.warning(sourceMissingMessage.value)
     return null
   }
   preflightLoading.value = true
@@ -772,8 +838,8 @@ async function runPreflight(showToast = true) {
 }
 
 async function submit() {
-  if (!form.source.trim()) {
-    toast.warning('请输入目标入口或 Swagger 文档')
+  if (!sourceReady.value) {
+    toast.warning(sourceMissingMessage.value)
     return
   }
 
@@ -868,62 +934,78 @@ onMounted(() => {
             </div>
 
             <div>
-              <div v-if="isApiMode" class="mb-3 rounded-lg border border-blue-100 bg-blue-50/70 p-3">
-                <div class="mb-2 flex items-center justify-between gap-3">
-                  <label class="text-xs font-bold uppercase tracking-widest text-blue-600">API 文档来源</label>
-                  <span v-if="documentsLoading" class="text-[11px] font-bold text-blue-500">加载中...</span>
-                </div>
-                <select
-                  v-model="selectedDocumentId"
-                  class="w-full rounded-lg border border-blue-200 bg-white px-3 py-2.5 text-sm font-bold text-blue-950 outline-none transition-all focus:border-blue-500"
-                  @change="handleDocumentSelection"
-                >
-                  <option value="manual">手动输入 URL / 原文</option>
-                  <option
-                    v-for="doc in documents"
-                    :key="doc.id"
-                    :value="doc.id"
+              <div v-if="isApiMode" class="rounded-lg border border-blue-100 bg-blue-50/70 p-3">
+                <div class="mb-3 flex items-center justify-between gap-3">
+                  <label class="text-xs font-bold uppercase tracking-widest text-blue-600">API 文档</label>
+                  <button
+                    type="button"
+                    @click="router.push('/documents')"
+                    class="shrink-0 rounded-lg border border-blue-200 bg-white px-2.5 py-1.5 text-[11px] font-bold text-blue-800 transition-all hover:border-blue-300"
                   >
-                    {{ documentDisplayName(doc) }} · {{ documentEndpointCount(doc) }} endpoints
-                  </option>
-                </select>
-                <div v-if="selectedDocument" class="mt-3 rounded-lg border border-blue-100 bg-white px-3 py-2 text-xs">
-                  <div class="flex flex-wrap items-center justify-between gap-2">
-                    <span class="font-bold text-blue-950">{{ documentDisplayName(selectedDocument) }}</span>
-                    <span class="font-bold text-blue-600">{{ documentEndpointCount(selectedDocument) }} endpoints</span>
-                  </div>
-                  <div class="mt-1 break-all font-mono text-[11px] leading-5 text-blue-700">
-                    {{ documentSourceLabel(selectedDocument) }}
-                  </div>
+                    接口文档
+                  </button>
                 </div>
-                <p v-else class="mt-2 text-xs leading-5 text-blue-700">
-                  可选择“接口文档”中已导入的文档；临时 URL 或粘贴原文请保持手动输入。
-                </p>
+                <template v-if="documents.length || documentsLoading">
+                  <select
+                    v-model="selectedDocumentId"
+                    :disabled="documentsLoading || !documents.length"
+                    class="w-full rounded-lg border border-blue-200 bg-white px-3 py-2.5 text-sm font-bold text-blue-950 outline-none transition-all focus:border-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+                    @change="handleDocumentSelection"
+                  >
+                    <option value="" disabled>{{ documentsLoading ? '加载已保存接口文档...' : '请选择已导入接口文档' }}</option>
+                    <option
+                      v-for="doc in documents"
+                      :key="doc.id"
+                      :value="doc.id"
+                    >
+                      {{ documentDisplayName(doc) }} · {{ documentEndpointCount(doc) }} endpoints
+                    </option>
+                  </select>
+                  <div v-if="selectedDocument" class="mt-3 rounded-lg border border-blue-100 bg-white px-3 py-2 text-xs">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                      <span class="font-bold text-blue-950">{{ documentDisplayName(selectedDocument) }}</span>
+                      <span class="font-bold text-blue-600">{{ documentEndpointCount(selectedDocument) }} endpoints</span>
+                    </div>
+                    <div class="mt-2 flex flex-wrap gap-2 text-[11px] font-bold text-blue-700">
+                      <span class="rounded border border-blue-100 bg-blue-50 px-2 py-1">来源：已保存接口文档</span>
+                      <span class="rounded border border-blue-100 bg-blue-50 px-2 py-1">格式：{{ selectedDocument.format || 'openapi' }}</span>
+                    </div>
+                  </div>
+                  <p v-else class="mt-2 text-xs leading-5 text-blue-700">
+                    API 测试只从已保存接口文档中选择；新增、粘贴 URL 或导入原文请到“接口文档”页面完成。
+                  </p>
+                </template>
+                <div v-else class="rounded-lg border border-dashed border-blue-200 bg-white px-4 py-4 text-sm text-blue-800">
+                  <div class="font-bold">暂无已保存接口文档</div>
+                  <p class="mt-1 text-xs leading-5 text-blue-700">请先在“接口文档”页面导入 OpenAPI/Swagger 文档，再回到这里选择运行。</p>
+                  <button
+                    type="button"
+                    @click="router.push('/documents')"
+                    class="mt-3 rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white transition-all hover:bg-blue-700"
+                  >
+                    去导入接口文档
+                  </button>
+                </div>
               </div>
-              <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">
-                {{ isApiMode ? '运行 Source / 手动输入' : '目标入口 / 页面 URL' }}
-              </label>
-              <textarea
-                v-model="form.source"
-                rows="5"
-                :placeholder="isApiMode ? '选择已导入文档，或手动粘贴 Swagger/OpenAPI URL、JSON/YAML...' : '粘贴要巡检的网页 URL...'"
-                class="w-full resize-none rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 font-mono text-sm outline-none transition-all focus:border-blue-500 focus:bg-white"
-                @input="handleSourceInput"
-              />
-              <div class="mt-3 flex flex-wrap gap-2">
-                <button
-                  @click="setExample('https://petstore.swagger.io/v2/swagger.json', '对 Petstore API 做契约、参数边界和错误分支检查。', 'api')"
-                  class="flex items-center gap-1.5 rounded-lg bg-gray-100 px-3 py-1.5 text-xs font-bold text-gray-600 transition-all hover:bg-gray-200"
-                >
-                  <FileJson :size="13" /> Petstore API
-                </button>
-                <button
-                  @click="setExample('https://httpbin.org', '对公开页面做基础可达性和页面结构巡检。', 'ui')"
-                  class="flex items-center gap-1.5 rounded-lg bg-gray-100 px-3 py-1.5 text-xs font-bold text-gray-600 transition-all hover:bg-gray-200"
-                >
-                  <Globe :size="13" /> UI 巡检示例
-                </button>
-              </div>
+
+              <template v-else>
+                <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">目标入口 / 页面 URL</label>
+                <textarea
+                  v-model="form.source"
+                  rows="5"
+                  placeholder="粘贴要巡检的网页 URL..."
+                  class="w-full resize-none rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 font-mono text-sm outline-none transition-all focus:border-blue-500 focus:bg-white"
+                  @input="handleSourceInput"
+                />
+                <div class="mt-3 flex flex-wrap gap-2">
+                  <button
+                    @click="setExample('https://httpbin.org', '对公开页面做基础可达性和页面结构巡检。', 'ui')"
+                    class="flex items-center gap-1.5 rounded-lg bg-gray-100 px-3 py-1.5 text-xs font-bold text-gray-600 transition-all hover:bg-gray-200"
+                  >
+                    <Globe :size="13" /> UI 巡检示例
+                  </button>
+                </div>
+              </template>
             </div>
 
             <div>
@@ -932,7 +1014,7 @@ onMounted(() => {
                 <button
                   v-for="mode in modes"
                   :key="mode.value"
-                  @click="form.test_type = mode.value; resetPreflight()"
+                  @click="selectTestType(mode.value)"
                   class="min-w-0 rounded-lg border p-4 text-left transition-all"
                   :class="form.test_type === mode.value ? 'border-blue-500 bg-blue-50 text-blue-800' : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300'"
                 >
@@ -1421,7 +1503,7 @@ onMounted(() => {
           <div class="flex shrink-0 gap-2">
             <button
               @click="runPreflight()"
-              :disabled="preflightLoading || !form.source.trim()"
+              :disabled="preflightLoading || !sourceReady"
               class="flex items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2.5 text-sm font-bold text-gray-700 transition-all hover:border-blue-200 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Loader2 v-if="preflightLoading" :size="16" class="animate-spin" />
