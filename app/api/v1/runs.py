@@ -1009,9 +1009,9 @@ async def _run_auth_preflight(
             label="鉴权模式",
             status="passed",
             detail={
-                "auto": "智能体自动鉴权",
-                "manual": "手动 Header/Token",
-                "none_confirmed": "确认无需鉴权",
+                "auto": "自动获取 Token",
+                "manual": "手动 Token/Header",
+                "none_confirmed": "无需鉴权",
             }[auth_mode],
         )
     ]
@@ -1059,7 +1059,7 @@ async def _run_auth_preflight(
                 captcha_handling="UI 手动模式不处理验证码，除非同时提供登录说明。",
                 steps=steps,
                 missing_fields=["token_or_header"],
-                next_action="填写 Token/Header，或切换到智能体自动鉴权。",
+                next_action="填写 Token/Header，或切换到自动获取 Token。",
             )
             return auth_preflight, headers, None, auth_resolution
         if auth_mode == "auto" and not _has_login_credentials(payload):
@@ -1068,7 +1068,7 @@ async def _run_auth_preflight(
                     key="credentials",
                     label="登录凭据",
                     status="blocked",
-                    detail="智能体自动鉴权需要账号和密码；如果页面无需登录，请选择确认无需鉴权。",
+                    detail="自动获取 Token 需要账号和密码；如果页面无需登录，请选择无需鉴权。",
                 )
             )
             auth_preflight = _auth_preflight_response(
@@ -1268,13 +1268,13 @@ async def _run_auth_preflight(
                 endpoints=endpoints,
             )
             missing_fields = auth_resolution.missing_inputs or ["username", "password"]
-            detail = auth_resolution.detail or "智能体自动鉴权缺少登录凭据。"
-            next_action = auth_resolution.next_action or "补齐登录凭据，或选择手动 Header/Token。"
+            detail = auth_resolution.detail or "自动获取 Token 缺少登录凭据。"
+            next_action = auth_resolution.next_action or "补齐登录凭据，或选择手动 Token/Header。"
             required_fields = auth_resolution.required_fields or missing_fields
         else:
             missing_fields = ["username", "password"]
-            detail = "检测到鉴权预检未完成；必须提供 Token/Header、填写账号密码，或选择确认无需鉴权。"
-            next_action = "填写账号密码，或选择手动 Header/Token / 确认无需鉴权。"
+            detail = "检测到鉴权预检未完成；必须提供 Token/Header、填写账号密码，或选择无需鉴权。"
+            next_action = "填写账号密码，或选择手动 Token/Header / 无需鉴权。"
             required_fields = missing_fields
         steps.append(
             RunAuthPreflightStep(

@@ -34,6 +34,7 @@
 - `api` publishes `127.0.0.1:18000:8000`.
 - `frontend` publishes `127.0.0.1:15173:80`.
 - The production frontend build uses `VITE_API_BASE_URL=/api/v1`.
+- The frontend container serves `index.html` and SPA fallbacks with `Cache-Control: no-store`; hashed `/assets/` files may be cached immutably.
 - `nginx` in Compose is optional and must stay behind the `edge` profile.
 - `HTTP_PORT` only applies when starting the optional `edge` profile.
 - Do not start Compose `nginx` on a host where Caddy owns port `80`.
@@ -46,6 +47,7 @@
 - Compose `nginx` is started without being on the Compose network -> nginx cannot resolve `api` or `frontend`.
 - Frontend build misses `VITE_API_BASE_URL=/api/v1` -> browser calls the wrong API base path.
 - Domain `/health` returns `200 {"status":"ok"}` -> Caddy-to-API routing is healthy.
+- Domain `/` returns `Cache-Control: no-store` so browser sessions do not keep an old frontend shell after deploy.
 
 ### 5. Good/Base/Bad Cases
 

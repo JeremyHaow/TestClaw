@@ -919,7 +919,7 @@ async def fetch_captcha_context(
             ok=False,
             detail="未提供验证码 URL，且无法从 API 文档推断",
             missing_inputs=["captcha_url"],
-            next_action="填写固定验证码，或在高级登录选项中补充验证码接口 URL。",
+            next_action="填写固定验证码，或在补充登录字段中填写验证码接口 URL。",
         )
     if not captcha_url.startswith(("http://", "https://")):
         return CaptchaContextResolution(
@@ -1012,7 +1012,7 @@ async def resolve_auto_auth_headers(
             ok=False,
             detail="自动获取 Token 仅支持 POST/PUT/PATCH",
             missing_inputs=["method"],
-            next_action="在高级登录选项中选择 POST、PUT 或 PATCH。",
+            next_action="在补充登录字段中选择 POST、PUT 或 PATCH。",
         )
 
     loaded_endpoints = endpoints
@@ -1038,7 +1038,7 @@ async def resolve_auto_auth_headers(
             ok=False,
             detail="未提供登录 URL，且无法从 API 文档推断",
             missing_inputs=["login_url"],
-            next_action="在高级登录选项中填写登录 URL，或确认 API 文档包含 login/token 接口。",
+            next_action="在补充登录字段中填写登录 URL，或确认 API 文档包含 login/token 接口。",
         )
     if not login_url.startswith(("http://", "https://")):
         return AuthResolution(
@@ -1068,7 +1068,7 @@ async def resolve_auto_auth_headers(
         next_action = (
             "补充标出的基础登录凭据后重新运行预检。"
             if "login_body" not in missing_inputs
-            else "补充基础登录凭据；无法自动映射的字段请在高级登录选项中填写登录请求体 JSON。"
+            else "补充基础登录凭据；无法自动映射的字段请在补充登录字段中填写登录请求体 JSON。"
         )
         return AuthResolution(
             ok=False,
@@ -1106,17 +1106,17 @@ async def resolve_auto_auth_headers(
             ok=False,
             detail="登录请求失败，请检查登录 URL、网络和请求体",
             missing_inputs=["login_url", "login_body"],
-            next_action="检查登录 URL 是否正确；如果登录接口需要特殊字段，请在高级登录选项中填写请求体 JSON。",
+            next_action="检查登录 URL 是否正确；如果登录接口需要特殊字段，请在补充登录字段中填写请求体 JSON。",
         )
 
     if response.status_code >= 400:
         if response.status_code in {400, 422}:
             missing_inputs = ["login_body"]
-            next_action = "登录接口拒绝了请求体，请在高级登录选项中补充或调整登录请求体 JSON。"
+            next_action = "登录接口拒绝了请求体，请在补充登录字段中补充或调整登录请求体 JSON。"
         elif response.status_code in {401, 403}:
             missing_inputs = ["username", "password", "captcha", "login_headers"]
             next_action = (
-                "检查账号、密码、验证码；如果接口还需要额外 Header，请在高级登录选项中补充。"
+                "检查账号、密码、验证码；如果接口还需要额外 Header，请在补充登录字段中补充。"
             )
         else:
             missing_inputs = ["login_url", "login_body"]
@@ -1162,7 +1162,7 @@ async def resolve_auto_auth_headers(
             ok=False,
             detail=detail,
             missing_inputs=["token_path"],
-            next_action="在高级登录选项中填写响应里的 Token 路径，例如 data.token、access_token 或 result.token。",
+            next_action="在补充登录字段中填写响应里的 Token 路径，例如 data.token、access_token 或 result.token。",
         )
 
     token_prefix_value = config_data["token_prefix"] if "token_prefix" in config_data else "Bearer"

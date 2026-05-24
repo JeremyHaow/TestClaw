@@ -175,6 +175,7 @@ const toast = useToast()
 const submitting = ref(false)
 const preflightLoading = ref(false)
 const showAdvanced = ref(false)
+const showAuthChoices = ref(false)
 const preflight = ref<PreflightResponse | null>(null)
 
 const form = reactive({
@@ -221,9 +222,9 @@ const apiPolicies = [
 ]
 
 const authModes = [
-  { value: 'auto', label: '智能体自动鉴权', desc: '填写账号、密码和验证码策略，运行前先预检。', icon: RefreshCw },
-  { value: 'manual', label: '手动 Header/Token', desc: '高级兜底，仍会先验证受保护接口。', icon: KeyRound },
-  { value: 'none_confirmed', label: '确认无需鉴权', desc: '只在无鉴权访问验证通过后允许运行。', icon: ShieldCheck },
+  { value: 'auto', label: '自动获取 Token', desc: '账号密码登录，预检验证受保护接口。', icon: RefreshCw },
+  { value: 'manual', label: '手动 Token/Header', desc: '直接提供当前可用鉴权信息。', icon: KeyRound },
+  { value: 'none_confirmed', label: '无需鉴权', desc: '验证公开接口可访问后运行。', icon: ShieldCheck },
 ]
 
 const captchaModes = [
@@ -258,6 +259,8 @@ const isManualAuthMode = computed(() => form.auth_mode === 'manual')
 const manualRefreshEnabled = computed(() => isManualAuthMode.value && form.auth_refresh_enabled && manualAuthSupplied.value)
 const shouldSendAuthConfig = computed(() => isApiMode.value && (isAutoAuthMode.value || manualRefreshEnabled.value))
 const showLoginCredentialPanel = computed(() => isAutoAuthMode.value || (isManualAuthMode.value && form.auth_refresh_enabled))
+const currentAuthMode = computed(() => authModes.find((mode) => mode.value === form.auth_mode) || authModes[0])
+const alternateAuthModes = computed(() => authModes.filter((mode) => mode.value !== form.auth_mode))
 const authMissingInputs = computed(() => preflight.value?.auth_missing_inputs || [])
 const authRequiredFields = computed(() => preflight.value?.auth_required_fields || [])
 const authMissingLabels = computed(() => authMissingInputs.value.map((key) => authInputLabels[key] || key))
@@ -409,6 +412,7 @@ function appendSafetyPreset(text: string) {
 
 function selectAuthMode(mode: string) {
   form.auth_mode = mode
+  showAuthChoices.value = mode !== 'auto'
   showAdvanced.value = false
   resetPreflight()
 }
@@ -810,13 +814,34 @@ onMounted(applyRoutePrefill)
             </div>
           </div>
 
-          <div class="grid gap-3 md:grid-cols-3">
+          <div class="rounded-lg border border-blue-100 bg-blue-50/70 px-4 py-3">
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div class="flex min-w-0 items-start gap-3">
+                <div class="mt-0.5 rounded-lg bg-white p-2 text-blue-700">
+                  <component :is="currentAuthMode.icon" :size="17" />
+                </div>
+                <div class="min-w-0">
+                  <div class="text-xs font-bold uppercase tracking-widest text-blue-500">当前鉴权方式</div>
+                  <div class="mt-1 text-sm font-bold text-blue-950">{{ currentAuthMode.label }}</div>
+                  <p class="mt-1 text-xs leading-5 text-blue-700">{{ currentAuthMode.desc }}</p>
+                </div>
+              </div>
+              <button
+                @click="showAuthChoices = !showAuthChoices"
+                class="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg border border-blue-200 bg-white px-3 py-2 text-xs font-bold text-blue-800 transition-all hover:border-blue-300"
+              >
+                <Settings2 :size="15" />
+                其他方式
+              </button>
+            </div>
+          </div>
+
+          <div v-if="showAuthChoices" class="mt-3 grid gap-3 md:grid-cols-2">
             <button
-              v-for="mode in authModes"
+              v-for="mode in alternateAuthModes"
               :key="mode.value"
               @click="selectAuthMode(mode.value)"
-              class="min-w-0 rounded-lg border p-4 text-left transition-all"
-              :class="form.auth_mode === mode.value ? 'border-blue-500 bg-blue-50 text-blue-800' : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300'"
+              class="min-w-0 rounded-lg border border-gray-200 bg-white p-3 text-left text-gray-700 transition-all hover:border-blue-300 hover:text-blue-800"
             >
               <div class="mb-1 flex items-center gap-2">
                 <component :is="mode.icon" :size="16" />
@@ -871,17 +896,17 @@ onMounted(applyRoutePrefill)
           </div>
 
           <div v-if="isAutoAuthMode" class="mt-4 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">
-            {{ isApiMode ? '默认会从 OpenAPI 文档推断 login/token/captcha 接口和请求体。' : 'UI 测试会打开登录页，由模型根据页面结构推理登录步骤。' }}
+            {{ isApiMode ? '预检会从 OpenAPI 文档推断登录接口、换取 Token，并验证受保护只读接口。' : 'UI 测试会打开登录页，根据页面结构完成登录并验证登录后页面。' }}
           </div>
 
           <div v-if="showLoginCredentialPanel" class="mt-4 space-y-4 rounded-lg border border-emerald-100 bg-emerald-50/60 p-4">
             <div class="flex items-center justify-between gap-3">
               <div>
                 <div class="text-sm font-bold text-emerald-900">
-                  {{ isAutoAuthMode ? '智能体自动鉴权' : '自动刷新凭据' }}
+                  {{ isAutoAuthMode ? '自动获取 Token' : 'Token 自动刷新凭据' }}
                 </div>
                 <p class="mt-1 text-xs leading-5 text-emerald-700">
-                  {{ isAutoAuthMode ? '运行前先预检登录链路；UI 动态验证码会交给 Vision 模型。' : '手动 Token 失效后才会使用这些信息重新登录。' }}
+                  {{ isAutoAuthMode ? '只需要账号、密码和验证码策略；接口测试不会做图片验证码识别。' : '手动 Token 失效后才会使用这些信息重新登录。' }}
                 </p>
               </div>
             </div>
