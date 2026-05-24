@@ -210,12 +210,15 @@ if captcha_required and not captcha.captcha_text:
 - Relative `login_url` values are resolved against the run target/base URL; absolute `http(s)` URLs are used as-is.
 - When `login_url` is omitted, infer it from OpenAPI login/auth/token endpoints when possible.
 - `token_path` supports simple dot paths such as `access_token`, `data.token`, and `$.data.token`. When omitted, common token fields may be inferred.
+- Auto-login must inspect application envelopes before token extraction. HTTP 2xx with top-level `code`, `status`, or `status_code` outside success values (`0`, `200`, string equivalents such as `"0"`, `"200"`, `"ok"`, `"success"`) is a login failure, not a successful token-less login.
+- Token extraction may infer common cased/nested token fields such as `data.access_token`, `data.token`, `data.Authorization`, top-level `authorization`, and token-like bare string `data`; it must never serialize the token in preflight responses, execution logs, or tool-call summaries.
 - During API execution, if a non-`AUTH` request with an auth-like header returns HTTP `401/403` or JSON envelope `code/status/status_code` `401/403`, the runner may use `auth_config` to refresh once and retry that request once. Record an `api.auth_refresh` tool call with method/url/status metadata only.
 
 ### 4. Validation & Error Matrix
 
 - Auth-required API + no token/header + no auto auth -> preflight `auth` check is `missing`, readiness is `blocked`, create run returns `400`.
 - Auth-required API + auto auth login returns 4xx/5xx -> preflight is blocked and create run returns `400`.
+- Auth-required API + auto auth login returns HTTP 200 with `{"code":500,"msg":"Password input error","data":null}` -> preflight is blocked as login/credential failure and must not suggest `token_path`.
 - Auth-required API + auto auth succeeds but `token_path` is missing -> preflight is blocked and create run returns `400`.
 - Auth-required API + auto auth succeeds -> preflight reports `auth_resolved=true`, create run injects `Authorization: Bearer <token>`.
 - Non-auth API + auto auth fails -> warn only; do not block the run solely for optional auth failure.
@@ -232,6 +235,9 @@ if captcha_required and not captcha.captcha_text:
 
 - Preflight: protected OpenAPI without credentials returns an `auth` check with `status="missing"`.
 - Preflight: auto-login success returns `auth_resolved=true` without exposing the token in JSON.
+- Regression: HTTP 200 application-level login failure is classified before token extraction and does not suggest `token_path`.
+- Regression: true success-looking token-less login responses still ask for `token_path`.
+- Regression: common nested/cased token fields such as `data.Authorization` are extracted without leaking the token.
 - Create run: protected OpenAPI without token/header/auto-auth returns `400`.
 - Create run: auto-login success dispatches the worker with resolved `auth_headers`.
 - API runner: expired manual token + valid refresh config retries one non-`AUTH` request and records `api.auth_refresh` without secrets.

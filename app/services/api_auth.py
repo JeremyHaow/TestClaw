@@ -6,7 +6,7 @@ from urllib.parse import urlparse, urljoin
 
 import httpx
 
-from app.core.redaction import is_sensitive_header
+from app.core.redaction import is_sensitive_header, redact_sensitive_text
 
 
 @dataclass
@@ -151,32 +151,92 @@ def extract_path_value(payload: Any, path: str) -> Any:
     return current
 
 
+def _looks_token_like(value: str) -> bool:
+    text = value.strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if lowered.startswith(("bearer ", "basic ")):
+        return len(text.split(maxsplit=1)) == 2 and len(text.split(maxsplit=1)[1]) >= 8
+    if text.count(".") >= 2 and len(text) >= 20:
+        return True
+    if len(text) < 10:
+        return False
+    has_alnum = any(ch.isalnum() for ch in text)
+    has_token_marker = any(ch in text for ch in "._-=+/") or any(ch.isdigit() for ch in text)
+    return has_alnum and (has_token_marker or len(text) >= 24)
+
+
+def _coerce_token_value(value: Any, *, key_hint: str = "") -> str | None:
+    if not isinstance(value, str):
+        return None
+    token = value.strip()
+    if not token:
+        return None
+    if key_hint == "data" and not _looks_token_like(token):
+        return None
+    return token
+
+
 def find_token_value(payload: Any) -> str | None:
     candidate_paths = (
         "access_token",
+        "accessToken",
         "token",
         "jwt",
         "id_token",
+        "idToken",
+        "authorization",
+        "Authorization",
+        "authToken",
+        "bearerToken",
         "data.access_token",
+        "data.accessToken",
         "data.token",
         "data.jwt",
+        "data.id_token",
+        "data.idToken",
+        "data.authorization",
+        "data.Authorization",
+        "data.authToken",
+        "data.bearerToken",
         "result.access_token",
+        "result.accessToken",
         "result.token",
         "result.jwt",
+        "result.authorization",
+        "result.Authorization",
         "body.access_token",
+        "body.accessToken",
         "body.token",
+        "body.authorization",
+        "body.Authorization",
     )
     for path in candidate_paths:
         value = extract_path_value(payload, path)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+        token = _coerce_token_value(value)
+        if token:
+            return token
 
     if isinstance(payload, dict):
         for key, value in payload.items():
-            key_text = str(key).lower()
-            if key_text in {"access_token", "token", "jwt", "id_token"}:
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
+            key_text = _normalize_name(str(key))
+            if key_text in {
+                "accesstoken",
+                "token",
+                "jwt",
+                "idtoken",
+                "authorization",
+                "authtoken",
+                "bearertoken",
+            }:
+                token = _coerce_token_value(value)
+                if token:
+                    return token
+            if key_text == "data":
+                token = _coerce_token_value(value, key_hint="data")
+                if token:
+                    return token
             nested = find_token_value(value)
             if nested:
                 return nested
@@ -185,6 +245,102 @@ def find_token_value(payload: Any) -> str | None:
             nested = find_token_value(item)
             if nested:
                 return nested
+    return None
+
+
+def _envelope_success_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value) in {0, 200}
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        return normalized in {"0", "00", "000", "200", "ok", "success", "succeeded", "true"}
+    return False
+
+
+def _coerce_status_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _login_failure_message(payload: dict[str, Any]) -> str:
+    for key in ("msg", "message", "error_description", "error", "detail"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return redact_sensitive_text(value.strip())[:180]
+    return ""
+
+
+def _login_failure_guidance(status_value: Any, message: str) -> tuple[list[str], str]:
+    status_code = _coerce_status_int(status_value)
+    if status_code in {401, 403}:
+        return (
+            ["username", "password", "captcha", "login_headers"],
+            "检查账号、密码、验证码；如果接口还需要额外 Header，请补充登录请求头。",
+        )
+
+    normalized_message = _normalize_name(message)
+    if any(
+        marker in normalized_message
+        for marker in (
+            "username",
+            "useraccount",
+            "account",
+            "password",
+            "passwd",
+            "pwd",
+            "captcha",
+            "verifycode",
+            "verificationcode",
+            "validcode",
+            "validatecode",
+            "credential",
+            "loginfailed",
+        )
+    ):
+        return (
+            ["username", "password", "captcha"],
+            "检查账号、密码、验证码后重新运行预检。",
+        )
+
+    return (
+        ["username", "password", "captcha", "login_body"],
+        "检查账号、密码、验证码；如果接口还需要特殊字段，请调整登录请求体 JSON。",
+    )
+
+
+def _login_envelope_failure(payload: Any) -> AuthResolution | None:
+    if not isinstance(payload, dict):
+        return None
+
+    for key in ("code", "status", "status_code"):
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        if value is None or _envelope_success_value(value):
+            continue
+
+        message = _login_failure_message(payload)
+        missing_inputs, next_action = _login_failure_guidance(value, message)
+        value_text = redact_sensitive_text(str(value))[:40]
+        detail = f"登录接口返回业务失败：{key}={value_text}"
+        if message:
+            detail = f"{detail}，{message}"
+        return AuthResolution(
+            ok=False,
+            detail=detail,
+            missing_inputs=missing_inputs,
+            next_action=next_action,
+        )
     return None
 
 
@@ -671,6 +827,10 @@ async def resolve_auto_auth_headers(
         response_payload = response.json()
     except ValueError:
         response_payload = {}
+
+    envelope_failure = _login_envelope_failure(response_payload)
+    if envelope_failure is not None:
+        return envelope_failure
 
     token: str | None = None
     token_path = str(config_data.get("token_path") or "").strip()

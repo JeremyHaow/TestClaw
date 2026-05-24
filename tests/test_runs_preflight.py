@@ -549,13 +549,64 @@ def test_run_preflight_auto_auth_reports_missing_login_inputs() -> None:
     assert "补充标出的基础登录凭据" in body["auth_next_action"]
 
 
+def test_run_preflight_auto_auth_treats_app_level_failure_as_login_failure(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+        headers = {}
+
+        def json(self) -> dict:
+            return {"code": 500, "msg": "Password input error 1 times", "data": None}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(api_auth.httpx, "AsyncClient", FakeAsyncClient)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": json.dumps(_auth_required_openapi()),
+                "test_type": "api",
+                "auth_config": {
+                    "enabled": True,
+                    "login_url": "/auth/login",
+                    "body": {"username": "admin", "password": "secret"},
+                },
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["readiness"] == "blocked"
+    assert body["auth_resolved"] is False
+    assert body["auth_missing_inputs"] == ["username", "password", "captcha"]
+    assert body["auth_preflight"]["missing_fields"] == ["username", "password", "captcha"]
+    assert "Password input error" in body["auth_error"]
+    assert "登录成功" not in body["auth_error"]
+    assert "token_path" not in body["auth_missing_inputs"]
+    assert "Token 路径" not in (body["auth_next_action"] or "")
+
+
 def test_run_preflight_auto_auth_prompts_for_token_path_when_login_has_no_token(monkeypatch) -> None:
     class FakeResponse:
         status_code = 200
         headers = {}
 
         def json(self) -> dict:
-            return {"data": {"ok": True}}
+            return {"code": 200, "msg": "ok", "data": {"ok": True}}
 
     class FakeAsyncClient:
         def __init__(self, *args, **kwargs) -> None:
@@ -594,6 +645,53 @@ def test_run_preflight_auto_auth_prompts_for_token_path_when_login_has_no_token(
     assert body["auth_missing_inputs"] == ["token_path"]
     assert "登录成功，但响应中没有找到 Token" in body["auth_error"]
     assert "Token 路径" in body["auth_next_action"]
+
+
+def test_run_preflight_auto_auth_extracts_cased_nested_authorization(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+        headers = {}
+
+        def json(self) -> dict:
+            return {"code": 200, "data": {"Authorization": "nested-cased-token"}}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(api_auth.httpx, "AsyncClient", FakeAsyncClient)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": json.dumps(_auth_required_openapi()),
+                "test_type": "api",
+                "auth_config": {
+                    "enabled": True,
+                    "login_url": "/auth/login",
+                    "body": {"username": "admin", "password": "secret"},
+                },
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["auth_resolved"] is True
+    assert body["auth_header_name"] == "Authorization"
+    assert body["auth_preflight"]["protected_validation_count"] == 1
+    assert "nested-cased-token" not in json.dumps(body)
 
 
 def test_run_preflight_auto_auth_infers_login_url_body_and_token(monkeypatch) -> None:

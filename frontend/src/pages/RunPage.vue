@@ -232,7 +232,7 @@ const captchaModes = [
   { value: 'dynamic', label: '动态验证码', desc: '接口只取上下文；UI 使用 Vision 识别。' },
 ]
 
-const advancedAuthInputs = new Set(['base_url', 'login_url', 'captcha_url', 'login_body', 'login_headers', 'token_path', 'method', 'content_type'])
+const advancedAuthInputs = new Set(['login_url', 'captcha_url', 'login_body', 'login_headers', 'token_path', 'method', 'content_type'])
 const authInputLabels: Record<string, string> = {
   username: '用户名',
   password: '密码',
@@ -261,7 +261,28 @@ const showLoginCredentialPanel = computed(() => isAutoAuthMode.value || (isManua
 const authMissingInputs = computed(() => preflight.value?.auth_missing_inputs || [])
 const authRequiredFields = computed(() => preflight.value?.auth_required_fields || [])
 const authMissingLabels = computed(() => authMissingInputs.value.map((key) => authInputLabels[key] || key))
-const authNeedsAdvanced = computed(() => authMissingInputs.value.some((key) => advancedAuthInputs.has(key)))
+const requestedAdvancedInputs = computed(() => new Set(authMissingInputs.value.filter((key) => advancedAuthInputs.has(key))))
+const authNeedsAdvanced = computed(() => requestedAdvancedInputs.value.size > 0)
+const manualAdvancedAuthFlow = computed(() => isManualAuthMode.value && form.auth_refresh_enabled)
+const hasAnyAdvancedAuthValue = computed(() => [
+  'login_url',
+  'captcha_url',
+  'login_body',
+  'login_headers',
+  'token_path',
+  'method',
+  'content_type',
+  'header_name',
+  'token_prefix',
+].some((key) => hasAdvancedAuthValue(key)))
+const canShowAdvancedAuthToggle = computed(() => (
+  showLoginCredentialPanel.value
+  && (authNeedsAdvanced.value || manualAdvancedAuthFlow.value || hasAnyAdvancedAuthValue.value || showAdvanced.value)
+))
+const showAdvancedAuthPanel = computed(() => showAdvanced.value && canShowAdvancedAuthToggle.value)
+const showLoginRequestSettings = computed(() => ['login_url', 'method', 'content_type'].some((key) => shouldShowAdvancedField(key)))
+const showTokenSettings = computed(() => ['token_path', 'header_name', 'token_prefix'].some((key) => shouldShowAdvancedField(key)))
+const showLoginPayloadSettings = computed(() => ['login_body', 'login_headers'].some((key) => shouldShowAdvancedField(key)))
 const showAuthPrompt = computed(() => Boolean(preflight.value?.auth_error) && authMissingInputs.value.length > 0)
 const readiness = computed(() => preflight.value?.readiness || (form.source.trim() ? 'needs_review' : 'blocked'))
 const readinessLabel = computed(() => {
@@ -388,11 +409,31 @@ function appendSafetyPreset(text: string) {
 
 function selectAuthMode(mode: string) {
   form.auth_mode = mode
+  showAdvanced.value = false
   resetPreflight()
 }
 
 function authInputNeeds(key: string) {
   return authMissingInputs.value.includes(key)
+}
+
+function hasAdvancedAuthValue(key: string) {
+  if (key === 'login_url') return Boolean(form.auth_login_url.trim())
+  if (key === 'captcha_url') return Boolean(form.auth_captcha_url.trim())
+  if (key === 'login_body') return Boolean(form.auth_login_body.trim())
+  if (key === 'login_headers') return Boolean(form.auth_login_headers.trim())
+  if (key === 'token_path') return Boolean(form.auth_token_path.trim())
+  if (key === 'method') return form.auth_method !== 'POST'
+  if (key === 'content_type') return form.auth_content_type !== 'json'
+  if (key === 'header_name') return form.auth_header_name.trim() !== 'Authorization'
+  if (key === 'token_prefix') return form.auth_token_prefix.trim() !== 'Bearer'
+  return false
+}
+
+function shouldShowAdvancedField(key: string) {
+  if (manualAdvancedAuthFlow.value) return true
+  if (requestedAdvancedInputs.value.has(key)) return true
+  return showAdvanced.value && hasAdvancedAuthValue(key)
 }
 
 function openAdvancedAuth() {
@@ -537,6 +578,8 @@ async function runPreflight(showToast = true) {
     preflight.value = result
     if (result.auth_error && (result.auth_missing_inputs || []).some((key) => advancedAuthInputs.has(key))) {
       showAdvanced.value = true
+    } else if (isAutoAuthMode.value && !hasAnyAdvancedAuthValue.value) {
+      showAdvanced.value = false
     }
     if (showToast) toast.success('预检完成')
     return result
@@ -894,16 +937,17 @@ onMounted(applyRoutePrefill)
             </div>
 
             <button
+              v-if="canShowAdvancedAuthToggle"
               @click="showAdvanced = !showAdvanced"
               class="flex w-full items-center justify-between rounded-lg border border-emerald-200 bg-white px-3 py-2 text-left text-xs font-bold text-emerald-800 transition-all hover:border-emerald-300"
             >
-              <span class="flex items-center gap-2"><SlidersHorizontal :size="15" /> 高级登录选项</span>
+              <span class="flex items-center gap-2"><SlidersHorizontal :size="15" /> 补充登录字段</span>
               <span class="text-emerald-600">{{ showAdvanced ? '收起' : '展开' }}</span>
             </button>
 
-            <div v-if="showAdvanced" class="space-y-4">
-              <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_130px_130px]">
-                <div>
+            <div v-if="showAdvancedAuthPanel" class="space-y-4">
+              <div v-if="showLoginRequestSettings" class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_130px_130px]">
+                <div v-if="shouldShowAdvancedField('login_url')">
                   <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">登录 URL</label>
                   <input
                     v-model="form.auth_login_url"
@@ -913,7 +957,7 @@ onMounted(applyRoutePrefill)
                     @input="resetPreflight"
                   />
                 </div>
-                <div>
+                <div v-if="shouldShowAdvancedField('method')">
                   <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">方法</label>
                   <select
                     v-model="form.auth_method"
@@ -925,7 +969,7 @@ onMounted(applyRoutePrefill)
                     <option value="PATCH">PATCH</option>
                   </select>
                 </div>
-                <div>
+                <div v-if="shouldShowAdvancedField('content_type')">
                   <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">Body 类型</label>
                   <select
                     v-model="form.auth_content_type"
@@ -938,7 +982,7 @@ onMounted(applyRoutePrefill)
                 </div>
               </div>
 
-              <div v-if="isApiMode">
+              <div v-if="isApiMode && shouldShowAdvancedField('captcha_url')">
                 <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">验证码 URL</label>
                 <input
                   v-model="form.auth_captcha_url"
@@ -949,8 +993,8 @@ onMounted(applyRoutePrefill)
                 />
               </div>
 
-              <div class="grid gap-4 lg:grid-cols-3">
-                <div>
+              <div v-if="showTokenSettings" class="grid gap-4 lg:grid-cols-3">
+                <div v-if="shouldShowAdvancedField('token_path')">
                   <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">Token 路径</label>
                   <input
                     v-model="form.auth_token_path"
@@ -960,7 +1004,7 @@ onMounted(applyRoutePrefill)
                     @input="resetPreflight"
                   />
                 </div>
-                <div>
+                <div v-if="shouldShowAdvancedField('header_name')">
                   <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">注入 Header</label>
                   <input
                     v-model="form.auth_header_name"
@@ -969,7 +1013,7 @@ onMounted(applyRoutePrefill)
                     @input="resetPreflight"
                   />
                 </div>
-                <div>
+                <div v-if="shouldShowAdvancedField('token_prefix')">
                   <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">Token 前缀</label>
                   <input
                     v-model="form.auth_token_prefix"
@@ -980,8 +1024,8 @@ onMounted(applyRoutePrefill)
                 </div>
               </div>
 
-              <div class="grid gap-4 lg:grid-cols-2">
-                <div>
+              <div v-if="showLoginPayloadSettings" class="grid gap-4 lg:grid-cols-2">
+                <div v-if="shouldShowAdvancedField('login_body')">
                   <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">登录请求体 JSON</label>
                   <textarea
                     v-model="form.auth_login_body"
@@ -992,7 +1036,7 @@ onMounted(applyRoutePrefill)
                     @input="resetPreflight"
                   />
                 </div>
-                <div>
+                <div v-if="shouldShowAdvancedField('login_headers')">
                   <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">登录请求头 JSON</label>
                   <textarea
                     v-model="form.auth_login_headers"
@@ -1064,7 +1108,7 @@ onMounted(applyRoutePrefill)
                 @click="openAdvancedAuth"
                 class="rounded border border-amber-300 bg-white px-2 py-1 text-[11px] font-bold text-amber-900 transition-all hover:border-amber-500"
               >
-                打开高级登录选项
+                {{ authInputNeeds('token_path') ? '填写 Token 路径' : '补充登录字段' }}
               </button>
             </div>
           </div>
