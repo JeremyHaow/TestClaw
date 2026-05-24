@@ -168,15 +168,16 @@ def redact_sensitive_data(value: Any) -> Any:
     if isinstance(value, dict):
         redacted: dict[Any, Any] = {}
         for key, child in value.items():
-            key_text = str(key)
+            safe_key = sanitize_persisted_text(key) if isinstance(key, str) else key
+            key_text = str(safe_key)
             if key_text.lower() in _HEADER_CONTAINER_KEYS:
-                redacted[key] = redact_sensitive_headers(child)
+                redacted[safe_key] = redact_sensitive_headers(child)
             elif key_text.lower() in _SAFE_SENSITIVE_METADATA_KEYS:
-                redacted[key] = redact_sensitive_data(child)
+                redacted[safe_key] = redact_sensitive_data(child)
             elif is_sensitive_header(key_text):
-                redacted[key] = REDACTED_VALUE
+                redacted[safe_key] = REDACTED_VALUE
             else:
-                redacted[key] = redact_sensitive_data(child)
+                redacted[safe_key] = redact_sensitive_data(child)
         return redacted
     if isinstance(value, list):
         return [redact_sensitive_data(item) for item in value]

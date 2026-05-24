@@ -78,6 +78,31 @@ def test_redaction_treats_session_jwt_csrf_xsrf_headers_as_sensitive():
     assert "trace-safe" in redacted
 
 
+def test_redact_json_text_strips_control_chars_from_keys_and_values():
+    payload = {
+        "api_execution_result": {
+            "results": [
+                {
+                    "body": {
+                        "bad\x00key": "safe\x07value",
+                    }
+                }
+            ]
+        }
+    }
+
+    redacted = redact_json_text(json.dumps(payload, ensure_ascii=False))
+
+    assert redacted is not None
+    assert "\x00" not in redacted
+    assert "\x07" not in redacted
+    assert "\\u0000" not in redacted
+    assert "\\u0007" not in redacted
+    parsed = json.loads(redacted)
+    body = parsed["api_execution_result"]["results"][0]["body"]
+    assert body == {"badkey": "safevalue"}
+
+
 def test_redact_sensitive_text_redacts_embedded_playwright_fill_and_type_values():
     redacted = redact_sensitive_text(
         'Login blocked after fill "#email" "email-fill-secret", '

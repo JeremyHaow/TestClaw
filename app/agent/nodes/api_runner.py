@@ -714,8 +714,17 @@ def _record_http_request_call(
     )
 
 
-async def _request_with_retry(client: httpx.AsyncClient, req: dict, retry_count: int):
+async def _request_with_retry(
+    client: httpx.AsyncClient,
+    req: dict,
+    retry_count: int,
+    request_budget: int | None = None,
+):
     attempts = max(1, retry_count + 1)
+    if request_budget is not None:
+        if request_budget <= 0:
+            return None, 0, RuntimeError("HTTP execution budget exhausted")
+        attempts = min(attempts, request_budget)
     last_exc: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
@@ -1316,7 +1325,13 @@ async def run(state: AgentState) -> AgentState:
             _record_mock_body_generation(state, req)
             try:
                 start = time.perf_counter()
-                resp, attempts, request_error = await _request_with_retry(client, req, retry_count)
+                remaining_budget = None if execution_budget is None else execution_budget - http_executed_count
+                resp, attempts, request_error = await _request_with_retry(
+                    client,
+                    req,
+                    retry_count,
+                    remaining_budget,
+                )
                 elapsed = round((time.perf_counter() - start) * 1000, 2)
                 http_executed_count += attempts
                 if request_error is not None or resp is None:
@@ -1378,7 +1393,13 @@ async def run(state: AgentState) -> AgentState:
                         req["headers"] = {**(req.get("headers") or {}), **refreshed_headers}
                         auth_refreshed = True
                         start = time.perf_counter()
-                        resp, attempts, request_error = await _request_with_retry(client, req, retry_count)
+                        remaining_budget = None if execution_budget is None else execution_budget - http_executed_count
+                        resp, attempts, request_error = await _request_with_retry(
+                            client,
+                            req,
+                            retry_count,
+                            remaining_budget,
+                        )
                         elapsed = round((time.perf_counter() - start) * 1000, 2)
                         http_executed_count += attempts
                         if request_error is not None or resp is None:

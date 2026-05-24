@@ -893,6 +893,61 @@ async def test_api_runner_respects_http_execution_budget_and_skips_remainder(mon
 
 
 @pytest.mark.asyncio
+async def test_api_runner_execution_budget_caps_retries(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 500
+        text = '{"error": "temporary"}'
+        headers = {"content-type": "application/json"}
+        content = text.encode()
+
+        def json(self) -> dict:
+            return {"error": "temporary"}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 2)
+    monkeypatch.setattr(api_runner.settings, "API_REQUEST_RETRY_COUNT", 5)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "http://api.example.test",
+            "parsed_api_schema": [
+                {"method": "GET", "path": f"/items/{index}", "response_status": "200"}
+                for index in range(3)
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+
+    assert len(calls) == 2
+    assert {call["url"] for call in calls} == {"http://api.example.test/items/0"}
+    assert api_result["http_executed"] == 2
+    assert api_result["executed"] == 1
+    assert api_result["failed"] == 1
+    assert api_result["budget_skipped"] == 2
+    assert api_result["budget_exhausted"] is True
+    assert all(item.get("skip_type") == "execution_budget_exhausted" for item in api_result["results"][1:])
+
+
+@pytest.mark.asyncio
 async def test_api_runner_auth_negative_200_is_advisory_not_main_failure(monkeypatch) -> None:
     calls = []
 
