@@ -181,30 +181,6 @@ function formatEditRawJson() {
   toast.success('JSON 已格式化')
 }
 
-function inferBaseUrl(item: any) {
-  const sourceUrl = String(item?.source_url || '').trim()
-  if (sourceUrl) {
-    return sourceUrl
-      .replace(/\/api-docs.*$/i, '')
-      .replace(/\/swagger.*$/i, '')
-      .replace(/\/openapi\.(json|yaml|yml).*$/i, '')
-      .replace(/\/swagger\.(json|yaml|yml).*$/i, '')
-      .replace(/\/$/, '')
-  }
-
-  const raw = String(item?.raw_content || '').trim()
-  if (raw.startsWith('{')) {
-    try {
-      const parsed = JSON.parse(raw)
-      const firstServer = Array.isArray(parsed.servers) ? parsed.servers[0]?.url : ''
-      if (typeof firstServer === 'string' && firstServer.startsWith('http')) return firstServer.replace(/\/$/, '')
-    } catch {
-      return ''
-    }
-  }
-  return ''
-}
-
 function documentSource(item: any) {
   return String(item?.source_url || item?.raw_content || '').trim()
 }
@@ -352,14 +328,12 @@ function startApiRun(item: any) {
     toast.warning('文档没有可交给运行页的 source')
     return
   }
-  const baseUrl = inferBaseUrl(item)
   router.push({
     path: '/run',
     query: {
       source,
       test_type: 'api',
       objective: `基于接口文档「${item.name || 'OpenAPI 文档'}」执行 API 契约、鉴权、参数边界和错误分支检查。`,
-      base_url: baseUrl || undefined,
       api_execution_policy: 'safe_read_only',
     },
   })

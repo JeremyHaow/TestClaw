@@ -718,14 +718,18 @@ progress = derive_from(workflow_steps, progress_events, current_step)
 ### 1. Scope / Trigger
 
 - Trigger: a run may include both a browser page URL and an API base URL override, or may be re-run from a stored `Task.execution_log`.
-- Applies to `app/api/v1/runs.py`, `app/api/v1/test_cases.py`, `app/worker/tasks.py`, `app/agent/nodes/source_loader.py`, `app/agent/nodes/tc_generator.py`, and `app/agent/progress.py`.
-- Why code-spec depth is required: page URL, API base URL, selected suite cases, auth/custom headers, and setup instructions cross the API -> DB -> worker -> agent boundary. Losing any field can silently skip UI execution or rerun a different target.
+- Applies to `frontend/src/pages/DocumentsPage.vue`, `app/api/v1/runs.py`, `app/api/v1/test_cases.py`, `app/worker/tasks.py`, `app/agent/nodes/source_loader.py`, `app/agent/nodes/tc_generator.py`, and `app/agent/progress.py`.
+- Why code-spec depth is required: document source URLs, page URLs, API base URL overrides, selected suite cases, auth/custom headers, and setup instructions cross the UI -> API -> DB -> worker -> agent boundary. Losing or deriving the wrong field can silently skip UI execution, strip an OpenAPI server path prefix, or rerun a different target.
 
 ### 2. Signatures
 
 - Run creation:
   ```python
   RunCreate(source: str, base_url: str | None, headers: dict | None, token: str | None)
+  ```
+- Documents page handoff:
+  ```typescript
+  router.push({ path: "/run", query: { source: document.source_url || document.raw_content, test_type: "api" } })
   ```
 - Worker dispatch fields:
   ```python
@@ -749,6 +753,8 @@ progress = derive_from(workflow_steps, progress_events, current_step)
 ### 3. Contracts
 
 - For normal `input_type == "url"` page runs, `Task.target_url` remains the user page URL even when `base_url` is supplied. The API base host is stored only as `base_url_override`.
+- Documents page `去运行`/`用此文档运行` must pass the original stored OpenAPI/Swagger document URL as `source` when `source_url` exists. If the document is raw-only, pass `raw_content` as `source`.
+- Documents page must not derive and pass a root/origin `base_url` from a document URL or from OpenAPI `servers`. Leaving `base_url` empty lets backend source loading preserve document-declared path prefixes such as `/api`.
 - `source_loader.py` must not overwrite a URL page `target_url` with `base_url_override`; API runners read `base_url_override` separately.
 - Mixed suites with both API and UI cases dispatch as `test_type="auto"`/DB `FULL`, execute API first, then UI.
 - Suite dispatch must preserve selected `api_cases` and `ui_cases`; `tc_generator.py` must not replace them with generated cases.
@@ -760,6 +766,8 @@ progress = derive_from(workflow_steps, progress_events, current_step)
 ### 4. Validation & Error Matrix
 
 - URL page run with `base_url` override -> stored `target_url` is the page URL; worker receives `ui_seed_url=page_url` and `base_url_override=api_base_url`.
+- API document card with `source_url=https://wms.qunsun.me/openapi.json` and OpenAPI `servers[0].url=https://wms.qunsun.me/api` -> Run page query includes `source=https://wms.qunsun.me/openapi.json` and omits `base_url`; preflight targets `https://wms.qunsun.me/api`.
+- Raw-only OpenAPI document -> Run page query includes raw OpenAPI text as `source` and omits derived `base_url`.
 - Swagger/OpenAPI run with `base_url` override -> source loader may set `target_url` to the API base override.
 - Mixed suite with API and UI cases -> graph routes `tc_generator -> api_runner -> ui_login`.
 - Rerun with stored `api_cases`/`ui_cases` -> new worker task receives those exact cases.
@@ -770,13 +778,16 @@ progress = derive_from(workflow_steps, progress_events, current_step)
 ### 5. Good/Base/Bad Cases
 
 - Good: a user enters `source=https://web/login` and `base_url=https://api`; UI login opens the web page while API tests use the API base.
+- Good: imported WMS OpenAPI document handoff sends `source=https://wms.qunsun.me/openapi.json` with no `base_url`, so `/api/login` is inferred from the document server.
 - Base: API-only Swagger rerun has no UI seed and executes only API paths.
+- Bad: Documents page strips `/openapi.json` to `https://wms.qunsun.me` and sends it as `base_url`, causing auth preflight to call `/login` instead of `/api/login`.
 - Bad: `target_url` is replaced with the API base during run creation, so login/planning opens `https://api` instead of the page URL.
 - Bad: regex redaction turns an OpenAPI security requirement into `{"Authorization": [REDACTED]}`, making stored `source_input` invalid JSON and breaking rerun/preflight.
 
 ### 6. Tests Required
 
 - Unit: run target resolver preserves page URL when `base_url` is present for URL input.
+- Frontend regression/build: Documents page run handoff for an imported OpenAPI URL passes the document URL in `source` and does not include a derived `base_url`.
 - Unit: `source_loader` keeps URL page `target_url` while preserving `base_url_override`.
 - Unit: suite worker kwargs include selected API/UI cases plus UI seed metadata.
 - Unit: rerun context rehydrates source, cases, setup/login instructions, base URL override, safe custom headers, UI seed, and input type from stored `execution_log`; sensitive or redacted headers are filtered.
@@ -784,6 +795,18 @@ progress = derive_from(workflow_steps, progress_events, current_step)
 - Unit: tc generator preserves suite-selected cases instead of replacing them.
 
 ### 7. Wrong vs Correct
+
+#### Wrong
+
+```typescript
+router.push({ path: "/run", query: { source: document.source_url, base_url: originFrom(document.source_url) } })
+```
+
+#### Correct
+
+```typescript
+router.push({ path: "/run", query: { source: document.source_url || document.raw_content, test_type: "api" } })
+```
 
 #### Wrong
 
