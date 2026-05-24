@@ -12,7 +12,13 @@ from app.agent.progress import persist_progress
 from app.agent.state import AgentState
 from app.agent.tool_registry import install_tool_context, record_tool_call, summarize_tool_calls
 from app.config import settings
-from app.core.redaction import redact_sensitive_data, redact_sensitive_headers, sanitize_persisted_text
+from app.core.redaction import (
+    REDACTED_VALUE,
+    is_sensitive_header,
+    redact_sensitive_data,
+    redact_sensitive_headers,
+    sanitize_persisted_text,
+)
 from app.services.api_auth import coerce_auth_config, has_auth_like_header, resolve_auto_auth_headers
 from app.tools.mock_data import generate_mock_json_body, summarize_mock_body
 
@@ -200,6 +206,55 @@ def _is_auth_negative_probe(req: dict) -> bool:
     if str(req.get("category") or "").upper() != "AUTH":
         return False
     return bool(_expected_status_values(req.get("expected_status", 200)) & {401, 403})
+
+
+def _strip_auth_like_headers(headers: dict | None) -> dict:
+    if not isinstance(headers, dict):
+        return {}
+    return {
+        key: value
+        for key, value in headers.items()
+        if not is_sensitive_header(str(key))
+    }
+
+
+def _matching_header_key(headers: dict, name: str) -> object | None:
+    normalized = str(name).strip().lower()
+    for key in headers:
+        if str(key).strip().lower() == normalized:
+            return key
+    return None
+
+
+def _is_redacted_header_placeholder(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if REDACTED_VALUE.lower() in lowered or "redacted" in lowered:
+        return True
+    without_scheme = re.sub(r"(?i)^(bearer|basic)\s+", "", text).strip()
+    return bool(re.fullmatch(r"\*{2,}.*", without_scheme))
+
+
+def _merge_request_headers(default_headers: dict | None, template_headers: dict | None) -> dict:
+    merged = dict(default_headers or {})
+    if isinstance(template_headers, dict):
+        for key, value in template_headers.items():
+            key_text = str(key).strip()
+            if not key_text or value is None or _is_redacted_header_placeholder(value):
+                continue
+            existing_key = _matching_header_key(merged, key_text)
+            if existing_key is not None and (
+                is_sensitive_header(str(existing_key)) or is_sensitive_header(key_text)
+            ):
+                continue
+            if existing_key is not None:
+                del merged[existing_key]
+            merged[key] = value
+    return merged
 
 
 def _auth_negative_success_advisory(req: dict, resp_status: int, payload) -> str | None:
@@ -898,9 +953,11 @@ def _build_case_test_requests(
                     "required_fields": case.get("required_fields") or [],
                     "summary": summarize_mock_body(body),
                 }
-        request_headers = {**default_headers, **(tmpl.get("headers") or {})}
+        request_headers = _merge_request_headers(default_headers, tmpl.get("headers"))
         if body is not None:
             request_headers.setdefault("Content-Type", content_type)
+        expected_status = tmpl.get("expected_status", case.get("expected_status", 200))
+        category = case.get("category", "SMOKE")
         request = {
             "label": case.get("title", f"{method} {url}"),
             "method": method,
@@ -908,7 +965,7 @@ def _build_case_test_requests(
             "headers": request_headers,
             "body": body,
             "query_params": tmpl.get("query_params") or tmpl.get("params") or {},
-            "expected_status": tmpl.get("expected_status", case.get("expected_status", 200)),
+            "expected_status": expected_status,
             "response_schema": tmpl.get("response_schema") or case.get("response_schema"),
             "auto_schema_assertion": bool(tmpl.get("response_schema") or case.get("response_schema")),
             "schema_assertion_mode": tmpl.get(
@@ -917,10 +974,12 @@ def _build_case_test_requests(
             ),
             "depends_on": tmpl.get("depends_on") or case.get("depends_on"),
             "extract": tmpl.get("extract") or case.get("extract"),
-            "category": case.get("category", "SMOKE"),
+            "category": category,
             "assertions": case.get("assertions") or tmpl.get("assertions") or [],
             "request_body_source": "faker_json_schema" if body_generation else "case_template",
         }
+        if _is_auth_negative_probe(request):
+            request["headers"] = _strip_auth_like_headers(request_headers)
         if body_generation:
             request["mock_body_generation"] = body_generation
         requests.append(request)

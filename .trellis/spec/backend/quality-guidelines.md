@@ -709,6 +709,8 @@ assert _after_ui_login({"login_instructions": "demo", "login_verified": False}) 
 - `API_MAX_EXECUTED_REQUESTS` bounds real outbound HTTP attempts for an API run. Policy/dependency/environment skips do not consume this budget. Bound request selection before execution and report omitted candidates through summary metadata (`candidate_total`, `selected_total`, `omitted`, `budget_skipped`, `request_selection`); do not append one `execution_budget_exhausted` result row for every omitted request.
 - If a write method (`POST`, `PUT`, `PATCH`, `DELETE`) returns HTTP 405, treat it as `skip_type="environment_not_executable"` instead of a product failure. Record the 405 evidence, then skip later requests for the same origin + method without sending more traffic.
 - AUTH negative probes that expect `401/403` still pass when HTTP status or JSON envelope status is unauthorized. If such a probe returns HTTP 2xx instead, record an advisory finding (`advisory=True`, `skip_type="auth_advisory"`) and exclude it from the main pass-rate failure count.
+- AUTH negative probes that expect `401/403` must remove auth-like headers after merging default and case/template headers. Strip names such as `Authorization`, `Cookie`, `X-API-Key`, `API-Key`, and token/session/auth/csrf-like headers, even when generated case templates contain redacted placeholders.
+- Positive and non-AUTH requests must keep runtime `auth_headers` when generated case templates contain redacted or stale auth-like placeholders; template headers may add non-conflicting real headers, including `X-API-Key`, but must not overwrite prepared credentials and must not send redacted placeholder values as credentials.
 - Invalid-input `PARAM_VALIDATION` cases may pass when HTTP 2xx carries a clear business error envelope: top-level `code`/`status`/`status_code >= 400` or `success=false` plus a validation/error message. Business `code >= 500` should be stored as a warning/advisory field, not a main failure solely because the invalid input was rejected through the envelope. Auth failures remain strict.
 - API response bodies persisted in `api_execution_result` or `execution_result` must be safe for JSON storage. Non-JSON and non-text content types are stored as a summary (`content_type`, byte count, preview note), and text values must strip NUL/control characters before persistence.
 
@@ -723,6 +725,8 @@ assert _after_ui_login({"login_instructions": "demo", "login_verified": False}) 
 - Large OpenAPI schema with more executable requests than `API_MAX_EXECUTED_REQUESTS` -> select up to the budget, execute selected requests, keep omitted requests out of `results`, and report `budget_exhausted=true`, `budget_skipped=<omitted count>`, `omitted=<omitted count>`, and `request_selection`.
 - Write request returns HTTP 405 from nginx or an upstream method gate -> mark that request environment-not-executable, then skip same-origin same-method write requests without counting them as failures.
 - AUTH negative probe returns HTTP 200 with no unauthorized envelope -> record an advisory/security warning and keep main `failed` count unchanged.
+- AUTH negative curated case has `request_template.headers.Authorization="[REDACTED]"` and target returns HTTP 200 with `{"code":401}` when no token is sent -> strip auth-like headers, execute without credentials, and pass the case.
+- Non-AUTH curated case has `auth_headers.Authorization="Bearer real"`, `request_template.headers.Authorization="[REDACTED]"`, and `request_template.headers.X-API-Key="case-secret"` -> send `Bearer real`, skip the redacted placeholder, and retain non-conflicting real template headers such as `X-API-Key` and `X-Trace`.
 - Binary export response such as `application/octet-stream` -> persist only a safe summary; no `\u0000` or raw control characters may appear in serialized execution logs.
 
 ### 5. Good/Base/Bad Cases
@@ -734,6 +738,7 @@ assert _after_ui_login({"login_instructions": "demo", "login_verified": False}) 
 - Bad: skipped write requests or auth-positive checks are counted as failed, producing a false `BUG_FOUND` run.
 - Bad: a run has 10 curated `api_cases` but the runner ignores them and fans out 850 schema-derived requests.
 - Bad: budget exhaustion persists hundreds of `execution_budget_exhausted` result rows instead of focused result rows plus omitted metadata.
+- Bad: an AUTH negative "no token" case inherits `Authorization` from `auth_headers` or a generated template and tests the authenticated path.
 - Bad: a large OpenAPI document keeps sending every generated request until the Celery hard time limit kills the worker.
 - Bad: binary export bytes or NUL/control characters are persisted directly into `Task.execution_log`, breaking JSONB casts or UI history parsing.
 
@@ -750,6 +755,8 @@ assert _after_ui_login({"login_instructions": "demo", "login_verified": False}) 
 - Regression: `PARAM_VALIDATION` accepts HTTP 2xx business error envelopes with `code/status >=400` or `success=false` plus a message, including warning metadata for `code >=500`.
 - Regression: same-origin same-method write requests are skipped after a 405 environment method block and do not lower pass rate.
 - Regression: AUTH negative 200 responses are advisory/skipped while AUTH negative 401/403 responses still pass.
+- Regression: curated AUTH negative cases strip template/default auth-like headers and pass on HTTP 200 plus envelope `code/status/status_code=401/403`.
+- Regression: non-AUTH curated cases keep runtime auth headers even when templates contain redacted auth-like placeholders, and preserve non-conflicting real template headers such as `X-API-Key`.
 - Regression: binary/control-character responses are persisted as safe summaries or sanitized text in both `api_execution_result` and `execution_result`.
 - Preflight: response exposes executable/skipped/auth-required counts and policy warnings.
 

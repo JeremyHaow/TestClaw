@@ -1196,6 +1196,108 @@ async def test_api_runner_auth_negative_401_still_passes(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_api_runner_auth_case_strips_template_auth_headers_and_matches_envelope_401(
+    monkeypatch,
+) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+            self.text = json.dumps(payload)
+            self.content = self.text.encode()
+
+        def json(self) -> dict:
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            headers = kwargs.get("headers") or {}
+            if url.endswith("/private-no-token"):
+                assert not any(api_runner.is_sensitive_header(name) for name in headers)
+                return FakeResponse({"code": 401, "msg": "认证失败，无法访问系统资源"})
+            assert headers.get("Authorization") == "Bearer real-token"
+            return FakeResponse({"ok": True})
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "auth_headers": {"Authorization": "Bearer real-token", "Cookie": "sid=secret"},
+            "api_cases": [
+                {
+                    "title": "无Token访问",
+                    "category": "AUTH",
+                    "expected_status": [401, 403],
+                    "request_template": {
+                        "method": "GET",
+                        "path": "/private-no-token",
+                        "headers": {
+                            "Authorization": REDACTED_VALUE,
+                            "Cookie": "sid=template",
+                            "X-API-Key": REDACTED_VALUE,
+                            "API-Key": REDACTED_VALUE,
+                            "X-Token": REDACTED_VALUE,
+                            "X-Trace": "keep-me",
+                        },
+                    },
+                },
+                {
+                    "title": "with token",
+                    "category": "SMOKE",
+                    "request_template": {
+                        "method": "GET",
+                        "path": "/private",
+                        "headers": {
+                            "Authorization": REDACTED_VALUE,
+                            "authorization": REDACTED_VALUE,
+                            "Cookie": "sid=template",
+                            "X-Token": REDACTED_VALUE,
+                            "X-API-Key": "case-secret",
+                            "X-Trace": "keep-positive",
+                        },
+                    },
+                },
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+    auth_headers = calls[0]["headers"] or {}
+
+    assert len(calls) == 2
+    assert auth_headers == {"X-Trace": "keep-me"}
+    assert calls[1]["headers"]["Authorization"] == "Bearer real-token"
+    assert calls[1]["headers"]["Cookie"] == "sid=secret"
+    assert "authorization" not in calls[1]["headers"]
+    assert "X-Token" not in calls[1]["headers"]
+    assert calls[1]["headers"]["X-API-Key"] == "case-secret"
+    assert calls[1]["headers"]["X-Trace"] == "keep-positive"
+    assert api_result["passed"] == 2
+    assert api_result["failed"] == 0
+    assert api_result["results"][0]["category"] == "AUTH"
+    assert api_result["results"][0]["passed"] is True
+    assert api_result["results"][0]["envelope_status_code"] == 401
+
+
+@pytest.mark.asyncio
 async def test_api_runner_persists_safe_binary_and_control_character_response_summaries(monkeypatch) -> None:
     calls = []
 
