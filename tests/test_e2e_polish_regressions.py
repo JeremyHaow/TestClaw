@@ -930,7 +930,11 @@ async def test_reporter_uses_actual_execution_counts_not_plan_only() -> None:
     report = result["final_report"]
 
     assert report["api_test_summary"]["total"] == 1
+    assert report["api_test_summary"]["executed"] == 1
+    assert report["api_test_summary"]["has_execution"] is True
     assert report["ui_test_summary"]["total"] == 1
+    assert report["ui_test_summary"]["executed"] == 1
+    assert report["ui_test_summary"]["has_execution"] is True
     assert report["overall_verdict"] == "PASS"
     assert "API 测试执行 1 个请求" in report["summary"]
     assert "1 个通过、0 个失败" in report["summary"]
@@ -952,6 +956,8 @@ async def test_reporter_does_not_create_product_findings_from_plan_only_state() 
 
     assert report["overall_verdict"] == "NOT_EXECUTED"
     assert report["api_test_summary"]["total"] == 0
+    assert report["api_test_summary"]["executed"] == 0
+    assert report["api_test_summary"]["has_execution"] is False
     assert report["api_test_summary"]["planned_cases"] == 1
     assert report["bugs_found"] == []
     assert len(report["recommendations"]) == 1

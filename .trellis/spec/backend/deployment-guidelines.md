@@ -37,6 +37,7 @@
 - `nginx` in Compose is optional and must stay behind the `edge` profile.
 - `HTTP_PORT` only applies when starting the optional `edge` profile.
 - Do not start Compose `nginx` on a host where Caddy owns port `80`.
+- `api` and `worker` read the shared `../.env`; runtime API execution controls such as `API_MAX_EXECUTED_REQUESTS` must be configured there and both services recreated/restarted together.
 
 ### 4. Validation & Error Matrix
 

@@ -455,13 +455,13 @@ async def run(state: AgentState) -> AgentState:
         "api_test_summary": {
             **api_counts,
             "planned_cases": len(api_cases),
-            "executed": api_counts["executed"] > 0,
+            "has_execution": api_counts["executed"] > 0,
             "key_findings": api_findings,
         },
         "ui_test_summary": {
             **ui_counts,
             "planned_cases": len(ui_cases),
-            "executed": ui_counts["executed"] > 0,
+            "has_execution": ui_counts["executed"] > 0,
             "key_findings": ui_findings,
         },
         "bugs_found": _build_bug_findings(failure_details),
