@@ -46,7 +46,9 @@ def test_run_preflight_classifies_raw_openapi_and_reports_readiness() -> None:
     assert body["estimated_skipped_count"] == 0
     assert body["api_execution_policy"] == "safe_read_only"
     assert body["expected_flow"][0] == "识别输入"
-    assert any(check["key"] == "provider" and check["status"] == "missing" for check in body["checks"])
+    assert any(
+        check["key"] == "provider" and check["status"] == "missing" for check in body["checks"]
+    )
 
 
 def test_run_preflight_returns_structured_mission_preview(monkeypatch) -> None:
@@ -181,7 +183,9 @@ def _captcha_required_openapi() -> dict:
             "responses": {"200": {"description": "ok"}},
         }
     }
-    login_schema = document["paths"]["/auth/login"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+    login_schema = document["paths"]["/auth/login"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
     login_schema["required"] = ["username", "password", "code"]
     login_schema["properties"]["code"] = {"type": "string"}
     return document
@@ -283,7 +287,11 @@ def test_run_preflight_blocks_auth_required_api_without_credentials() -> None:
     auth_check = _check_by_key(body, "auth")
     assert auth_check["status"] == "missing"
     assert "必须提供 Token/Header" in auth_check["detail"]
-    auth_prompt = next(prompt for prompt in body["mission_preview"]["correction_prompts"] if prompt["key"] == "auth")
+    auth_prompt = next(
+        prompt
+        for prompt in body["mission_preview"]["correction_prompts"]
+        if prompt["key"] == "auth"
+    )
     assert auth_prompt["status"] == "missing"
     assert "Token" in auth_prompt["action"]
 
@@ -412,7 +420,9 @@ def test_run_preflight_api_dynamic_captcha_fetches_context_without_ocr(monkeypat
             return FakeCaptchaResponse()
 
         async def request(self, method: str, url: str, **kwargs):
-            raise AssertionError("API dynamic captcha preflight must not submit login without captcha text")
+            raise AssertionError(
+                "API dynamic captcha preflight must not submit login without captcha text"
+            )
 
     monkeypatch.setattr(api_auth.httpx, "AsyncClient", FakeAsyncClient)
 
@@ -600,7 +610,9 @@ def test_run_preflight_auto_auth_treats_app_level_failure_as_login_failure(monke
     assert "Token 路径" not in (body["auth_next_action"] or "")
 
 
-def test_run_preflight_auto_auth_prompts_for_token_path_when_login_has_no_token(monkeypatch) -> None:
+def test_run_preflight_auto_auth_prompts_for_token_path_when_login_has_no_token(
+    monkeypatch,
+) -> None:
     class FakeResponse:
         status_code = 200
         headers = {}
@@ -697,7 +709,9 @@ def test_run_preflight_auto_auth_extracts_cased_nested_authorization(monkeypatch
 def test_run_preflight_auto_auth_infers_login_url_body_and_token(monkeypatch) -> None:
     calls = []
     openapi = _auth_required_openapi()
-    login_schema = openapi["paths"]["/auth/login"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+    login_schema = openapi["paths"]["/auth/login"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
     login_schema["required"] = ["userName", "password", "code", "tenantId"]
     login_schema["properties"] = {
         "userName": {"type": "string"},
@@ -759,6 +773,267 @@ def test_run_preflight_auto_auth_infers_login_url_body_and_token(monkeypatch) ->
     assert body["auth_resolved"] is True
     assert body["auth_header_name"] == "Authorization"
     assert "inferred-token" not in json.dumps(body)
+
+
+def test_run_preflight_auto_auth_prefers_password_login_over_specialized_variants(
+    monkeypatch,
+) -> None:
+    calls = []
+
+    def login_operation(
+        *,
+        summary: str,
+        operation_id: str,
+        tags: list[str],
+        required: list[str],
+        properties: dict[str, dict[str, str]],
+    ) -> dict:
+        return {
+            "summary": summary,
+            "operationId": operation_id,
+            "tags": tags,
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": required,
+                            "properties": properties,
+                        }
+                    }
+                },
+            },
+            "responses": {"200": {"description": "ok"}},
+        }
+
+    openapi = _auth_required_openapi()
+    openapi["paths"] = {
+        "/xcxLogin": {
+            "post": login_operation(
+                summary="Mini program login",
+                operation_id="xcxLogin",
+                tags=["wechat"],
+                required=["xcxCode"],
+                properties={"xcxCode": {"type": "string"}},
+            )
+        },
+        "/smsLogin": {
+            "post": login_operation(
+                summary="SMS login",
+                operation_id="smsLogin",
+                tags=["sms"],
+                required=["phone", "smsCode"],
+                properties={"phone": {"type": "string"}, "smsCode": {"type": "string"}},
+            )
+        },
+        "/emailLogin": {
+            "post": login_operation(
+                summary="Email login",
+                operation_id="emailLogin",
+                tags=["email"],
+                required=["email", "emailCode"],
+                properties={"email": {"type": "string"}, "emailCode": {"type": "string"}},
+            )
+        },
+        "/oauth/token": {
+            "post": login_operation(
+                summary="OAuth authorization code token exchange",
+                operation_id="oauthToken",
+                tags=["oauth"],
+                required=["grantType", "oauthCode"],
+                properties={"grantType": {"type": "string"}, "oauthCode": {"type": "string"}},
+            )
+        },
+        "/logout": {
+            "post": login_operation(
+                summary="Auth logout",
+                operation_id="authLogout",
+                tags=["auth"],
+                required=["token"],
+                properties={"token": {"type": "string"}},
+            )
+        },
+        "/refreshToken": {
+            "post": login_operation(
+                summary="Refresh auth token",
+                operation_id="refreshToken",
+                tags=["auth"],
+                required=["refreshToken"],
+                properties={"refreshToken": {"type": "string"}},
+            )
+        },
+        "/register": {
+            "post": login_operation(
+                summary="Register account",
+                operation_id="register",
+                tags=["auth"],
+                required=["mobile", "smsCode", "password"],
+                properties={
+                    "mobile": {"type": "string"},
+                    "smsCode": {"type": "string"},
+                    "password": {"type": "string"},
+                },
+            )
+        },
+        "/captchaLogin": {
+            "post": login_operation(
+                summary="Captcha login",
+                operation_id="captchaLogin",
+                tags=["auth"],
+                required=["username", "password", "captcha"],
+                properties={
+                    "username": {"type": "string"},
+                    "password": {"type": "string"},
+                    "captcha": {"type": "string"},
+                },
+            )
+        },
+        "/login": {
+            "post": login_operation(
+                summary="Account password login",
+                operation_id="passwordLogin",
+                tags=["auth"],
+                required=["loginName", "pwd"],
+                properties={"loginName": {"type": "string"}, "pwd": {"type": "string"}},
+            )
+        },
+        "/private": {
+            "get": {
+                "summary": "Private endpoint",
+                "security": [{"BearerAuth": []}],
+                "responses": {"200": {"description": "ok"}},
+            }
+        },
+    }
+
+    class FakeResponse:
+        status_code = 200
+        headers = {}
+
+        def json(self) -> dict:
+            return {"data": {"token": "variant-login-token"}}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setattr(api_auth.httpx, "AsyncClient", FakeAsyncClient)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": json.dumps(openapi),
+                "test_type": "api",
+                "auth_mode": "auto",
+                "captcha_mode": "none",
+                "auth_credentials": {"username": "admin", "password": "secret"},
+                "auth_config": {"enabled": True},
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert calls[0]["url"] == "https://api.example.test/login"
+    assert calls[0]["json"] == {"loginName": "admin", "pwd": "secret"}
+    body = response.json()
+    assert body["auth_resolved"] is True
+    assert "variant-login-token" not in json.dumps(body)
+
+
+def test_run_preflight_auto_auth_resolves_inferred_login_under_openapi_server_base(
+    monkeypatch,
+) -> None:
+    calls = []
+    openapi = _auth_required_openapi()
+    openapi["servers"] = [{"url": "https://wms.qunsun.me/api"}]
+    openapi["paths"] = {
+        "/login": {
+            "post": {
+                "summary": "Account password login",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": ["username", "password"],
+                                "properties": {
+                                    "username": {"type": "string"},
+                                    "password": {"type": "string"},
+                                },
+                            }
+                        }
+                    },
+                },
+                "responses": {"200": {"description": "ok"}},
+            }
+        },
+        "/private": {
+            "get": {
+                "summary": "Private endpoint",
+                "security": [{"BearerAuth": []}],
+                "responses": {"200": {"description": "ok"}},
+            }
+        },
+    }
+
+    class FakeResponse:
+        status_code = 200
+        headers = {}
+
+        def json(self) -> dict:
+            return {"data": {"token": "wms-login-token"}}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setattr(api_auth.httpx, "AsyncClient", FakeAsyncClient)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": json.dumps(openapi),
+                "test_type": "api",
+                "auth_mode": "auto",
+                "captcha_mode": "none",
+                "auth_credentials": {"username": "admin", "password": "secret"},
+                "auth_config": {"enabled": True},
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["target_url"] == "https://wms.qunsun.me/api"
+    assert calls[0]["url"] == "https://wms.qunsun.me/api/login"
+    assert calls[0]["json"] == {"username": "admin", "password": "secret"}
+    assert calls[1]["url"] == "https://wms.qunsun.me/api/private"
+    assert "wms-login-token" not in json.dumps(response.json())
 
 
 def test_create_run_rejects_auth_required_api_without_token_header_or_auto_auth() -> None:

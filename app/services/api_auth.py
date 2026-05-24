@@ -88,23 +88,285 @@ def join_auth_url(base_url: str, login_url: str) -> str:
     return urljoin(base.rstrip("/") + "/", login_url.lstrip("/"))
 
 
-def infer_login_url(endpoints: list[dict[str, Any]], base_url: str) -> str | None:
+def _normalize_name(value: str) -> str:
+    return "".join(ch.lower() for ch in str(value or "") if ch.isalnum())
+
+
+_LOGIN_METHODS = {"POST", "PUT", "PATCH"}
+_LOGIN_MARKERS = ("login", "signin", "token", "auth")
+_SIMPLE_LOGIN_PATHS = {"/login", "/auth/login", "/user/login", "/system/login"}
+_SIMPLE_LOGIN_SEGMENTS = {"login", "signin"}
+_SPECIALIZED_LOGIN_MARKERS = (
+    "xcx",
+    "sms",
+    "email",
+    "wechat",
+    "weixin",
+    "oauth",
+    "sso",
+    "refresh",
+    "logout",
+    "register",
+    "captcha",
+)
+_NON_LOGIN_MARKERS = {"refresh", "logout", "register", "captcha"}
+_SPECIALIZED_CODE_MARKERS = {"xcx", "sms", "email", "wechat", "weixin", "oauth", "sso"}
+_JSON_SCHEMA_KEYWORDS = {
+    "type",
+    "required",
+    "properties",
+    "items",
+    "allof",
+    "anyof",
+    "oneof",
+    "description",
+    "title",
+    "format",
+    "default",
+    "example",
+    "enum",
+    "nullable",
+    "additionalproperties",
+}
+
+
+def _endpoint_text(endpoint: dict[str, Any]) -> str:
+    tags = endpoint.get("tags")
+    tag_text = " ".join(str(tag) for tag in tags) if isinstance(tags, list) else str(tags or "")
+    return " ".join(
+        str(value or "")
+        for value in (
+            endpoint.get("path"),
+            endpoint.get("summary"),
+            endpoint.get("operationId"),
+            endpoint.get("description"),
+            tag_text,
+        )
+    )
+
+
+def _schema_field_names(schema: Any) -> list[str]:
+    if not isinstance(schema, dict):
+        return []
+    fields: list[str] = []
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        fields.extend(str(name) for name in properties)
+    else:
+        for name in schema:
+            normalized = _normalize_name(str(name))
+            if normalized not in _JSON_SCHEMA_KEYWORDS:
+                fields.append(str(name))
+    required = schema.get("required")
+    if isinstance(required, list):
+        fields.extend(str(name) for name in required)
+    return fields
+
+
+def _endpoint_field_names(endpoint: dict[str, Any]) -> list[str]:
+    fields = _schema_field_names(endpoint.get("request_body_schema"))
+    required_fields = endpoint.get("required_fields")
+    if isinstance(required_fields, list):
+        fields.extend(str(name) for name in required_fields)
+    for group in ("path_params", "query_params", "header_params"):
+        params = endpoint.get(group)
+        if not isinstance(params, list):
+            continue
+        for param in params:
+            if isinstance(param, dict) and param.get("name"):
+                fields.append(str(param["name"]))
+
+    seen: set[str] = set()
+    unique_fields: list[str] = []
+    for field_name in fields:
+        normalized = _normalize_name(field_name)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_fields.append(field_name)
+    return unique_fields
+
+
+def _endpoint_required_field_names(endpoint: dict[str, Any]) -> list[str]:
+    required: list[str] = []
+    schema = endpoint.get("request_body_schema")
+    if isinstance(schema, dict) and isinstance(schema.get("required"), list):
+        required.extend(str(name) for name in schema["required"])
+    required_fields = endpoint.get("required_fields")
+    if isinstance(required_fields, list):
+        required.extend(str(name) for name in required_fields)
+    for group in ("path_params", "query_params", "header_params"):
+        params = endpoint.get(group)
+        if not isinstance(params, list):
+            continue
+        for param in params:
+            if isinstance(param, dict) and param.get("required") and param.get("name"):
+                required.append(str(param["name"]))
+
+    seen: set[str] = set()
+    unique_required: list[str] = []
+    for field_name in required:
+        normalized = _normalize_name(field_name)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_required.append(field_name)
+    return unique_required
+
+
+def _login_field_kind(field_name: str) -> str | None:
+    normalized = _normalize_name(field_name)
+    if any(
+        marker in normalized
+        for marker in ("username", "useraccount", "account", "loginname", "loginid")
+    ):
+        return "username"
+    if any(marker in normalized for marker in ("mobile", "phone")):
+        return "username"
+    if any(marker in normalized for marker in ("password", "passwd", "pwd")):
+        return "password"
+    if any(marker in normalized for marker in ("tenant", "tenantid", "tenantcode")):
+        return "tenant"
+    if any(
+        marker in normalized
+        for marker in ("captcha", "verifycode", "verificationcode", "validcode", "validatecode")
+    ):
+        return "captcha"
+    if normalized == "code":
+        return "captcha"
+    return None
+
+
+def _specialized_code_field(field_name: str) -> bool:
+    normalized = _normalize_name(field_name)
+    return "code" in normalized and any(
+        marker in normalized for marker in _SPECIALIZED_CODE_MARKERS
+    )
+
+
+def _body_supplies_field(body: Any, field_name: str) -> bool:
+    if not isinstance(body, dict):
+        return False
+    normalized_field = _normalize_name(field_name)
+    for key, value in body.items():
+        if _normalize_name(str(key)) != normalized_field:
+            continue
+        return value is not None and not (isinstance(value, str) and not value.strip())
+    return False
+
+
+def _config_supplies_field(
+    field_name: str,
+    *,
+    config_data: dict[str, Any],
+    credentials: dict[str, str],
+) -> bool:
+    body = config_data.get("body")
+    if _body_supplies_field(body, field_name):
+        return True
+    if _specialized_code_field(field_name):
+        return False
+    kind = _login_field_kind(field_name)
+    if kind and credentials.get(kind):
+        return True
+    return False
+
+
+def _login_endpoint_score(
+    endpoint: dict[str, Any], config_data: dict[str, Any]
+) -> tuple[int, int, int]:
+    path = str(endpoint.get("path") or "").strip()
+    path_lower = path.lower().rstrip("/") or path.lower()
+    normalized_path = _normalize_name(path)
+    segments = [segment for segment in path_lower.split("/") if segment]
+    last_segment = _normalize_name(segments[-1]) if segments else ""
+    text = _endpoint_text(endpoint)
+    normalized_text = _normalize_name(text)
+    field_names = _endpoint_field_names(endpoint)
+    required_fields = _endpoint_required_field_names(endpoint)
+    credentials = _simple_credentials(config_data)
+
+    score = 0
+    if path_lower in _SIMPLE_LOGIN_PATHS:
+        score += 45
+    if last_segment in _SIMPLE_LOGIN_SEGMENTS:
+        score += 80
+    elif last_segment == "token":
+        score += 30
+    if "login" in normalized_path:
+        score += 35
+    if "signin" in normalized_path:
+        score += 25
+    if "token" in normalized_path:
+        score += 10
+    if "auth" in normalized_path:
+        score += 8
+
+    has_username = any(_login_field_kind(field) == "username" for field in field_names)
+    has_password = any(_login_field_kind(field) == "password" for field in field_names)
+    if has_username and has_password:
+        score += 90
+    elif has_password:
+        score += 30
+    elif has_username:
+        score += 20
+
+    missing_required = [
+        field
+        for field in required_fields
+        if not _config_supplies_field(field, config_data=config_data, credentials=credentials)
+    ]
+    body_supplied_count = sum(
+        1 for field in required_fields if _body_supplies_field(config_data.get("body"), field)
+    )
+    if required_fields and body_supplied_count == len(required_fields):
+        score += 120
+    else:
+        score += 35 * body_supplied_count
+    score += 30 * (len(required_fields) - len(missing_required))
+    score -= 45 * len(missing_required)
+    score -= 70 * sum(1 for field in missing_required if _specialized_code_field(field))
+
+    specialized_hits = [
+        marker
+        for marker in _SPECIALIZED_LOGIN_MARKERS
+        if marker in normalized_text or marker in normalized_path
+    ]
+    if specialized_hits:
+        schema_matches = bool(required_fields) and not missing_required
+        score -= (10 if schema_matches else 55) * len(set(specialized_hits))
+
+    for marker in _NON_LOGIN_MARKERS:
+        if marker in normalized_text or marker in normalized_path:
+            score -= 120
+    if last_segment in _NON_LOGIN_MARKERS:
+        score -= 80
+
+    return score, len(missing_required), len(set(specialized_hits))
+
+
+def infer_login_url(
+    endpoints: list[dict[str, Any]],
+    base_url: str,
+    config: Any = None,
+) -> str | None:
     if not base_url:
         return None
-    login_markers = ("login", "signin", "sign-in", "token", "auth")
-    candidates: list[dict[str, Any]] = []
-    for endpoint in endpoints:
+    config_data = coerce_auth_config(config)
+    candidates: list[tuple[int, int, int, int, int, dict[str, Any]]] = []
+    for index, endpoint in enumerate(endpoints):
         path = str(endpoint.get("path") or "")
         method = str(endpoint.get("method") or "GET").upper()
-        if method not in {"POST", "PUT", "PATCH"}:
+        if method not in _LOGIN_METHODS:
             continue
-        lowered = path.lower()
-        if any(marker in lowered for marker in login_markers):
-            candidates.append(endpoint)
+        normalized_text = _normalize_name(_endpoint_text(endpoint))
+        if any(marker in normalized_text for marker in _LOGIN_MARKERS):
+            score, missing_count, specialized_count = _login_endpoint_score(endpoint, config_data)
+            candidates.append((score, missing_count, specialized_count, len(path), index, endpoint))
     if not candidates:
         return None
-    candidates.sort(key=lambda item: 0 if "login" in str(item.get("path", "")).lower() else 1)
-    return join_auth_url(base_url, str(candidates[0].get("path") or ""))
+    candidates.sort(key=lambda item: (-item[0], item[1], item[2], item[3], item[4]))
+    return join_auth_url(base_url, str(candidates[0][5].get("path") or ""))
 
 
 def infer_captcha_url(endpoints: list[dict[str, Any]], base_url: str) -> str | None:
@@ -368,10 +630,6 @@ async def load_auth_endpoints(source: str, input_type: str) -> tuple[str, list[d
     return content, parse_api_document_content(content)
 
 
-def _normalize_name(value: str) -> str:
-    return "".join(ch.lower() for ch in str(value or "") if ch.isalnum())
-
-
 def _simple_credentials(config: dict[str, Any]) -> dict[str, str]:
     credentials: dict[str, str] = {}
     for name in ("username", "password", "captcha", "tenant"):
@@ -387,17 +645,36 @@ def _credential_for_field(field_name: str, credentials: dict[str, str]) -> str |
         return None
     if credentials.get("username") and any(
         marker in normalized
-        for marker in ("username", "useraccount", "account", "loginname", "loginid", "mobile", "phone")
+        for marker in (
+            "username",
+            "useraccount",
+            "account",
+            "loginname",
+            "loginid",
+            "mobile",
+            "phone",
+        )
     ):
         return credentials["username"]
-    if credentials.get("password") and any(marker in normalized for marker in ("password", "passwd", "pwd")):
+    if credentials.get("password") and any(
+        marker in normalized for marker in ("password", "passwd", "pwd")
+    ):
         return credentials["password"]
     if credentials.get("captcha") and any(
         marker in normalized
-        for marker in ("captcha", "verifycode", "verificationcode", "validcode", "validatecode", "code")
+        for marker in (
+            "captcha",
+            "verifycode",
+            "verificationcode",
+            "validcode",
+            "validatecode",
+            "code",
+        )
     ):
         return credentials["captcha"]
-    if credentials.get("tenant") and any(marker in normalized for marker in ("tenant", "tenantid", "tenantcode")):
+    if credentials.get("tenant") and any(
+        marker in normalized for marker in ("tenant", "tenantid", "tenantcode")
+    ):
         return credentials["tenant"]
     return None
 
@@ -406,14 +683,29 @@ def _input_key_for_field(field_name: str) -> str:
     normalized = _normalize_name(field_name)
     if any(
         marker in normalized
-        for marker in ("username", "useraccount", "account", "loginname", "loginid", "mobile", "phone")
+        for marker in (
+            "username",
+            "useraccount",
+            "account",
+            "loginname",
+            "loginid",
+            "mobile",
+            "phone",
+        )
     ):
         return "username"
     if any(marker in normalized for marker in ("password", "passwd", "pwd")):
         return "password"
     if any(
         marker in normalized
-        for marker in ("captcha", "verifycode", "verificationcode", "validcode", "validatecode", "code")
+        for marker in (
+            "captcha",
+            "verifycode",
+            "verificationcode",
+            "validcode",
+            "validatecode",
+            "code",
+        )
     ):
         return "captcha"
     return "login_body"
@@ -446,7 +738,9 @@ def _match_login_endpoint(endpoints: list[dict[str, Any]], login_url: str) -> di
     return None
 
 
-def build_login_body(config: dict[str, Any], login_endpoint: dict[str, Any] | None = None) -> dict[str, Any]:
+def build_login_body(
+    config: dict[str, Any], login_endpoint: dict[str, Any] | None = None
+) -> dict[str, Any]:
     body = config.get("body")
     if isinstance(body, dict) and body:
         return body
@@ -508,7 +802,7 @@ def login_endpoint_for_config(
     if login_url:
         login_url = join_auth_url(target_url, login_url)
     else:
-        login_url = infer_login_url(endpoints, target_url) or ""
+        login_url = infer_login_url(endpoints, target_url, config=config_data) or ""
     if not login_url:
         return None, None
     return login_url, _match_login_endpoint(endpoints, login_url)
@@ -694,7 +988,9 @@ async def fetch_captcha_context(
         endpoint=captcha_url,
         context=context,
         captcha_text=captcha_text,
-        detail="已获取验证码上下文字段" if not captcha_text else "已获取验证码上下文字段和明文验证码",
+        detail="已获取验证码上下文字段"
+        if not captcha_text
+        else "已获取验证码上下文字段和明文验证码",
     )
 
 
@@ -725,7 +1021,14 @@ async def resolve_auto_auth_headers(
         try:
             if loaded_endpoints is None:
                 _, loaded_endpoints = await load_auth_endpoints(source, input_type)
-            login_url = infer_login_url(loaded_endpoints or [], target_url) or ""
+            login_url = (
+                infer_login_url(
+                    loaded_endpoints or [],
+                    target_url,
+                    config=config_data,
+                )
+                or ""
+            )
         except Exception:
             login_url = ""
     else:
@@ -812,7 +1115,9 @@ async def resolve_auto_auth_headers(
             next_action = "登录接口拒绝了请求体，请在高级登录选项中补充或调整登录请求体 JSON。"
         elif response.status_code in {401, 403}:
             missing_inputs = ["username", "password", "captcha", "login_headers"]
-            next_action = "检查账号、密码、验证码；如果接口还需要额外 Header，请在高级登录选项中补充。"
+            next_action = (
+                "检查账号、密码、验证码；如果接口还需要额外 Header，请在高级登录选项中补充。"
+            )
         else:
             missing_inputs = ["login_url", "login_body"]
             next_action = "检查登录 URL、请求体和目标环境状态。"
@@ -862,7 +1167,9 @@ async def resolve_auto_auth_headers(
 
     token_prefix_value = config_data["token_prefix"] if "token_prefix" in config_data else "Bearer"
     token_prefix = "" if token_prefix_value is None else str(token_prefix_value)
-    header_value = token if header_name.lower() == "cookie" else format_token_header(token, token_prefix)
+    header_value = (
+        token if header_name.lower() == "cookie" else format_token_header(token, token_prefix)
+    )
     return AuthResolution(
         ok=True,
         headers={header_name: header_value},

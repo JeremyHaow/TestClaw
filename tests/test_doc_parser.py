@@ -2,12 +2,16 @@ from app.tools.doc_parser import parse_api_document_content
 
 
 def test_parse_openapi_document():
-    content = '{"openapi":"3.0.0","paths":{"/users":{"get":{"summary":"List users"}}}}'
+    content = (
+        '{"openapi":"3.0.0","paths":{"/users":{"get":'
+        '{"summary":"List users","description":"Returns active users"}}}}'
+    )
     endpoints = parse_api_document_content(content, "openapi")
     assert len(endpoints) == 1
     assert endpoints[0]["path"] == "/users"
     assert endpoints[0]["method"] == "GET"
     assert endpoints[0]["summary"] == "List users"
+    assert endpoints[0]["description"] == "Returns active users"
     assert endpoints[0]["operationId"] == ""
     assert endpoints[0]["query_params"] == []
     assert endpoints[0]["response_status"] == "200"

@@ -29,7 +29,9 @@ def _extract_parameters(operation: dict, path_item: dict) -> dict:
             "type": p.get("type") or param_schema.get("type", "string"),
             "description": p.get("description", ""),
             "enum": p.get("enum") or param_schema.get("enum") or [],
-            "default": p.get("default") if p.get("default") is not None else param_schema.get("default"),
+            "default": p.get("default")
+            if p.get("default") is not None
+            else param_schema.get("default"),
             "example": p.get("example") or param_schema.get("example"),
         }
         if loc == "path":
@@ -38,7 +40,11 @@ def _extract_parameters(operation: dict, path_item: dict) -> dict:
             query_params.append(entry)
         elif loc == "header":
             header_params.append(entry)
-    return {"path_params": path_params, "query_params": query_params, "header_params": header_params}
+    return {
+        "path_params": path_params,
+        "query_params": query_params,
+        "header_params": header_params,
+    }
 
 
 def _extract_request_body_v3(operation: dict) -> dict | None:
@@ -54,7 +60,11 @@ def _extract_request_body_v3(operation: dict) -> dict | None:
     # Fallback: take first content type
     if content:
         ct, body = next(iter(content.items()))
-        return {"content_type": ct, "schema": body.get("schema", {}), "required": rb.get("required", False)}
+        return {
+            "content_type": ct,
+            "schema": body.get("schema", {}),
+            "required": rb.get("required", False),
+        }
     return None
 
 
@@ -69,13 +79,18 @@ def _extract_request_body_v2(operation: dict) -> dict | None:
             }
     # Check for formData parameters (file uploads)
     form_params = [
-        p for p in operation.get("parameters", [])
+        p
+        for p in operation.get("parameters", [])
         if isinstance(p, dict) and p.get("in") == "formData"
     ]
     if form_params:
         has_file = any(p.get("type") == "file" for p in form_params)
         consumes = operation.get("consumes", [])
-        ct = "multipart/form-data" if has_file or "multipart/form-data" in consumes else "application/x-www-form-urlencoded"
+        ct = (
+            "multipart/form-data"
+            if has_file or "multipart/form-data" in consumes
+            else "application/x-www-form-urlencoded"
+        )
         schema = {p.get("name", ""): p.get("type", "string") for p in form_params if p.get("name")}
         return {
             "content_type": ct,
@@ -143,13 +158,16 @@ def _normalize_openapi_document_v3(document: dict[str, Any]) -> list[dict[str, A
             params = _extract_parameters(operation, path_item)
             request_body = _extract_request_body_v3(operation)
             response = _extract_responses(operation)
-            req_schema = resolve_json_schema(request_body["schema"], document) if request_body else None
+            req_schema = (
+                resolve_json_schema(request_body["schema"], document) if request_body else None
+            )
             resp_schema = resolve_json_schema(response["schema"], document) if response else None
 
             endpoint = {
                 "path": path,
                 "method": method.upper(),
                 "summary": operation.get("summary", ""),
+                "description": operation.get("description", ""),
                 "operationId": operation.get("operationId", ""),
                 "tags": operation.get("tags", []),
                 "path_params": params["path_params"],
@@ -159,9 +177,8 @@ def _normalize_openapi_document_v3(document: dict[str, Any]) -> list[dict[str, A
                 "request_body_content_type": request_body["content_type"] if request_body else None,
                 "response_schema": resp_schema,
                 "response_status": response["status_code"] if response else "200",
-                "required_fields": (
-                    _extract_required_fields(req_schema) if req_schema else []
-                ) + [p["name"] for p in params["path_params"] if p.get("required")],
+                "required_fields": (_extract_required_fields(req_schema) if req_schema else [])
+                + [p["name"] for p in params["path_params"] if p.get("required")],
                 "auth_required": _has_auth(operation, document),
                 "example_request": (
                     _generate_example(req_schema, document) if req_schema else None
@@ -205,6 +222,7 @@ def _normalize_openapi_document_v2(document: dict[str, Any]) -> list[dict[str, A
                 "path": path,
                 "method": method.upper(),
                 "summary": operation.get("summary", ""),
+                "description": operation.get("description", ""),
                 "operationId": operation.get("operationId", ""),
                 "tags": operation.get("tags", []),
                 "path_params": params["path_params"],
@@ -214,12 +232,13 @@ def _normalize_openapi_document_v2(document: dict[str, Any]) -> list[dict[str, A
                 "request_body_content_type": request_body["content_type"] if request_body else None,
                 "response_schema": resp_schema,
                 "response_status": response["status_code"] if response else "200",
-                "required_fields": (
-                    _extract_required_fields(req_schema) if req_schema else []
-                ) + [p["name"] for p in params["path_params"] if p.get("required")],
+                "required_fields": (_extract_required_fields(req_schema) if req_schema else [])
+                + [p["name"] for p in params["path_params"] if p.get("required")],
                 "auth_required": _has_auth(operation, document),
                 "example_request": _generate_example(req_schema, document) if req_schema else None,
-                "example_response": _generate_example(resp_schema, document) if resp_schema else None,
+                "example_response": _generate_example(resp_schema, document)
+                if resp_schema
+                else None,
             }
             endpoints.append(endpoint)
     return endpoints
@@ -276,7 +295,9 @@ def _normalize_postman_collection(document: dict[str, Any]) -> list[dict[str, An
     return endpoints
 
 
-def parse_api_document_content(raw_content: str, format_hint: str | None = None) -> list[dict[str, Any]]:
+def parse_api_document_content(
+    raw_content: str, format_hint: str | None = None
+) -> list[dict[str, Any]]:
     text = raw_content.strip()
     if not text:
         return []
