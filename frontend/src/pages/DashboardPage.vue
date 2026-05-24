@@ -63,7 +63,7 @@ const statCards = [
       <div
         v-for="stat in statCards"
         :key="stat.key"
-        class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm transition-all hover:shadow-md hover:border-blue-200 group"
+        class="bg-white p-6 rounded-lg border border-gray-200 shadow-sm transition-all hover:shadow-md hover:border-blue-200 group"
       >
         <div class="flex items-center justify-between mb-4">
           <div class="p-2.5 rounded-lg transition-transform group-hover:scale-110" :class="[stat.bg, stat.color]">
@@ -81,7 +81,7 @@ const statCards = [
 
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
       <!-- Trend Chart -->
-      <div class="lg:col-span-2 bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+      <div class="lg:col-span-2 bg-white border border-gray-200 rounded-lg shadow-sm p-6">
         <div class="flex items-center justify-between mb-6">
           <h3 class="font-semibold text-gray-900">近 7 天任务趋势</h3>
           <TrendingUp :size="16" class="text-gray-400" />
@@ -102,7 +102,7 @@ const statCards = [
       </div>
 
       <!-- Status Distribution -->
-      <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+      <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
         <h3 class="font-semibold text-gray-900 mb-4">状态分布</h3>
         <div class="space-y-3">
           <div v-for="(count, status) in stats.tasks_by_status" :key="status"
@@ -115,7 +115,7 @@ const statCards = [
     </div>
 
     <!-- Recent Activity -->
-    <div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+    <div class="bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
       <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
         <h3 class="font-semibold text-gray-900">最近执行记录</h3>
         <button @click="router.push('/history')" class="text-xs font-bold text-blue-600 hover:underline px-3 py-1">

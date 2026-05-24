@@ -7,6 +7,7 @@ import LoadingSpinner from '../components/LoadingSpinner.vue'
 import EmptyState from '../components/EmptyState.vue'
 import SearchInput from '../components/SearchInput.vue'
 import Pagination from '../components/Pagination.vue'
+import StyledSelect from '../components/StyledSelect.vue'
 import { useTaskStore } from '../stores/tasks'
 import { useToast } from '../composables/useToast'
 import { Plus, Beaker } from 'lucide-vue-next'
@@ -96,7 +97,7 @@ async function submit() {
       <div class="flex gap-2">
         <button
           @click="showCreate = !showCreate"
-          class="flex items-center gap-2 px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all shadow-md shadow-blue-600/10 active:scale-95"
+          class="flex items-center gap-2 px-5 py-2 bg-gray-950 hover:bg-gray-800 text-white rounded-lg text-xs font-bold transition-all shadow-md shadow-blue-600/10 active:scale-95"
         >
           <Plus :size="14" /> 新建任务
         </button>
@@ -104,7 +105,7 @@ async function submit() {
     </div>
 
     <!-- Create Form -->
-    <div v-if="showCreate" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+    <div v-if="showCreate" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
       <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">创建新任务</h3>
       <form class="grid grid-cols-1 md:grid-cols-2 gap-4" @submit.prevent="submit">
         <div class="md:col-span-2">
@@ -119,32 +120,29 @@ async function submit() {
         </div>
         <div>
           <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">测试类型</label>
-          <select v-model="form.test_type"
-            class="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:bg-white transition-all">
+          <StyledSelect v-model="form.test_type">
             <option value="full">full</option>
             <option value="ui">ui</option>
             <option value="api">api</option>
             <option value="functional">functional</option>
-          </select>
+          </StyledSelect>
         </div>
         <div>
           <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">关联文档</label>
-          <select v-model="form.api_doc_id"
-            class="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:bg-white transition-all">
+          <StyledSelect v-model="form.api_doc_id">
             <option value="">不关联</option>
             <option v-for="doc in documents" :key="doc.id" :value="doc.id">{{ doc.name || `Document-${doc.format}` }}</option>
-          </select>
+          </StyledSelect>
         </div>
         <div>
           <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">执行环境</label>
-          <select v-model="form.environment_id"
-            class="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:bg-white transition-all">
+          <StyledSelect v-model="form.environment_id">
             <option value="">不关联</option>
             <option v-for="env in environments" :key="env.id" :value="env.id">{{ env.name }}</option>
-          </select>
+          </StyledSelect>
         </div>
         <div class="md:col-span-2 flex gap-3">
-          <button type="submit" class="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-bold transition-all shadow-md shadow-blue-600/10">
+          <button type="submit" class="px-6 py-2.5 bg-gray-950 hover:bg-gray-800 text-white rounded-lg text-sm font-bold transition-all shadow-md shadow-blue-600/10">
             创建任务
           </button>
           <button type="button" @click="showCreate = false" class="px-6 py-2.5 bg-white border border-gray-200 hover:bg-gray-50 text-gray-700 rounded-lg text-sm font-bold transition-all">
@@ -155,7 +153,7 @@ async function submit() {
     </div>
 
     <!-- Task List -->
-    <div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+    <div class="bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
       <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
         <h3 class="font-semibold text-gray-900">任务列表</h3>
         <span class="text-xs text-gray-400 font-mono">{{ total }} 条记录</span>

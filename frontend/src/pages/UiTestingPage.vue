@@ -136,7 +136,7 @@ function getLineColor(line: any) {
     <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
       <!-- Config + Quick Actions -->
       <div class="lg:col-span-4 space-y-4">
-        <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 space-y-4">
+        <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-5 space-y-4">
           <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">测试配置</h3>
           <div>
             <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">目标 URL</label>
@@ -149,14 +149,14 @@ function getLineColor(line: any) {
               class="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:bg-white transition-all resize-none" />
           </div>
           <button @click="generateScript" :disabled="generating || !url"
-            class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-sm font-bold transition-all shadow-md flex items-center justify-center gap-2">
+            class="w-full py-2.5 bg-gray-950 hover:bg-gray-800 disabled:opacity-50 text-white rounded-lg text-sm font-bold transition-all shadow-md flex items-center justify-center gap-2">
             <Sparkles :size="16" />
             {{ generating ? 'AI 生成中...' : 'AI 生成测试步骤' }}
           </button>
         </div>
 
         <!-- Quick Commands -->
-        <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 space-y-3">
+        <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-5 space-y-3">
           <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">快捷命令</h3>
           <div class="grid grid-cols-3 gap-2">
             <button v-for="qc in quickCommands" :key="qc.cmd"
@@ -171,7 +171,7 @@ function getLineColor(line: any) {
             <input v-model="quickCommand" placeholder="输入命令..." @keydown.enter="runCustomCommand"
               class="flex-1 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-xs font-mono outline-none focus:border-blue-500" />
             <button @click="runCustomCommand" :disabled="executing || !quickCommand"
-              class="px-3 py-2 bg-gray-900 hover:bg-black disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-all">
+              class="px-3 py-2 bg-gray-950 hover:bg-gray-800 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-all">
               <Play :size="12" />
             </button>
           </div>
@@ -192,17 +192,17 @@ function getLineColor(line: any) {
           </button>
         </div>
 
-        <div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+        <div class="bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
           <div class="px-4 py-2 border-b border-gray-100 flex items-center gap-2 bg-gray-50">
             <Terminal :size="14" class="text-gray-400" />
             <span class="text-xs text-gray-500 font-mono">playwright-cli commands</span>
           </div>
           <textarea v-model="script" rows="12" placeholder="# Playwright CLI 测试命令（每行一个）&#10;# 例如：&#10;open https://example.com&#10;snapshot&#10;click button[submit]&#10;screenshot step1.png"
-            class="w-full px-4 py-3 bg-gray-900 text-green-400 font-mono text-sm outline-none resize-none border-0 focus:ring-0" />
+            class="w-full px-4 py-3 bg-gray-950 text-green-400 font-mono text-sm outline-none resize-none border-0 focus:ring-0" />
         </div>
 
         <!-- Execution Log -->
-        <div class="bg-gray-900 border border-gray-700 rounded-xl shadow-sm overflow-hidden">
+        <div class="bg-gray-950 border border-gray-700 rounded-lg shadow-sm overflow-hidden">
           <div class="px-4 py-2 border-b border-gray-700 flex items-center gap-2">
             <div class="flex gap-1.5">
               <div class="w-3 h-3 rounded-full bg-red-500"></div>

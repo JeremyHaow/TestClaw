@@ -8,6 +8,7 @@ import Pagination from '../components/Pagination.vue'
 import EmptyState from '../components/EmptyState.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import StyledSelect from '../components/StyledSelect.vue'
 import {
   Check,
   CheckSquare,
@@ -325,16 +326,17 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="mx-auto max-w-7xl space-y-4 pb-10">
-    <div class="flex flex-wrap items-start justify-between gap-3 border-b border-gray-200 pb-4">
+  <div class="mx-auto max-w-7xl space-y-5 pb-10">
+    <div class="flex flex-wrap items-start justify-between gap-3 border-b border-gray-200/80 pb-5">
       <div class="flex flex-col gap-1">
+        <div class="tc-page-kicker">Suites</div>
         <h2 class="text-xl font-semibold tracking-tight text-gray-950">用例资产</h2>
         <p class="max-w-3xl text-sm text-gray-500">按来源、运行、套件和分类管理可复用用例；长步骤和预期结果在详情面板中查看和编辑。</p>
       </div>
       <div class="flex items-center gap-3">
         <span class="font-mono text-xs text-gray-400">{{ total }} 条</span>
         <button @click="openCreate"
-          class="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-blue-700">
+          class="flex items-center gap-2 rounded-lg bg-gray-950 px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-gray-800">
           <Plus :size="16" /> 创建用例
         </button>
       </div>
@@ -345,25 +347,23 @@ onMounted(async () => {
         <div class="min-w-[220px] flex-1">
           <SearchInput v-model="search" placeholder="搜索标题、分类或来源..." />
         </div>
-        <select v-model="filterPriority"
-          class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm outline-none transition-all focus:border-blue-500 focus:bg-white">
+        <StyledSelect v-model="filterPriority" class="min-w-[136px]" size="sm">
           <option value="">全部优先级</option>
           <option value="P0">P0</option>
           <option value="P1">P1</option>
           <option value="P2">P2</option>
           <option value="P3">P3</option>
-        </select>
-        <select v-model="filterCategory"
-          class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm outline-none transition-all focus:border-blue-500 focus:bg-white">
+        </StyledSelect>
+        <StyledSelect v-model="filterCategory" class="min-w-[148px]" size="sm">
           <option value="">全部分类</option>
           <option value="FUNCTIONAL">FUNCTIONAL</option>
           <option value="UI">UI</option>
           <option value="API">API</option>
           <option value="PERFORMANCE">PERFORMANCE</option>
           <option value="SECURITY">SECURITY</option>
-        </select>
+        </StyledSelect>
         <button v-if="selectedIds.size > 0" @click="runSelectedSuite" :disabled="suiteRunning"
-          class="flex items-center gap-2 rounded-lg bg-gray-900 px-4 py-2 text-xs font-bold text-white shadow-sm transition-all hover:bg-black disabled:opacity-50">
+          class="flex items-center gap-2 rounded-lg bg-gray-950 px-4 py-2 text-xs font-bold text-white shadow-sm transition-all hover:bg-gray-800 disabled:opacity-50">
           <Play :size="14" />
           {{ suiteRunning ? '提交中...' : `运行选中 (${selectedIds.size})` }}
         </button>
@@ -505,22 +505,22 @@ onMounted(async () => {
               <div class="grid grid-cols-2 gap-3">
                 <div>
                   <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">分类</label>
-                  <select v-model="editForm.category" class="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500">
+                  <StyledSelect v-model="editForm.category">
                     <option value="FUNCTIONAL">FUNCTIONAL</option>
                     <option value="UI">UI</option>
                     <option value="API">API</option>
                     <option value="PERFORMANCE">PERFORMANCE</option>
                     <option value="SECURITY">SECURITY</option>
-                  </select>
+                  </StyledSelect>
                 </div>
                 <div>
                   <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">优先级</label>
-                  <select v-model="editForm.priority" class="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500">
+                  <StyledSelect v-model="editForm.priority">
                     <option value="P0">P0</option>
                     <option value="P1">P1</option>
                     <option value="P2">P2</option>
                     <option value="P3">P3</option>
-                  </select>
+                  </StyledSelect>
                 </div>
               </div>
               <div>
@@ -576,12 +576,12 @@ onMounted(async () => {
         <div class="flex justify-end gap-2 border-t border-gray-100 px-6 py-4">
           <template v-if="editingId === detailItem.id">
             <button @click="cancelEdit" class="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-bold text-gray-600 transition-all hover:bg-gray-50">取消</button>
-            <button @click="saveEdit(detailItem.id)" class="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white transition-all hover:bg-blue-700">
+            <button @click="saveEdit(detailItem.id)" class="flex items-center gap-2 rounded-lg bg-gray-950 px-4 py-2 text-sm font-bold text-white transition-all hover:bg-gray-800">
               <Check :size="15" /> 保存
             </button>
           </template>
           <template v-else>
-            <button @click="startEdit(detailItem)" class="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white transition-all hover:bg-blue-700">
+            <button @click="startEdit(detailItem)" class="flex items-center gap-2 rounded-lg bg-gray-950 px-4 py-2 text-sm font-bold text-white transition-all hover:bg-gray-800">
               <Pencil :size="15" /> 编辑
             </button>
           </template>
@@ -633,22 +633,22 @@ onMounted(async () => {
             <div class="grid grid-cols-2 gap-4">
               <div>
                 <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">分类</label>
-                <select v-model="createForm.category" class="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500">
+                <StyledSelect v-model="createForm.category">
                   <option value="FUNCTIONAL">FUNCTIONAL</option>
                   <option value="UI">UI</option>
                   <option value="API">API</option>
                   <option value="PERFORMANCE">PERFORMANCE</option>
                   <option value="SECURITY">SECURITY</option>
-                </select>
+                </StyledSelect>
               </div>
               <div>
                 <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">优先级</label>
-                <select v-model="createForm.priority" class="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500">
+                <StyledSelect v-model="createForm.priority">
                   <option value="P0">P0 - 阻塞</option>
                   <option value="P1">P1 - 严重</option>
                   <option value="P2">P2 - 一般</option>
                   <option value="P3">P3 - 轻微</option>
-                </select>
+                </StyledSelect>
               </div>
             </div>
             <div>
@@ -697,7 +697,7 @@ onMounted(async () => {
           <div class="sticky bottom-0 flex justify-end gap-3 border-t border-gray-100 bg-white px-6 py-4">
             <button @click="showCreate = false" class="rounded-lg px-4 py-2 text-sm font-bold text-gray-600 transition-all hover:bg-gray-100">取消</button>
             <button @click="submitCreate" :disabled="creating"
-              class="rounded-lg bg-blue-600 px-6 py-2 text-sm font-bold text-white transition-colors hover:bg-blue-700 disabled:opacity-50">
+              class="rounded-lg bg-gray-950 px-6 py-2 text-sm font-bold text-white transition-colors hover:bg-gray-800 disabled:opacity-50">
               {{ creating ? '创建中...' : '创建' }}
             </button>
           </div>

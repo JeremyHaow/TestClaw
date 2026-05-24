@@ -174,9 +174,10 @@ onMounted(fetchItems)
 </script>
 
 <template>
-  <div class="mx-auto max-w-7xl space-y-4 pb-10">
-    <div class="flex flex-wrap items-start justify-between gap-3 border-b border-gray-200 pb-4">
+  <div class="mx-auto max-w-7xl space-y-5 pb-10">
+    <div class="flex flex-wrap items-start justify-between gap-3 border-b border-gray-200/80 pb-5">
       <div class="flex flex-col gap-1">
+        <div class="tc-page-kicker">Targets</div>
         <h2 class="text-xl font-semibold tracking-tight text-gray-950">测试环境</h2>
         <p class="max-w-3xl text-sm text-gray-500">维护可运行 Base URL 和变量。列表只展示脱敏变量，具体运行入口放在每个环境上。</p>
       </div>
@@ -208,7 +209,7 @@ onMounted(fetchItems)
           <div>
             <div class="mb-1.5 flex items-center justify-between">
               <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-400">环境变量</label>
-              <button type="button" @click="addVariable" class="inline-flex items-center gap-1 text-xs font-bold text-blue-600 hover:text-blue-800">
+              <button type="button" @click="addVariable" class="inline-flex items-center gap-1 text-xs font-bold text-gray-700 hover:text-gray-950">
                 <Plus :size="13" /> 添加
               </button>
             </div>
@@ -235,7 +236,7 @@ onMounted(fetchItems)
           </label>
 
           <button type="submit" :disabled="submitting"
-            class="w-full rounded-lg bg-blue-600 py-2.5 text-sm font-bold text-white transition-colors hover:bg-blue-700 disabled:opacity-50">
+            class="w-full rounded-lg bg-gray-950 py-2.5 text-sm font-bold text-white transition-colors hover:bg-gray-800 disabled:opacity-50">
             {{ submitting ? '保存中...' : (editingId ? '更新环境' : '保存环境') }}
           </button>
         </form>
@@ -269,7 +270,7 @@ onMounted(fetchItems)
                 <button
                   v-if="item.base_url"
                   @click="startEnvironmentRun(item)"
-                  class="inline-flex items-center gap-1.5 rounded-lg bg-gray-900 px-3 py-1.5 text-xs font-bold text-white transition-all hover:bg-black"
+                  class="inline-flex items-center gap-1.5 rounded-lg bg-gray-950 px-3 py-1.5 text-xs font-bold text-white transition-all hover:bg-gray-800"
                 >
                   <Play :size="13" /> 用于运行
                 </button>

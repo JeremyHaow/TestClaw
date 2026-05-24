@@ -22,7 +22,7 @@ const config = computed(() => {
 
 <template>
   <span
-    class="px-2 py-0.5 text-[10px] font-bold rounded-full border"
+    class="inline-flex items-center whitespace-nowrap rounded-md border px-2 py-0.5 text-[10px] font-bold"
     :class="[config.bg, config.text, config.border]"
   >
     {{ config.label }}

@@ -37,11 +37,11 @@ window.__toast = { success: (m: string) => addToast('success', m), error: (m: st
   <div class="fixed top-4 right-4 z-[9999] flex flex-col gap-2 pointer-events-none">
     <TransitionGroup name="toast">
       <div v-for="toast in toasts" :key="toast.id"
-        class="pointer-events-auto flex items-center gap-3 px-4 py-3 rounded-xl border shadow-lg backdrop-blur-sm min-w-[300px] max-w-[420px]"
+        class="pointer-events-auto flex min-w-[300px] max-w-[420px] items-center gap-3 rounded-lg border px-4 py-3 shadow-lg backdrop-blur-sm"
         :class="colorMap[toast.type]">
         <component :is="iconMap[toast.type]" :size="18" class="shrink-0" />
         <span class="text-sm font-medium flex-1">{{ toast.message }}</span>
-        <button @click="removeToast(toast.id)" class="shrink-0 opacity-60 hover:opacity-100 transition-opacity">
+        <button type="button" aria-label="关闭提示" @click="removeToast(toast.id)" class="shrink-0 rounded p-1 opacity-60 transition-opacity hover:bg-white/50 hover:opacity-100">
           <X :size="14" />
         </button>
       </div>

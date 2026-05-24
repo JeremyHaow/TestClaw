@@ -4,6 +4,7 @@ import api from '../lib/api'
 import { useToast } from '../composables/useToast'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import EmptyState from '../components/EmptyState.vue'
+import StyledSelect from '../components/StyledSelect.vue'
 import {
   Bot,
   Edit3,
@@ -308,9 +309,10 @@ onMounted(fetchItems)
 </script>
 
 <template>
-  <div class="mx-auto max-w-7xl space-y-4 pb-10">
-    <div class="flex flex-wrap items-start justify-between gap-3 border-b border-gray-200 pb-4">
+  <div class="mx-auto max-w-7xl space-y-5 pb-10">
+    <div class="flex flex-wrap items-start justify-between gap-3 border-b border-gray-200/80 pb-5">
       <div class="flex flex-col gap-1">
+        <div class="tc-page-kicker">Models</div>
         <h2 class="text-xl font-semibold tracking-tight text-gray-950">模型与 Agent</h2>
         <p class="max-w-3xl text-sm text-gray-500">
           先配置 AI Provider，再在 Provider 下维护具体模型。Planner/Coder/Vision 默认角色只设置在模型行上。
@@ -318,7 +320,7 @@ onMounted(fetchItems)
       </div>
       <button
         @click="openNewProvider"
-        class="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-blue-700"
+        class="inline-flex items-center justify-center gap-2 rounded-lg bg-gray-950 px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-gray-800"
       >
         <Plus :size="16" /> 新增 Provider
       </button>
@@ -343,7 +345,7 @@ onMounted(fetchItems)
               :key="group.key"
               @click="selectedProviderKey = group.key"
               class="w-full rounded-lg border p-3 text-left transition-all"
-              :class="selectedProvider?.key === group.key ? 'border-blue-200 bg-blue-50' : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'"
+              :class="selectedProvider?.key === group.key ? 'border-gray-300 bg-gray-100' : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'"
             >
               <div class="flex items-start justify-between gap-2">
                 <div class="min-w-0">
@@ -476,11 +478,10 @@ onMounted(fetchItems)
             </div>
             <div>
               <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">类型</label>
-              <select v-model="modelForm.type"
-                class="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:bg-white">
+              <StyledSelect v-model="modelForm.type">
                 <option value="openai">openai</option>
                 <option value="anthropic">anthropic</option>
-              </select>
+              </StyledSelect>
             </div>
             <div>
               <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">Base URL</label>
@@ -498,7 +499,7 @@ onMounted(fetchItems)
             <div class="flex flex-wrap items-center justify-between gap-3">
               <h4 class="text-xs font-bold uppercase tracking-widest text-gray-400">模型配置</h4>
               <button type="button" @click="discoverModels" :disabled="!modelForm.api_key || discovering"
-                class="inline-flex items-center gap-2 rounded-lg bg-gray-900 px-3 py-2 text-xs font-bold text-white transition-all hover:bg-black disabled:opacity-50">
+                class="inline-flex items-center gap-2 rounded-lg bg-gray-950 px-3 py-2 text-xs font-bold text-white transition-all hover:bg-gray-800 disabled:opacity-50">
                 <Search :size="14" />
                 {{ discovering ? '发现中...' : '发现模型' }}
               </button>
@@ -560,7 +561,7 @@ onMounted(fetchItems)
             <button type="button" @click="closeModelForm" class="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-bold text-gray-600 transition-all hover:bg-gray-50">
               取消
             </button>
-            <button type="submit" class="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white transition-all hover:bg-blue-700">
+            <button type="submit" class="flex items-center gap-2 rounded-lg bg-gray-950 px-4 py-2 text-sm font-bold text-white transition-all hover:bg-gray-800">
               <Save :size="15" /> 保存
             </button>
           </div>

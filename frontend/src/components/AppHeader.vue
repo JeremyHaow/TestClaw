@@ -33,7 +33,7 @@ function logout() {
 </script>
 
 <template>
-  <header class="h-14 border-b border-gray-200 bg-white px-4 lg:px-6 flex items-center justify-between gap-3 shrink-0 z-20">
+  <header class="h-16 border-b border-gray-200/80 bg-white/90 px-4 lg:px-6 flex items-center justify-between gap-3 shrink-0 z-20 backdrop-blur">
     <div class="flex min-w-0 items-center gap-3">
       <button
         v-if="isMobile"
@@ -44,10 +44,13 @@ function logout() {
       >
         <Menu :size="20" />
       </button>
-      <div class="flex min-w-0 items-center gap-2 text-xs text-gray-500">
-        <span class="hidden font-bold text-gray-900 sm:inline">TestClaw</span>
-        <span class="hidden h-4 w-px bg-gray-200 sm:inline-block" />
-        <span class="truncate font-semibold">{{ sectionLabel }}</span>
+      <div class="flex min-w-0 flex-col">
+        <div class="flex min-w-0 items-center gap-2 text-[11px] font-bold uppercase text-gray-400">
+          <span class="hidden sm:inline">TestClaw</span>
+          <span class="hidden h-3 w-px bg-gray-200 sm:inline-block" />
+          <span>Workspace</span>
+        </div>
+        <div class="truncate text-sm font-semibold text-gray-950">{{ sectionLabel }}</div>
       </div>
     </div>
     <div class="flex shrink-0 items-center gap-2">
@@ -55,7 +58,7 @@ function logout() {
         v-if="showRunAction"
         type="button"
         @click="goTo('/run')"
-        class="hidden items-center justify-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-bold text-gray-700 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 sm:inline-flex"
+        class="hidden items-center justify-center gap-1.5 rounded-lg bg-gray-950 px-3 py-2 text-xs font-bold text-white transition-colors hover:bg-gray-800 sm:inline-flex"
       >
         <Play :size="14" /> 新建运行
       </button>
@@ -63,21 +66,21 @@ function logout() {
         v-if="showHistoryAction"
         type="button"
         @click="goTo('/history')"
-        class="hidden items-center justify-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-bold text-gray-700 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 md:inline-flex"
+        class="hidden items-center justify-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-bold text-gray-700 transition-colors hover:border-gray-300 hover:bg-gray-50 md:inline-flex"
       >
         <History :size="14" /> 历史
       </button>
       <div class="hidden h-6 w-px bg-gray-200 md:block" />
       <div class="flex items-center gap-2 min-w-0">
-        <span class="hidden items-center gap-1.5 rounded-lg border border-emerald-100 bg-emerald-50 px-2.5 py-1 text-[11px] font-bold text-emerald-700 sm:flex">
-          <ShieldCheck :size="14" /> 已登录
+        <span class="hidden items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] font-bold text-emerald-700 sm:flex">
+          <ShieldCheck :size="14" /> 已认证
         </span>
-        <span v-if="auth.user" class="hidden max-w-32 truncate text-xs font-bold text-gray-500 md:inline">{{ auth.user.username }}</span>
+        <span v-if="auth.user" class="hidden max-w-36 truncate text-xs font-semibold text-gray-600 md:inline">{{ auth.user.username }}</span>
         <button
           type="button"
           aria-label="退出登录"
           @click="logout"
-          class="inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg bg-gray-900 px-3 py-1.5 text-xs font-bold text-white transition-colors hover:bg-black lg:px-4"
+          class="inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-bold text-gray-700 transition-colors hover:bg-gray-50 hover:text-gray-950 lg:px-4"
         >
           <LogOut :size="14" /> 退出
         </button>

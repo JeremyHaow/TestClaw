@@ -148,7 +148,7 @@ watch(() => route.params.id, (id) => { if (id) loadTask(String(id)) })
     </div>
 
     <!-- Workflow Timeline -->
-    <div v-if="taskStore.current.workflow_steps?.length" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+    <div v-if="taskStore.current.workflow_steps?.length" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
       <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">AI 工作流</h3>
       <div class="space-y-3">
         <div
@@ -171,7 +171,7 @@ watch(() => route.params.id, (id) => { if (id) loadTask(String(id)) })
     </div>
 
     <!-- Test Plan -->
-    <div v-if="taskStore.current.test_plan?.length" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+    <div v-if="taskStore.current.test_plan?.length" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
       <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">测试计划</h3>
       <div class="space-y-4">
         <div v-for="(plan, idx) in taskStore.current.test_plan" :key="idx" class="p-4 bg-gray-50 rounded-lg border border-gray-100">
@@ -188,7 +188,7 @@ watch(() => route.params.id, (id) => { if (id) loadTask(String(id)) })
     </div>
 
     <!-- Test Cases -->
-    <div v-if="taskStore.current.test_cases?.length" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+    <div v-if="taskStore.current.test_cases?.length" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
       <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">生成用例</h3>
       <div class="space-y-3">
         <div v-for="(tc, idx) in taskStore.current.test_cases" :key="idx" class="p-4 bg-gray-50 rounded-lg border border-gray-100">
@@ -204,7 +204,7 @@ watch(() => route.params.id, (id) => { if (id) loadTask(String(id)) })
     </div>
 
     <!-- Execution Result -->
-    <div v-if="taskStore.current.execution_result" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+    <div v-if="taskStore.current.execution_result" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
       <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">执行结果</h3>
       <div class="grid grid-cols-2 gap-4 mb-4">
         <div class="p-3 bg-gray-50 rounded-lg border border-gray-100">
@@ -229,13 +229,13 @@ watch(() => route.params.id, (id) => { if (id) loadTask(String(id)) })
     </div>
 
     <!-- Generated Code -->
-    <div v-if="taskStore.current.generated_code" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+    <div v-if="taskStore.current.generated_code" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
       <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">生成代码</h3>
       <pre class="bg-gray-50 border border-gray-100 rounded-lg p-4 text-xs font-mono text-gray-700 overflow-auto max-h-80">{{ taskStore.current.generated_code }}</pre>
     </div>
 
     <!-- Bug Report -->
-    <div v-if="bugReport" class="bg-white border border-red-200 rounded-xl shadow-sm p-6">
+    <div v-if="bugReport" class="bg-white border border-red-200 rounded-lg shadow-sm p-6">
       <h3 class="text-xs font-bold text-red-400 uppercase tracking-widest mb-4">缺陷分析</h3>
       <div class="grid grid-cols-2 gap-4">
         <div><div class="text-[10px] font-bold text-gray-400 uppercase">标题</div><p class="text-sm text-gray-700 mt-1">{{ bugReport.title }}</p></div>
@@ -248,7 +248,7 @@ watch(() => route.params.id, (id) => { if (id) loadTask(String(id)) })
 
   <div v-else-if="!loading" class="flex flex-col items-center justify-center py-24 text-center">
     <div class="text-gray-400 text-sm">任务不存在或加载失败</div>
-    <button @click="router.push('/tasks')" class="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-700 transition-all">
+    <button @click="router.push('/tasks')" class="mt-4 px-4 py-2 bg-gray-950 text-white rounded-lg text-sm font-bold hover:bg-gray-800 transition-all">
       返回任务列表
     </button>
   </div>

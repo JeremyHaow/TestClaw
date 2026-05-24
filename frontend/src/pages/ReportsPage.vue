@@ -5,6 +5,7 @@ import api from '../lib/api'
 import StatusBadge from '../components/StatusBadge.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import EmptyState from '../components/EmptyState.vue'
+import StyledSelect from '../components/StyledSelect.vue'
 import { useToast } from '../composables/useToast'
 import { Filter, Eye } from 'lucide-vue-next'
 
@@ -55,47 +56,45 @@ onMounted(fetchTasks)
 
     <!-- Stats -->
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-      <div class="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
+      <div class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
         <div class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">总记录</div>
         <div class="text-2xl font-bold text-gray-900 mt-1">{{ stats.total }}</div>
       </div>
-      <div class="bg-white border border-emerald-200 rounded-xl p-5 shadow-sm">
+      <div class="bg-white border border-emerald-200 rounded-lg p-5 shadow-sm">
         <div class="text-[10px] font-bold text-emerald-400 uppercase tracking-widest">通过</div>
         <div class="text-2xl font-bold text-emerald-600 mt-1">{{ stats.succeeded }}</div>
       </div>
-      <div class="bg-white border border-red-200 rounded-xl p-5 shadow-sm">
+      <div class="bg-white border border-red-200 rounded-lg p-5 shadow-sm">
         <div class="text-[10px] font-bold text-red-400 uppercase tracking-widest">失败</div>
         <div class="text-2xl font-bold text-red-600 mt-1">{{ stats.failed }}</div>
       </div>
-      <div class="bg-white border border-amber-200 rounded-xl p-5 shadow-sm">
+      <div class="bg-white border border-amber-200 rounded-lg p-5 shadow-sm">
         <div class="text-[10px] font-bold text-amber-400 uppercase tracking-widest">发现缺陷</div>
         <div class="text-2xl font-bold text-amber-600 mt-1">{{ stats.bugFound }}</div>
       </div>
     </div>
 
     <!-- Filters -->
-    <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-4 flex flex-wrap gap-4 items-center">
+    <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-4 flex flex-wrap gap-4 items-center">
       <div class="flex items-center gap-2">
         <Filter :size="14" class="text-gray-400" />
         <span class="text-xs text-gray-500 font-bold">筛选</span>
       </div>
-      <select v-model="filterStatus"
-        class="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:border-blue-500">
+      <StyledSelect v-model="filterStatus" class="min-w-[132px]" size="sm">
         <option value="">全部状态</option>
         <option value="succeeded">通过</option>
         <option value="failed">失败</option>
         <option value="bug_found">缺陷</option>
         <option value="queued">排队中</option>
         <option value="running">运行中</option>
-      </select>
-      <select v-model="filterType"
-        class="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:border-blue-500">
+      </StyledSelect>
+      <StyledSelect v-model="filterType" class="min-w-[140px]" size="sm">
         <option value="">全部类型</option>
         <option value="ui">UI</option>
         <option value="api">API</option>
         <option value="functional">Functional</option>
         <option value="full">Full</option>
-      </select>
+      </StyledSelect>
       <span class="text-xs text-gray-400 ml-auto">{{ filtered.length }} 条记录</span>
     </div>
 
@@ -110,7 +109,7 @@ onMounted(fetchTasks)
     <div v-else class="space-y-3">
       <div v-for="task in filtered" :key="task.id"
         @click="router.push(`/tasks/${task.id}`)"
-        class="bg-white border border-gray-200 rounded-xl p-5 shadow-sm hover:border-blue-200 transition-all cursor-pointer group">
+        class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm hover:border-blue-200 transition-all cursor-pointer group">
         <div class="flex items-start justify-between">
           <div class="flex-1 min-w-0">
             <div class="flex items-center gap-3 mb-2">

@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '../lib/api'
 import { useToast } from '../composables/useToast'
+import StyledSelect from '../components/StyledSelect.vue'
 import {
   AlertTriangle,
   Bot,
@@ -873,15 +874,16 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="mx-auto max-w-7xl space-y-4 pb-10">
-    <section class="border-b border-gray-200 pb-4">
+  <div class="mx-auto max-w-7xl space-y-5 pb-10">
+    <section class="border-b border-gray-200/80 pb-5">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div class="flex min-w-0 items-start gap-4">
-          <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-gray-900 text-white">
+          <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-gray-950 text-white shadow-sm">
             <Bot :size="22" />
           </div>
           <div class="min-w-0">
-            <h2 class="text-xl font-semibold tracking-tight text-gray-950">Testing Agent Workspace</h2>
+            <div class="tc-page-kicker">Mission Control</div>
+            <h2 class="mt-1 text-xl font-semibold tracking-tight text-gray-950">Testing Agent Workspace</h2>
             <p class="mt-1 max-w-3xl text-sm leading-6 text-gray-500">
               像分配测试任务一样描述目标、上下文和安全边界。TestClaw 会先预检，再自动规划 API/UI 路径、执行并沉淀证据。
             </p>
@@ -893,7 +895,7 @@ onMounted(() => {
           </span>
           <button
             @click="router.push('/history')"
-            class="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-bold text-gray-600 transition-all hover:border-blue-200 hover:text-blue-700"
+            class="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-bold text-gray-600 transition-all hover:border-gray-300 hover:bg-gray-50 hover:text-gray-950"
           >
             查看历史
           </button>
@@ -903,7 +905,7 @@ onMounted(() => {
         <span
           v-for="(step, index) in flow.slice(0, 5)"
           :key="`${step}-${index}`"
-          class="rounded-lg border border-gray-200 bg-white px-2.5 py-1"
+          class="rounded-lg border border-gray-200 bg-white/80 px-2.5 py-1"
         >
           {{ index + 1 }}. {{ step }}
         </span>
@@ -934,22 +936,21 @@ onMounted(() => {
             </div>
 
             <div>
-              <div v-if="isApiMode" class="rounded-lg border border-blue-100 bg-blue-50/70 p-3">
+              <div v-if="isApiMode" class="rounded-lg border border-gray-200 bg-gray-50 p-3">
                 <div class="mb-3 flex items-center justify-between gap-3">
-                  <label class="text-xs font-bold uppercase tracking-widest text-blue-600">API 文档</label>
+                  <label class="text-xs font-bold uppercase text-gray-500">API 文档</label>
                   <button
                     type="button"
                     @click="router.push('/documents')"
-                    class="shrink-0 rounded-lg border border-blue-200 bg-white px-2.5 py-1.5 text-[11px] font-bold text-blue-800 transition-all hover:border-blue-300"
+                    class="shrink-0 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-[11px] font-bold text-gray-700 transition-all hover:border-gray-300 hover:bg-gray-50"
                   >
                     接口文档
                   </button>
                 </div>
                 <template v-if="documents.length || documentsLoading">
-                  <select
+                  <StyledSelect
                     v-model="selectedDocumentId"
                     :disabled="documentsLoading || !documents.length"
-                    class="w-full rounded-lg border border-blue-200 bg-white px-3 py-2.5 text-sm font-bold text-blue-950 outline-none transition-all focus:border-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
                     @change="handleDocumentSelection"
                   >
                     <option value="" disabled>{{ documentsLoading ? '加载已保存接口文档...' : '请选择已导入接口文档' }}</option>
@@ -960,28 +961,28 @@ onMounted(() => {
                     >
                       {{ documentDisplayName(doc) }} · {{ documentEndpointCount(doc) }} endpoints
                     </option>
-                  </select>
-                  <div v-if="selectedDocument" class="mt-3 rounded-lg border border-blue-100 bg-white px-3 py-2 text-xs">
+                  </StyledSelect>
+                  <div v-if="selectedDocument" class="mt-3 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs">
                     <div class="flex flex-wrap items-center justify-between gap-2">
-                      <span class="font-bold text-blue-950">{{ documentDisplayName(selectedDocument) }}</span>
-                      <span class="font-bold text-blue-600">{{ documentEndpointCount(selectedDocument) }} endpoints</span>
+                      <span class="font-bold text-gray-950">{{ documentDisplayName(selectedDocument) }}</span>
+                      <span class="font-bold text-emerald-700">{{ documentEndpointCount(selectedDocument) }} endpoints</span>
                     </div>
-                    <div class="mt-2 flex flex-wrap gap-2 text-[11px] font-bold text-blue-700">
-                      <span class="rounded border border-blue-100 bg-blue-50 px-2 py-1">来源：已保存接口文档</span>
-                      <span class="rounded border border-blue-100 bg-blue-50 px-2 py-1">格式：{{ selectedDocument.format || 'openapi' }}</span>
+                    <div class="mt-2 flex flex-wrap gap-2 text-[11px] font-bold text-emerald-700">
+                      <span class="rounded border border-emerald-100 bg-emerald-50 px-2 py-1">来源：已保存接口文档</span>
+                      <span class="rounded border border-emerald-100 bg-emerald-50 px-2 py-1">格式：{{ selectedDocument.format || 'openapi' }}</span>
                     </div>
                   </div>
-                  <p v-else class="mt-2 text-xs leading-5 text-blue-700">
+                  <p v-else class="mt-2 text-xs leading-5 text-gray-600">
                     API 测试只从已保存接口文档中选择；新增、粘贴 URL 或导入原文请到“接口文档”页面完成。
                   </p>
                 </template>
-                <div v-else class="rounded-lg border border-dashed border-blue-200 bg-white px-4 py-4 text-sm text-blue-800">
+                <div v-else class="rounded-lg border border-dashed border-gray-300 bg-white px-4 py-4 text-sm text-gray-700">
                   <div class="font-bold">暂无已保存接口文档</div>
-                  <p class="mt-1 text-xs leading-5 text-blue-700">请先在“接口文档”页面导入 OpenAPI/Swagger 文档，再回到这里选择运行。</p>
+                  <p class="mt-1 text-xs leading-5 text-gray-500">请先在“接口文档”页面导入 OpenAPI/Swagger 文档，再回到这里选择运行。</p>
                   <button
                     type="button"
                     @click="router.push('/documents')"
-                    class="mt-3 rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white transition-all hover:bg-blue-700"
+                    class="mt-3 rounded-lg bg-gray-950 px-3 py-2 text-xs font-bold text-white transition-all hover:bg-gray-800"
                   >
                     去导入接口文档
                   </button>
@@ -1330,26 +1331,24 @@ onMounted(() => {
                 </div>
                 <div v-if="shouldShowAdvancedField('method')">
                   <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">方法</label>
-                  <select
+                  <StyledSelect
                     v-model="form.auth_method"
-                    class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm font-bold outline-none transition-all focus:border-blue-500"
                     @change="resetPreflight"
                   >
                     <option value="POST">POST</option>
                     <option value="PUT">PUT</option>
                     <option value="PATCH">PATCH</option>
-                  </select>
+                  </StyledSelect>
                 </div>
                 <div v-if="shouldShowAdvancedField('content_type')">
                   <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">Body 类型</label>
-                  <select
+                  <StyledSelect
                     v-model="form.auth_content_type"
-                    class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm font-bold outline-none transition-all focus:border-blue-500"
                     @change="resetPreflight"
                   >
                     <option value="json">JSON</option>
                     <option value="form">Form</option>
-                  </select>
+                  </StyledSelect>
                 </div>
               </div>
 
@@ -1513,7 +1512,7 @@ onMounted(() => {
             <button
               @click="submit"
               :disabled="!canRun"
-              class="flex items-center justify-center gap-2 rounded-lg bg-gray-900 px-5 py-2.5 text-sm font-bold text-white transition-all hover:bg-black disabled:cursor-not-allowed disabled:bg-gray-300"
+              class="flex items-center justify-center gap-2 rounded-lg bg-gray-950 px-5 py-2.5 text-sm font-bold text-white transition-all hover:bg-gray-800 disabled:cursor-not-allowed disabled:bg-gray-300"
             >
               <Loader2 v-if="submitting" :size="16" class="animate-spin" />
               <Play v-else :size="16" />

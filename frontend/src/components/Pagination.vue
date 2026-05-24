@@ -24,8 +24,8 @@ const visiblePages = computed(() => {
 </script>
 
 <template>
-  <div v-if="totalPages > 1" class="flex items-center justify-between px-2 py-3">
-    <span class="text-xs text-gray-400">共 {{ total }} 条，第 {{ page }}/{{ totalPages }} 页</span>
+  <div v-if="totalPages > 1" class="flex flex-col gap-3 rounded-lg border border-gray-200 bg-white px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+    <span class="text-xs font-medium text-gray-500">共 {{ total }} 条，第 {{ page }}/{{ totalPages }} 页</span>
     <div class="flex items-center gap-1">
       <button
         type="button"
@@ -33,12 +33,12 @@ const visiblePages = computed(() => {
         title="上一页"
         @click="emit('update:page', page - 1)"
         :disabled="!canPrev"
-        class="p-1.5 rounded-lg hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+        class="rounded-lg border border-transparent p-1.5 text-gray-500 transition-all hover:border-gray-200 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-30">
         <ChevronLeft :size="16" />
       </button>
       <button v-for="p in visiblePages" :key="p" @click="emit('update:page', p)"
-        class="w-8 h-8 rounded-lg text-xs font-bold transition-all"
-        :class="p === page ? 'bg-blue-600 text-white' : 'hover:bg-gray-100 text-gray-600'">
+        class="h-8 w-8 rounded-lg text-xs font-bold transition-all"
+        :class="p === page ? 'bg-gray-950 text-white' : 'text-gray-600 hover:bg-gray-100'">
         {{ p }}
       </button>
       <button
@@ -47,7 +47,7 @@ const visiblePages = computed(() => {
         title="下一页"
         @click="emit('update:page', page + 1)"
         :disabled="!canNext"
-        class="p-1.5 rounded-lg hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+        class="rounded-lg border border-transparent p-1.5 text-gray-500 transition-all hover:border-gray-200 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-30">
         <ChevronRight :size="16" />
       </button>
     </div>

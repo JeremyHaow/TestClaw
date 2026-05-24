@@ -14,11 +14,11 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="flex min-h-screen bg-gray-50 text-gray-900 font-sans">
+  <div class="flex min-h-screen bg-[#f4f6f5] text-gray-900 font-sans">
     <AppSidebar />
-    <main class="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
+    <main class="flex-1 flex min-w-0 flex-col h-screen overflow-hidden">
       <AppHeader />
-      <div class="flex-1 overflow-y-auto p-4 lg:p-6">
+      <div class="flex-1 overflow-y-auto px-4 py-4 sm:px-5 lg:px-6 lg:py-5">
         <router-view />
       </div>
     </main>

@@ -6,11 +6,17 @@ defineProps<{
 </script>
 
 <template>
-  <div class="flex flex-col items-center justify-center py-16">
+  <div class="flex flex-col items-center justify-center py-14">
     <div class="relative">
-      <div class="w-10 h-10 border-4 border-gray-200 rounded-full"></div>
-      <div class="w-10 h-10 border-4 border-blue-600 rounded-full border-t-transparent animate-spin absolute top-0 left-0"></div>
+      <div
+        class="rounded-full border-4 border-gray-200"
+        :style="{ width: `${size || 40}px`, height: `${size || 40}px` }"
+      ></div>
+      <div
+        class="absolute left-0 top-0 animate-spin rounded-full border-4 border-gray-900 border-t-transparent"
+        :style="{ width: `${size || 40}px`, height: `${size || 40}px` }"
+      ></div>
     </div>
-    <p v-if="text" class="text-sm text-gray-500 mt-4">{{ text }}</p>
+    <p v-if="text" class="mt-4 text-sm font-medium text-gray-500">{{ text }}</p>
   </div>
 </template>

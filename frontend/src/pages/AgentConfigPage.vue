@@ -72,7 +72,7 @@ onMounted(fetchProviders)
       <div class="lg:col-span-4 space-y-4">
         <div class="flex items-center justify-between">
           <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">选择模型</h3>
-          <button @click="router.push('/providers')" class="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all">
+          <button @click="router.push('/providers')" class="flex items-center gap-1.5 px-3 py-1.5 bg-gray-950 hover:bg-gray-800 text-white rounded-lg text-xs font-bold transition-all">
             <Plus :size="12" /> 添加模型
           </button>
         </div>
@@ -80,7 +80,7 @@ onMounted(fetchProviders)
           <button
             v-for="p in providers" :key="p.id"
             @click="selectProvider(p)"
-            class="w-full text-left bg-white border rounded-xl p-4 shadow-sm transition-all"
+            class="w-full text-left bg-white border rounded-lg p-4 shadow-sm transition-all"
             :class="selected?.id === p.id ? 'border-blue-300 bg-blue-50' : 'border-gray-200 hover:border-blue-200'"
           >
             <div class="font-bold text-gray-900 text-sm">{{ p.name }}</div>
@@ -97,10 +97,10 @@ onMounted(fetchProviders)
 
       <!-- Config Panel -->
       <div class="lg:col-span-8 space-y-6">
-        <div v-if="selected" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-6">
+        <div v-if="selected" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6 space-y-6">
           <div class="flex items-center justify-between">
             <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">配置: {{ selected.name }}</h3>
-            <button @click="saveConfig" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-bold transition-all flex items-center gap-2">
+            <button @click="saveConfig" class="px-4 py-2 bg-gray-950 hover:bg-gray-800 text-white rounded-lg text-sm font-bold transition-all flex items-center gap-2">
               <Save :size="14" /> 保存配置
             </button>
           </div>
@@ -112,7 +112,7 @@ onMounted(fetchProviders)
               <button
                 v-for="at in agentTypes" :key="at.value"
                 @click="form.agent_type = at.value"
-                class="p-4 border rounded-xl text-left transition-all"
+                class="p-4 border rounded-lg text-left transition-all"
                 :class="form.agent_type === at.value ? 'border-blue-300 bg-blue-50' : 'border-gray-200 hover:border-blue-200'"
               >
                 <div class="font-bold text-sm" :class="form.agent_type === at.value ? 'text-blue-700' : 'text-gray-900'">{{ at.label }}</div>
@@ -148,7 +148,7 @@ onMounted(fetchProviders)
           </div>
         </div>
 
-        <div v-else class="bg-white border border-gray-200 rounded-xl shadow-sm p-12 text-center">
+        <div v-else class="bg-white border border-gray-200 rounded-lg shadow-sm p-12 text-center">
           <Settings2 :size="48" class="mx-auto text-gray-300 mb-4" />
           <p class="text-gray-400 text-sm">请从左侧选择一个模型进行配置</p>
         </div>

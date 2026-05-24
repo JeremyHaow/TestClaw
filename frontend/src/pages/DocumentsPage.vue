@@ -20,6 +20,7 @@ import {
 import EmptyState from '../components/EmptyState.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import StyledSelect from '../components/StyledSelect.vue'
 
 const REAL_DOCS_URL = 'http://60.204.225.104/api/v3/api-docs'
 const endpointPageSize = 12
@@ -391,9 +392,10 @@ onMounted(fetchItems)
 </script>
 
 <template>
-  <div class="mx-auto max-w-7xl space-y-4 pb-10">
-    <div class="flex flex-col gap-3 border-b border-gray-200 pb-4 lg:flex-row lg:items-end lg:justify-between">
+  <div class="mx-auto max-w-7xl space-y-5 pb-10">
+    <div class="flex flex-col gap-3 border-b border-gray-200/80 pb-5 lg:flex-row lg:items-end lg:justify-between">
       <div>
+        <div class="tc-page-kicker">API Assets</div>
         <h2 class="text-xl font-semibold tracking-tight text-gray-950">接口文档</h2>
         <p class="mt-1 max-w-3xl text-sm leading-6 text-gray-500">
           导入 OpenAPI / Postman 文档后，可以在线修订原文、按端点检索浏览，并把已保存文档交给 Testing Agent 运行。
@@ -403,7 +405,7 @@ onMounted(fetchItems)
         <button
           type="button"
           @click="form.url = REAL_DOCS_URL; form.name = 'wms_接口文档'; importMode = 'url'"
-          class="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-bold text-gray-600 transition-all hover:border-blue-200 hover:text-blue-700"
+          class="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-bold text-gray-600 transition-all hover:border-gray-300 hover:bg-gray-50 hover:text-gray-950"
         >
           <Link2 :size="14" /> 使用验证 URL
         </button>
@@ -411,7 +413,7 @@ onMounted(fetchItems)
           v-if="selectedDoc"
           type="button"
           @click="startApiRun(selectedDoc)"
-          class="inline-flex items-center gap-2 rounded-lg bg-gray-900 px-4 py-2 text-xs font-bold text-white transition-all hover:bg-black"
+          class="inline-flex items-center gap-2 rounded-lg bg-gray-950 px-4 py-2 text-xs font-bold text-white transition-all hover:bg-gray-800"
         >
           <Play :size="14" /> 用此文档运行
         </button>
@@ -428,7 +430,7 @@ onMounted(fetchItems)
                 type="button"
                 @click="importMode = 'url'"
                 class="rounded-md px-3 py-1.5 text-xs font-bold transition-all"
-                :class="importMode === 'url' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-800'"
+                :class="importMode === 'url' ? 'bg-gray-950 text-white shadow-sm' : 'text-gray-500 hover:text-gray-800'"
               >
                 URL
               </button>
@@ -436,7 +438,7 @@ onMounted(fetchItems)
                 type="button"
                 @click="importMode = 'raw'"
                 class="rounded-md px-3 py-1.5 text-xs font-bold transition-all"
-                :class="importMode === 'raw' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-800'"
+                :class="importMode === 'raw' ? 'bg-gray-950 text-white shadow-sm' : 'text-gray-500 hover:text-gray-800'"
               >
                 粘贴原文
               </button>
@@ -454,14 +456,13 @@ onMounted(fetchItems)
             </div>
             <div>
               <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">格式</label>
-              <select
+              <StyledSelect
                 v-model="form.format"
-                class="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm outline-none transition-all focus:border-blue-500 focus:bg-white"
               >
                 <option value="openapi">openapi</option>
                 <option value="yaml">yaml</option>
                 <option value="postman">postman</option>
-              </select>
+              </StyledSelect>
             </div>
             <div v-if="importMode === 'url'">
               <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">文档 URL</label>
@@ -492,7 +493,7 @@ onMounted(fetchItems)
             <button
               type="submit"
               :disabled="importing"
-              class="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
+              class="flex w-full items-center justify-center gap-2 rounded-lg bg-gray-950 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-gray-800 disabled:opacity-50"
             >
               <Link2 v-if="importMode === 'url'" :size="16" />
               <FileCode v-else :size="16" />
@@ -540,7 +541,7 @@ onMounted(fetchItems)
               type="button"
               @click="selectDocument(item)"
               class="mb-2 w-full rounded-lg border p-3 text-left transition-all"
-              :class="selectedDoc?.id === item.id ? 'border-blue-200 bg-blue-50' : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'"
+              :class="selectedDoc?.id === item.id ? 'border-gray-300 bg-gray-100' : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'"
             >
               <div class="flex items-start gap-3">
                 <div class="rounded-lg bg-white p-2 text-blue-600">
@@ -598,7 +599,7 @@ onMounted(fetchItems)
                 <button
                   type="button"
                   @click="startApiRun(selectedDoc)"
-                  class="inline-flex items-center gap-2 rounded-lg bg-gray-900 px-3 py-2 text-xs font-bold text-white transition-all hover:bg-black"
+                  class="inline-flex items-center gap-2 rounded-lg bg-gray-950 px-3 py-2 text-xs font-bold text-white transition-all hover:bg-gray-800"
                 >
                   <Play :size="14" /> 去运行
                 </button>
@@ -622,7 +623,7 @@ onMounted(fetchItems)
                   type="button"
                   @click="viewMode = 'endpoints'"
                   class="rounded-md px-3 py-1.5 text-xs font-bold transition-all"
-                  :class="viewMode === 'endpoints' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-800'"
+                :class="viewMode === 'endpoints' ? 'bg-gray-950 text-white shadow-sm' : 'text-gray-500 hover:text-gray-800'"
                 >
                   端点
                 </button>
@@ -630,7 +631,7 @@ onMounted(fetchItems)
                   type="button"
                   @click="viewMode = 'raw'"
                   class="rounded-md px-3 py-1.5 text-xs font-bold transition-all"
-                  :class="viewMode === 'raw' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-800'"
+                :class="viewMode === 'raw' ? 'bg-gray-950 text-white shadow-sm' : 'text-gray-500 hover:text-gray-800'"
                 >
                   查看原文
                 </button>
@@ -655,13 +656,13 @@ onMounted(fetchItems)
                     <X :size="13" />
                   </button>
                 </div>
-                <select
+                <StyledSelect
                   v-model="methodFilter"
-                  class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm outline-none transition-all focus:border-blue-500 focus:bg-white"
+                  class="w-full sm:w-40"
                 >
                   <option value="">全部方法</option>
                   <option v-for="method in methodOptions" :key="method" :value="method">{{ method }}</option>
-                </select>
+                </StyledSelect>
               </div>
             </div>
           </div>
@@ -824,14 +825,13 @@ onMounted(fetchItems)
             </div>
             <div>
               <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">格式</label>
-              <select
-                v-model="editForm.format"
-                class="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm outline-none transition-all focus:border-blue-500 focus:bg-white"
-              >
-                <option value="openapi">openapi</option>
-                <option value="yaml">yaml</option>
-                <option value="postman">postman</option>
-              </select>
+                <StyledSelect
+                  v-model="editForm.format"
+                >
+                  <option value="openapi">openapi</option>
+                  <option value="yaml">yaml</option>
+                  <option value="postman">postman</option>
+                </StyledSelect>
             </div>
           </div>
           <div class="mt-4">
@@ -871,7 +871,7 @@ onMounted(fetchItems)
           <button
             type="button"
             @click="saveEdit"
-            class="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white transition-all hover:bg-blue-700"
+            class="inline-flex items-center gap-2 rounded-lg bg-gray-950 px-4 py-2 text-sm font-bold text-white transition-all hover:bg-gray-800"
           >
             <Check :size="15" /> 保存并重新解析
           </button>

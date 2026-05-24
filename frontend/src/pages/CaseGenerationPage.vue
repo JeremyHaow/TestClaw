@@ -5,6 +5,7 @@ import { Sparkles, Plus, Trash2, Save, FileCode, Upload } from 'lucide-vue-next'
 import { useToast } from '../composables/useToast'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import EmptyState from '../components/EmptyState.vue'
+import StyledSelect from '../components/StyledSelect.vue'
 
 const toast = useToast()
 
@@ -171,7 +172,7 @@ onMounted(async () => {
       <button v-for="m in [{v:'ai',l:'AI 生成'},{v:'swagger',l:'文档导入'},{v:'manual',l:'手动创建'}]" :key="m.v"
         @click="mode = m.v as any"
         class="px-4 py-2 rounded-lg text-sm font-bold transition-all"
-        :class="mode === m.v ? 'bg-blue-600 text-white shadow-md' : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'">
+        :class="mode === m.v ? 'bg-gray-950 text-white shadow-md' : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'">
         {{ m.l }}
       </button>
     </div>
@@ -180,7 +181,7 @@ onMounted(async () => {
 
     <!-- AI Generation -->
     <div v-if="mode === 'ai'" class="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
-      <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-4">
+      <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-6 space-y-4">
         <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">AI 生成用例</h3>
         <div>
           <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">功能描述</label>
@@ -189,11 +190,10 @@ onMounted(async () => {
         </div>
         <div>
           <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">关联 API 文档（可选）</label>
-          <select v-model="aiForm.doc_id"
-            class="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:bg-white transition-all">
+          <StyledSelect v-model="aiForm.doc_id">
             <option value="">不关联</option>
             <option v-for="doc in documents" :key="doc.id" :value="doc.id">{{ doc.name || `Document-${doc.format}` }} ({{ doc.format }})</option>
-          </select>
+          </StyledSelect>
         </div>
         <div>
           <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">API Schema（可选）</label>
@@ -206,7 +206,7 @@ onMounted(async () => {
             class="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:bg-white transition-all" />
         </div>
         <button @click="generateAI" :disabled="generating || !aiForm.feature_description"
-          class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-sm font-bold transition-all shadow-md shadow-blue-600/10 flex items-center justify-center gap-2">
+          class="w-full py-2.5 bg-gray-950 hover:bg-gray-800 disabled:opacity-50 text-white rounded-lg text-sm font-bold transition-all shadow-md shadow-blue-600/10 flex items-center justify-center gap-2">
           <Sparkles :size="16" />
           {{ generating ? 'AI 生成中...' : 'AI 生成用例' }}
         </button>
@@ -225,7 +225,7 @@ onMounted(async () => {
           title="暂无生成结果"
           description="输入功能描述后点击 AI 生成按钮" />
         <template v-else>
-          <div v-for="(tc, idx) in generatedCases" :key="idx" class="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
+          <div v-for="(tc, idx) in generatedCases" :key="idx" class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
             <div class="flex items-start justify-between mb-3">
               <div>
                 <div class="font-bold text-gray-900 text-sm">{{ tc.title }}</div>
@@ -253,7 +253,7 @@ onMounted(async () => {
             </div>
           </div>
         </template>
-        <div v-if="rawResponse && !generatedCases.length" class="bg-gray-50 border border-gray-200 rounded-xl p-4">
+        <div v-if="rawResponse && !generatedCases.length" class="bg-gray-50 border border-gray-200 rounded-lg p-4">
           <div class="text-[10px] font-bold text-gray-400 uppercase mb-2">AI 原始响应</div>
           <pre class="text-xs font-mono text-gray-600 whitespace-pre-wrap">{{ rawResponse }}</pre>
         </div>
@@ -262,7 +262,7 @@ onMounted(async () => {
 
     <!-- Swagger Import -->
     <div v-if="mode === 'swagger'" class="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
-      <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-4">
+      <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-6 space-y-4">
         <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">导入 Swagger/OpenAPI</h3>
         <div>
           <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">文档名称</label>
@@ -275,14 +275,14 @@ onMounted(async () => {
             class="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm font-mono outline-none focus:border-blue-500 focus:bg-white transition-all resize-none" />
         </div>
         <button @click="importSwagger" :disabled="importing"
-          class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-sm font-bold transition-all shadow-md shadow-blue-600/10 flex items-center justify-center gap-2">
+          class="w-full py-2.5 bg-gray-950 hover:bg-gray-800 disabled:opacity-50 text-white rounded-lg text-sm font-bold transition-all shadow-md shadow-blue-600/10 flex items-center justify-center gap-2">
           {{ importing ? '导入中...' : '导入文档' }}
         </button>
       </div>
 
       <div class="space-y-4">
         <h3 class="text-sm font-bold text-gray-900">已导入文档</h3>
-        <div v-for="doc in documents" :key="doc.id" class="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
+        <div v-for="doc in documents" :key="doc.id" class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
           <div class="font-bold text-gray-900 text-sm">{{ doc.name || `Document-${doc.format}` }}</div>
           <div class="text-[10px] font-mono text-gray-400 uppercase">{{ doc.format }}</div>
           <pre class="bg-gray-50 border border-gray-100 rounded-lg p-3 mt-2 text-[10px] font-mono text-gray-600 overflow-auto max-h-40">{{ JSON.stringify(doc.parsed_endpoints, null, 2) }}</pre>
@@ -293,7 +293,7 @@ onMounted(async () => {
 
     <!-- Manual Create -->
     <div v-if="mode === 'manual'" class="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
-      <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-4">
+      <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-6 space-y-4">
         <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">手动创建用例</h3>
         <form class="space-y-4" @submit.prevent="saveManual">
           <div>
@@ -311,7 +311,7 @@ onMounted(async () => {
             <textarea v-model="manualForm.expectedText" rows="3"
               class="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm font-mono outline-none focus:border-blue-500 focus:bg-white transition-all resize-none" />
           </div>
-          <button type="submit" class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-bold transition-all shadow-md shadow-blue-600/10 flex items-center justify-center gap-2">
+          <button type="submit" class="w-full py-2.5 bg-gray-950 hover:bg-gray-800 text-white rounded-lg text-sm font-bold transition-all shadow-md shadow-blue-600/10 flex items-center justify-center gap-2">
             <Plus :size="16" /> 保存用例
           </button>
         </form>
@@ -323,7 +323,7 @@ onMounted(async () => {
           <span class="text-xs text-gray-400 font-mono">{{ items.length }} 条</span>
         </div>
         <div class="space-y-3">
-          <div v-for="item in items" :key="item.id" class="bg-white border border-gray-200 rounded-xl p-5 shadow-sm hover:border-blue-200 transition-all group">
+          <div v-for="item in items" :key="item.id" class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm hover:border-blue-200 transition-all group">
             <div class="flex items-start justify-between mb-3">
               <div>
                 <div class="font-bold text-gray-900 text-sm">{{ item.title }}</div>

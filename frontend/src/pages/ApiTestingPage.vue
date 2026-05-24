@@ -3,6 +3,7 @@ import { onMounted, reactive, ref } from 'vue'
 import api from '../lib/api'
 import { useToast } from '../composables/useToast'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
+import StyledSelect from '../components/StyledSelect.vue'
 import { Play, CheckCircle2, XCircle } from 'lucide-vue-next'
 
 const toast = useToast()
@@ -121,33 +122,31 @@ onMounted(fetchData)
       <!-- Left: Config -->
       <div class="lg:col-span-5 space-y-6">
         <!-- Environment & Document Selection -->
-        <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-4">
+        <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-6 space-y-4">
           <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">测试配置</h3>
           <div>
             <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">测试环境</label>
-            <select v-model="selectedEnv"
-              class="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:bg-white transition-all">
+            <StyledSelect v-model="selectedEnv">
               <option value="">选择环境</option>
               <option v-for="env in environments" :key="env.id" :value="env.id">{{ env.name }} — {{ env.base_url }}</option>
-            </select>
+            </StyledSelect>
           </div>
           <div>
             <label class="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-1.5">API 文档</label>
-            <select v-model="selectedDoc" @change="loadEndpoints"
-              class="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:bg-white transition-all">
+            <StyledSelect v-model="selectedDoc" @change="loadEndpoints">
               <option value="">选择文档</option>
               <option v-for="doc in documents" :key="doc.id" :value="doc.id">{{ doc.name || `Document-${doc.format}` }} ({{ doc.format }})</option>
-            </select>
+            </StyledSelect>
           </div>
           <button v-if="endpoints.length" @click="executeSelected" :disabled="executing"
-            class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-sm font-bold transition-all shadow-md shadow-blue-600/10 flex items-center justify-center gap-2">
+            class="w-full py-2.5 bg-gray-950 hover:bg-gray-800 disabled:opacity-50 text-white rounded-lg text-sm font-bold transition-all shadow-md shadow-blue-600/10 flex items-center justify-center gap-2">
             <Play :size="16" />
             {{ executing ? '执行中...' : `执行选中端点 (${selectedEndpoints.size})` }}
           </button>
         </div>
 
         <!-- Endpoint List -->
-        <div v-if="endpoints.length" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-3">
+        <div v-if="endpoints.length" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6 space-y-3">
           <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">端点列表</h3>
           <div v-for="(ep, idx) in endpoints" :key="idx"
             @click="toggleEndpoint(idx)"
@@ -163,12 +162,12 @@ onMounted(fetchData)
         </div>
 
         <!-- Manual Request -->
-        <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-4">
+        <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-6 space-y-4">
           <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">手动请求</h3>
           <div class="flex gap-2">
-            <select v-model="manualReq.method" class="w-24 px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500">
+            <StyledSelect v-model="manualReq.method" class="w-28">
               <option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option><option>PATCH</option>
-            </select>
+            </StyledSelect>
             <input v-model="manualReq.url" placeholder="https://api.example.com/endpoint"
               class="flex-1 px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:bg-white transition-all" />
           </div>
@@ -183,7 +182,7 @@ onMounted(fetchData)
               class="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm font-mono outline-none focus:border-blue-500 focus:bg-white transition-all resize-none" />
           </div>
           <button @click="executeManual" :disabled="executing || !manualReq.url"
-            class="w-full py-2.5 bg-gray-900 hover:bg-black disabled:opacity-50 text-white rounded-lg text-sm font-bold transition-all flex items-center justify-center gap-2">
+            class="w-full py-2.5 bg-gray-950 hover:bg-gray-800 disabled:opacity-50 text-white rounded-lg text-sm font-bold transition-all flex items-center justify-center gap-2">
             <Play :size="16" /> {{ executing ? '执行中...' : '发送请求' }}
           </button>
         </div>
@@ -192,7 +191,7 @@ onMounted(fetchData)
       <!-- Right: Results -->
       <div class="lg:col-span-7 space-y-4">
         <h3 class="text-sm font-bold text-gray-900">执行结果</h3>
-        <div v-for="(r, idx) in results" :key="idx" class="bg-white border rounded-xl shadow-sm overflow-hidden"
+        <div v-for="(r, idx) in results" :key="idx" class="bg-white border rounded-lg shadow-sm overflow-hidden"
           :class="r.passed ? 'border-emerald-200' : 'border-red-200'">
           <div class="px-5 py-4 border-b flex items-center justify-between"
             :class="r.passed ? 'bg-emerald-50 border-emerald-100' : 'bg-red-50 border-red-100'">

@@ -149,9 +149,10 @@ onMounted(fetchItems)
 </script>
 
 <template>
-  <div class="mx-auto max-w-7xl space-y-4 pb-10">
-    <div class="flex flex-col gap-3 border-b border-gray-200 pb-4 lg:flex-row lg:items-end lg:justify-between">
+  <div class="mx-auto max-w-7xl space-y-5 pb-10">
+    <div class="flex flex-col gap-3 border-b border-gray-200/80 pb-5 lg:flex-row lg:items-end lg:justify-between">
       <div class="min-w-0">
+        <div class="tc-page-kicker">Memory</div>
         <h2 class="text-xl font-semibold tracking-tight text-gray-950">RAG 知识库</h2>
         <p class="mt-1 max-w-3xl text-sm text-gray-500">管理测试经验、缺陷根因和修复建议；每条知识按真实 embedding 状态显示，不把降级检索伪装成向量命中。</p>
       </div>
@@ -167,7 +168,7 @@ onMounted(fetchItems)
           <textarea v-model="newContent" rows="5" placeholder="输入知识内容..."
             class="w-full resize-none rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:bg-white" />
           <button @click="addEntry" :disabled="adding || !newContent.trim()"
-            class="mt-3 flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 py-2.5 text-sm font-bold text-white transition-colors hover:bg-blue-700 disabled:opacity-50">
+            class="mt-3 flex w-full items-center justify-center gap-2 rounded-lg bg-gray-950 py-2.5 text-sm font-bold text-white transition-colors hover:bg-gray-800 disabled:opacity-50">
             <Plus :size="16" />
             {{ adding ? '添加中...' : '添加条目' }}
           </button>
@@ -197,7 +198,7 @@ onMounted(fetchItems)
               :key="entry.id"
               @click="selectEntry(entry)"
               class="w-full p-4 text-left transition-colors hover:bg-gray-50"
-              :class="selectedEntry?.id === entry.id ? 'bg-blue-50/60' : 'bg-white'"
+              :class="selectedEntry?.id === entry.id ? 'bg-gray-100' : 'bg-white'"
             >
               <div class="flex items-start justify-between gap-3">
                 <div class="min-w-0">
@@ -227,7 +228,7 @@ onMounted(fetchItems)
           </div>
           <div v-if="selectedEntry" class="flex items-center gap-2">
             <button v-if="!editing" @click="startEdit"
-              class="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-bold text-gray-600 transition-all hover:bg-blue-50 hover:text-blue-700">
+              class="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-bold text-gray-600 transition-all hover:bg-gray-50 hover:text-gray-950">
               <Edit3 :size="14" /> 编辑
             </button>
             <button @click="deleteTarget = selectedEntry"
@@ -264,7 +265,7 @@ onMounted(fetchItems)
               class="max-h-[calc(100vh-420px)] min-h-[320px] w-full resize-none rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm leading-6 outline-none transition-all focus:border-blue-500 focus:bg-white" />
             <div class="mt-4 flex justify-end gap-2">
               <button @click="editing = false" class="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-bold text-gray-600 transition-all hover:bg-gray-50">取消</button>
-              <button @click="saveEdit" class="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white transition-all hover:bg-blue-700">
+              <button @click="saveEdit" class="inline-flex items-center gap-2 rounded-lg bg-gray-950 px-4 py-2 text-sm font-bold text-white transition-all hover:bg-gray-800">
                 <Check :size="15" /> 保存
               </button>
             </div>

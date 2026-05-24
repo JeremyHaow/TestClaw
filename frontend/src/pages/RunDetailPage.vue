@@ -4,6 +4,8 @@ import { useRoute, useRouter } from 'vue-router'
 import api, { apiUrl } from '../lib/api'
 import StatusBadge from '../components/StatusBadge.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
+import InlinePager from '../components/InlinePager.vue'
+import StyledSelect from '../components/StyledSelect.vue'
 import { useToast } from '../composables/useToast'
 import { Activity, AlertTriangle, ArrowLeft, BookOpen, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCopy, Clock, Download, FileText, Loader2, Monitor, RotateCcw, Save, Terminal, XCircle, XCircleIcon, Zap } from 'lucide-vue-next'
 
@@ -264,11 +266,33 @@ watch(() => route.params.id, (id) => {
   if (id) {
     interventionText.value = ''
     interventionCancelCurrent.value = false
+    resetDetailPaging()
     loadRun(String(id))
   }
 })
 
 const activeTab = ref('report')
+const apiResultPage = ref(1)
+const uiCommandPage = ref(1)
+const screenshotCasePage = ref(1)
+const toolCallPage = ref(1)
+const apiCaseAssetPage = ref(1)
+const uiCaseAssetPage = ref(1)
+const workflowStepPage = ref(1)
+const progressEventPage = ref(1)
+const triageSurfacePage = ref(1)
+const triageFindingPage = ref(1)
+const reportBugPage = ref(1)
+const apiResultPageSize = 20
+const uiCommandPageSize = 24
+const screenshotCasePageSize = 3
+const toolCallPageSize = 30
+const caseAssetPageSize = 8
+const workflowStepPageSize = 24
+const progressEventPageSize = 30
+const triageSurfacePageSize = 18
+const triageFindingPageSize = 5
+const reportBugPageSize = 5
 
 function getScriptContent(): string {
   return run.value?.ui_reproducible_script || run.value?.artifacts?.ui_reproducible_script || ''
@@ -308,6 +332,48 @@ function ensureSteps(steps: any): string[] {
 
 function ensureList(value: any): any[] {
   return Array.isArray(value) ? value : []
+}
+
+type IndexedItem<T> = {
+  item: T
+  index: number
+}
+
+function pageCount(total: number, pageSize: number) {
+  return Math.max(1, Math.ceil(total / pageSize))
+}
+
+function indexedPage<T>(items: T[], page: number, pageSize: number): IndexedItem<T>[] {
+  const start = Math.max(0, (page - 1) * pageSize)
+  return items.slice(start, start + pageSize).map((item, offset) => ({
+    item,
+    index: start + offset,
+  }))
+}
+
+function previewItems<T>(items: T[], limit: number): T[] {
+  return items.slice(0, limit)
+}
+
+function clampPageRef(pageRef: { value: number }, total: number, pageSize: number) {
+  const maxPage = pageCount(total, pageSize)
+  if (pageRef.value > maxPage) pageRef.value = maxPage
+  if (pageRef.value < 1) pageRef.value = 1
+}
+
+function resetDetailPaging() {
+  apiResultPage.value = 1
+  uiCommandPage.value = 1
+  screenshotCasePage.value = 1
+  toolCallPage.value = 1
+  apiCaseAssetPage.value = 1
+  uiCaseAssetPage.value = 1
+  workflowStepPage.value = 1
+  progressEventPage.value = 1
+  triageSurfacePage.value = 1
+  triageFindingPage.value = 1
+  reportBugPage.value = 1
+  expandedApiRow.value = null
 }
 
 type CaseAssetSource = 'api_cases' | 'ui_cases' | 'test_cases'
@@ -432,6 +498,8 @@ const hasGeneratedCaseAssets = computed(() => caseAssetDrafts.value.length > 0)
 const acceptedCaseAssetCount = computed(() => caseAssetDrafts.value.filter((draft) => draft.status === 'accepted').length)
 const apiCaseAssetDrafts = computed(() => caseAssetDrafts.value.filter((draft) => draft.caseType === 'api'))
 const uiCaseAssetDrafts = computed(() => caseAssetDrafts.value.filter((draft) => draft.caseType === 'ui'))
+const pagedApiCaseAssetDrafts = computed(() => indexedPage(apiCaseAssetDrafts.value, apiCaseAssetPage.value, caseAssetPageSize))
+const pagedUiCaseAssetDrafts = computed(() => indexedPage(uiCaseAssetDrafts.value, uiCaseAssetPage.value, caseAssetPageSize))
 
 async function saveAcceptedCaseAssets() {
   if (!run.value) return
@@ -484,6 +552,8 @@ function screenshotDetail(shot: any) {
 
 const workflowSteps = computed(() => run.value?.workflow_steps || [])
 const progressEvents = computed(() => run.value?.progress_events || [])
+const pagedWorkflowSteps = computed(() => indexedPage(workflowSteps.value, workflowStepPage.value, workflowStepPageSize))
+const pagedProgressEvents = computed(() => indexedPage(progressEvents.value, progressEventPage.value, progressEventPageSize))
 const currentStep = computed(() => {
   return run.value?.current_step || progressEvents.value.at(-1) || workflowSteps.value.at(-1) || null
 })
@@ -491,6 +561,10 @@ const isActiveRun = computed(() => Boolean(run.value && isActiveStatus(run.value
 const isFailedRun = computed(() => ['failed', 'bug_found'].includes(String(run.value?.status || '').toLowerCase()))
 const apiSummary = computed(() => run.value?.api_execution_result || null)
 const uiSummary = computed(() => run.value?.ui_execution_result || null)
+const apiResults = computed(() => ensureList(run.value?.api_execution_result?.results))
+const pagedApiResults = computed(() => indexedPage(apiResults.value, apiResultPage.value, apiResultPageSize))
+const uiCommandRows = computed(() => ensureList(run.value?.ui_execution_result?.commands))
+const pagedUiCommandRows = computed(() => indexedPage(uiCommandRows.value, uiCommandPage.value, uiCommandPageSize))
 const runType = computed(() => String(run.value?.test_type || '').toLowerCase())
 const isApiOnlyRun = computed(() => runType.value === 'api')
 const isUiOnlyRun = computed(() => runType.value === 'ui')
@@ -613,7 +687,11 @@ const uiScreenshotCount = computed(() => uiCaseEvidence.value.reduce((total: num
   return total + ensureList(item.screenshots).length
 }, 0))
 const hasScreenshots = computed(() => hasUiSurface.value && uiScreenshotCount.value > 0)
+const uiCaseEvidencePreview = computed(() => previewItems(uiCaseEvidence.value, 3))
+const pagedScreenshotCases = computed(() => indexedPage(uiCaseEvidence.value, screenshotCasePage.value, screenshotCasePageSize))
 const toolCalls = computed(() => ensureList(run.value?.tool_calls || run.value?.artifacts?.tool_calls))
+const recentToolCalls = computed(() => toolCalls.value.slice().reverse())
+const pagedToolCalls = computed(() => indexedPage(recentToolCalls.value, toolCallPage.value, toolCallPageSize))
 const skillPlan = computed(() => ensureList(run.value?.skill_plan || run.value?.final_report?.skill_plan))
 const toolSummary = computed(() => run.value?.tool_summary || run.value?.final_report?.tool_summary || run.value?.artifacts?.tool_summary || null)
 const ragRetrieval = computed(() => run.value?.rag_retrieval || null)
@@ -690,6 +768,12 @@ function ragScoreLabel(source: any) {
 const hasRagSurface = computed(() => Boolean(ragRetrieval.value || run.value?.rag_context))
 const hasToolSurface = computed(() => toolCalls.value.length > 0 || skillPlan.value.length > 0 || Boolean(toolSummary.value) || hasRagSurface.value)
 const triageSummary = computed(() => run.value?.triage_summary || null)
+const triageAffectedSurfaces = computed(() => ensureList(triageSummary.value?.affected_surfaces))
+const pagedTriageAffectedSurfaces = computed(() => indexedPage(triageAffectedSurfaces.value, triageSurfacePage.value, triageSurfacePageSize))
+const triageBlockingFindings = computed(() => ensureList(triageSummary.value?.blocking_findings))
+const pagedTriageBlockingFindings = computed(() => indexedPage(triageBlockingFindings.value, triageFindingPage.value, triageFindingPageSize))
+const reportBugs = computed(() => ensureList(run.value?.final_report?.bugs_found))
+const pagedReportBugs = computed(() => indexedPage(reportBugs.value, reportBugPage.value, reportBugPageSize))
 const interventionSummary = computed(() => run.value?.intervention_summary || null)
 const showInterventionPanel = computed(() => Boolean(interventionSummary.value?.useful))
 const interventionSuggestedInputs = computed(() => ensureList(interventionSummary.value?.suggested_inputs))
@@ -875,39 +959,69 @@ watch(visibleTabs, (tabs) => {
     activeTab.value = 'report'
   }
 })
+
+watch(
+  [
+    apiResults,
+    uiCommandRows,
+    uiCaseEvidence,
+    recentToolCalls,
+    apiCaseAssetDrafts,
+    uiCaseAssetDrafts,
+    workflowSteps,
+    progressEvents,
+    triageAffectedSurfaces,
+    triageBlockingFindings,
+    reportBugs,
+  ],
+  () => {
+    clampPageRef(apiResultPage, apiResults.value.length, apiResultPageSize)
+    clampPageRef(uiCommandPage, uiCommandRows.value.length, uiCommandPageSize)
+    clampPageRef(screenshotCasePage, uiCaseEvidence.value.length, screenshotCasePageSize)
+    clampPageRef(toolCallPage, recentToolCalls.value.length, toolCallPageSize)
+    clampPageRef(apiCaseAssetPage, apiCaseAssetDrafts.value.length, caseAssetPageSize)
+    clampPageRef(uiCaseAssetPage, uiCaseAssetDrafts.value.length, caseAssetPageSize)
+    clampPageRef(workflowStepPage, workflowSteps.value.length, workflowStepPageSize)
+    clampPageRef(progressEventPage, progressEvents.value.length, progressEventPageSize)
+    clampPageRef(triageSurfacePage, triageAffectedSurfaces.value.length, triageSurfacePageSize)
+    clampPageRef(triageFindingPage, triageBlockingFindings.value.length, triageFindingPageSize)
+    clampPageRef(reportBugPage, reportBugs.value.length, reportBugPageSize)
+  },
+)
 </script>
 
 <template>
   <LoadingSpinner v-if="loading && !run" text="加载运行详情..." />
 
-  <div class="space-y-4 pb-10" v-else-if="run">
+  <div class="mx-auto max-w-7xl space-y-5 pb-10" v-else-if="run">
     <!-- Header -->
-    <div class="flex items-center gap-4 border-b border-gray-200 pb-4">
+    <div class="flex flex-col gap-4 border-b border-gray-200/80 pb-5 lg:flex-row lg:items-center">
       <button
         type="button"
         aria-label="返回运行历史"
         title="返回运行历史"
         @click="router.push('/history')"
-        class="p-2 hover:bg-gray-100 rounded-lg text-gray-400 hover:text-gray-600 transition-all"
+        class="w-fit rounded-lg border border-gray-200 bg-white p-2 text-gray-500 transition-all hover:bg-gray-50 hover:text-gray-900"
       >
         <ArrowLeft :size="20" />
       </button>
-      <div class="flex-1 min-w-0">
-        <h2 class="text-lg font-semibold tracking-tight text-gray-950 truncate">{{ run.objective }}</h2>
-        <p class="text-gray-400 text-xs font-mono truncate">{{ run.target_url }}</p>
+      <div class="min-w-0 flex-1">
+        <div class="tc-page-kicker">Agent Cockpit</div>
+        <h2 class="mt-1 truncate text-xl font-semibold tracking-tight text-gray-950">{{ run.objective }}</h2>
+        <p class="mt-1 truncate font-mono text-xs text-gray-500">{{ run.target_url }}</p>
       </div>
-      <div class="flex items-center gap-2 shrink-0">
+      <div class="flex shrink-0 flex-wrap items-center gap-2">
         <button
           v-if="['queued','running'].includes(run.status)"
           @click="cancelRun"
-          class="px-3 py-1.5 bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5"
+          class="flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-bold text-red-600 transition-all hover:bg-red-100"
         >
           <XCircle :size="14" /> 取消
         </button>
         <button
           v-if="['succeeded','failed','bug_found'].includes(run.status)"
           @click="rerunRun"
-          class="px-3 py-1.5 bg-blue-50 text-blue-600 border border-blue-200 hover:bg-blue-100 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5"
+          class="flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-bold text-gray-700 transition-all hover:border-gray-300 hover:bg-gray-50"
         >
           <RotateCcw :size="14" /> 重跑
         </button>
@@ -932,15 +1046,15 @@ watch(visibleTabs, (tabs) => {
     </div>
 
     <!-- Execution Cockpit -->
-    <section class="bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
+    <section class="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
       <div
         class="p-4 border-b"
-        :class="isFailedRun ? 'bg-red-50/70 border-red-100' : isActiveRun ? 'bg-blue-50/70 border-blue-100' : 'bg-gray-50 border-gray-100'"
+        :class="isFailedRun ? 'bg-red-50/70 border-red-100' : isActiveRun ? 'bg-amber-50/70 border-amber-100' : 'bg-gray-50 border-gray-100'"
       >
         <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div class="min-w-0 flex-1">
             <div class="flex items-center gap-2">
-              <Loader2 v-if="isActiveRun" :size="18" class="text-blue-600 animate-spin" />
+              <Loader2 v-if="isActiveRun" :size="18" class="text-amber-600 animate-spin" />
               <AlertTriangle v-else-if="isFailedRun" :size="18" class="text-red-600" />
               <CheckCircle2 v-else-if="run.status === 'succeeded'" :size="18" class="text-emerald-600" />
               <Clock v-else :size="18" class="text-gray-500" />
@@ -964,7 +1078,7 @@ watch(visibleTabs, (tabs) => {
           <div class="h-2 overflow-hidden rounded-full bg-white border border-gray-200">
             <div
               class="h-full rounded-full transition-all duration-500"
-              :class="isFailedRun ? 'bg-red-500' : run.status === 'succeeded' ? 'bg-emerald-500' : 'bg-blue-500'"
+              :class="isFailedRun ? 'bg-red-500' : run.status === 'succeeded' ? 'bg-emerald-500' : 'bg-amber-500'"
               :style="{ width: `${progressPercent}%` }"
             ></div>
           </div>
@@ -973,7 +1087,7 @@ watch(visibleTabs, (tabs) => {
         <div
           v-if="isActiveRun || isFailedRun || run.status === 'cancelled'"
           class="mt-4 flex flex-col gap-3 rounded-lg border px-4 py-3 text-xs sm:flex-row sm:items-center sm:justify-between"
-          :class="isFailedRun ? 'border-red-200 bg-white text-red-700' : run.status === 'cancelled' ? 'border-gray-200 bg-white text-gray-600' : 'border-blue-200 bg-white text-blue-700'"
+          :class="isFailedRun ? 'border-red-200 bg-white text-red-700' : run.status === 'cancelled' ? 'border-gray-200 bg-white text-gray-600' : 'border-amber-200 bg-white text-amber-700'"
         >
           <div class="flex min-w-0 items-start gap-2">
             <Activity v-if="isActiveRun" :size="15" class="mt-0.5 shrink-0" />
@@ -1075,15 +1189,15 @@ watch(visibleTabs, (tabs) => {
             <h3 class="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-gray-400">
               <Terminal :size="14" /> 实时日志
             </h3>
-            <span v-if="isActiveRun" class="flex items-center gap-1.5 text-[10px] font-bold text-blue-300">
-              <span class="h-1.5 w-1.5 rounded-full bg-blue-400"></span>
+            <span v-if="isActiveRun" class="flex items-center gap-1.5 text-[10px] font-bold text-amber-300">
+              <span class="h-1.5 w-1.5 rounded-full bg-amber-400"></span>
               LIVE
             </span>
           </div>
           <pre
             v-if="liveRawLog || run.execution_log"
             class="max-h-[420px] overflow-auto whitespace-pre-wrap rounded-lg border border-white/10 bg-black/30 p-4 text-[11px] leading-relaxed text-gray-100"
-          >{{ liveRawLog || formatPreview(run.execution_log) }}</pre>
+          >{{ liveRawLog ? formatPreview(liveRawLog) : formatPreview(run.execution_log) }}</pre>
           <div v-else class="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-white/10 bg-black/20 px-4 text-center text-xs text-gray-500">
             <span v-if="isActiveRun">等待第一条执行日志...</span>
             <span v-else>暂无实时日志</span>
@@ -1184,7 +1298,7 @@ watch(visibleTabs, (tabs) => {
         <div class="rounded-lg border border-gray-100 bg-gray-50 p-3">
           <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">阻断项</div>
           <div class="mt-1 text-lg font-bold" :class="triageSummary.blocking_count ? 'text-red-600' : 'text-emerald-600'">{{ triageSummary.blocking_count || 0 }}</div>
-          <div class="mt-1 text-[11px] text-gray-500">{{ ensureList(triageSummary.affected_surfaces).length }} 个影响面</div>
+          <div class="mt-1 text-[11px] text-gray-500">{{ triageAffectedSurfaces.length }} 个影响面</div>
         </div>
         <div class="rounded-lg border border-gray-100 bg-gray-50 p-3">
           <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">证据</div>
@@ -1204,12 +1318,15 @@ watch(visibleTabs, (tabs) => {
         </div>
       </div>
 
-      <div v-if="ensureList(triageSummary.affected_surfaces).length" class="mt-4">
-        <div class="mb-2 text-[10px] font-bold uppercase tracking-widest text-gray-400">影响面</div>
-        <div class="flex flex-wrap gap-2">
+      <div v-if="triageAffectedSurfaces.length" class="mt-4">
+        <div class="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">影响面</div>
+          <InlinePager v-model:page="triageSurfacePage" :page-size="triageSurfacePageSize" :total="triageAffectedSurfaces.length" label="影响面" />
+        </div>
+        <div class="flex max-h-28 flex-wrap gap-2 overflow-auto pr-1">
           <span
-            v-for="surface in ensureList(triageSummary.affected_surfaces)"
-            :key="`${surface.type}-${surface.name}`"
+            v-for="{ item: surface, index } in pagedTriageAffectedSurfaces"
+            :key="`${surface.type}-${surface.name}-${index}`"
             class="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1 text-[11px] font-mono text-gray-600"
           >
             {{ surface.name }}
@@ -1217,41 +1334,47 @@ watch(visibleTabs, (tabs) => {
         </div>
       </div>
 
-      <div v-if="ensureList(triageSummary.blocking_findings).length" class="mt-4 space-y-3">
-        <div
-          v-for="(finding, index) in ensureList(triageSummary.blocking_findings).slice(0, 5)"
-          :key="`${finding.source}-${finding.surface}-${index}`"
-          class="rounded-lg border border-red-100 bg-red-50 p-4"
-        >
-          <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-            <div class="min-w-0">
-              <div class="text-sm font-bold text-red-950">{{ finding.title }}</div>
-              <div v-if="finding.surface" class="mt-1 truncate font-mono text-[11px] text-red-700">{{ finding.surface }}</div>
+      <div v-if="triageBlockingFindings.length" class="mt-4">
+        <div class="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div class="text-[10px] font-bold uppercase tracking-widest text-red-400">阻断发现</div>
+          <InlinePager v-model:page="triageFindingPage" :page-size="triageFindingPageSize" :total="triageBlockingFindings.length" label="发现" />
+        </div>
+        <div class="max-h-[520px] space-y-3 overflow-auto pr-1">
+          <div
+            v-for="{ item: finding, index } in pagedTriageBlockingFindings"
+            :key="`${finding.source}-${finding.surface}-${index}`"
+            class="rounded-lg border border-red-100 bg-red-50 p-4"
+          >
+            <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <div class="min-w-0">
+                <div class="text-sm font-bold text-red-950">{{ finding.title }}</div>
+                <div v-if="finding.surface" class="mt-1 truncate font-mono text-[11px] text-red-700">{{ finding.surface }}</div>
+              </div>
+              <div class="flex shrink-0 flex-wrap gap-1.5">
+                <span class="rounded px-2 py-0.5 text-[10px] font-bold" :class="triageSeverityClass(finding.severity)">{{ finding.severity || 'MEDIUM' }}</span>
+                <span class="rounded bg-white px-2 py-0.5 text-[10px] font-bold text-red-600">{{ finding.confidence || 'medium' }}</span>
+              </div>
             </div>
-            <div class="flex shrink-0 flex-wrap gap-1.5">
-              <span class="rounded px-2 py-0.5 text-[10px] font-bold" :class="triageSeverityClass(finding.severity)">{{ finding.severity || 'MEDIUM' }}</span>
-              <span class="rounded bg-white px-2 py-0.5 text-[10px] font-bold text-red-600">{{ finding.confidence || 'medium' }}</span>
+            <p v-if="finding.description" class="mt-2 text-xs leading-5 text-red-800">{{ finding.description }}</p>
+            <div v-if="ensureList(finding.evidence).length" class="mt-3 flex flex-wrap gap-2">
+              <span
+                v-for="(evidence, evidenceIndex) in ensureList(finding.evidence)"
+                :key="`${finding.title}-evidence-${evidenceIndex}`"
+                class="rounded border border-red-100 bg-white px-2 py-1 text-[11px] text-red-700"
+              >
+                {{ evidence.summary || evidence.kind }}
+              </span>
             </div>
+            <div v-if="ensureList(finding.reproduction_steps).length" class="mt-3 rounded-lg border border-red-100 bg-white p-3">
+              <div class="text-[10px] font-bold uppercase tracking-widest text-red-400">复现</div>
+              <ol class="mt-2 space-y-1">
+                <li v-for="(step, stepIndex) in ensureList(finding.reproduction_steps).slice(0, 4)" :key="`${finding.title}-step-${stepIndex}`" class="text-xs leading-5 text-red-800">
+                  {{ stepIndex + 1 }}. {{ step }}
+                </li>
+              </ol>
+            </div>
+            <div v-if="finding.next_action" class="mt-3 text-xs font-bold text-red-900">{{ finding.next_action }}</div>
           </div>
-          <p v-if="finding.description" class="mt-2 text-xs leading-5 text-red-800">{{ finding.description }}</p>
-          <div v-if="ensureList(finding.evidence).length" class="mt-3 flex flex-wrap gap-2">
-            <span
-              v-for="(evidence, evidenceIndex) in ensureList(finding.evidence)"
-              :key="`${finding.title}-evidence-${evidenceIndex}`"
-              class="rounded border border-red-100 bg-white px-2 py-1 text-[11px] text-red-700"
-            >
-              {{ evidence.summary || evidence.kind }}
-            </span>
-          </div>
-          <div v-if="ensureList(finding.reproduction_steps).length" class="mt-3 rounded-lg border border-red-100 bg-white p-3">
-            <div class="text-[10px] font-bold uppercase tracking-widest text-red-400">复现</div>
-            <ol class="mt-2 space-y-1">
-              <li v-for="(step, stepIndex) in ensureList(finding.reproduction_steps).slice(0, 4)" :key="`${finding.title}-step-${stepIndex}`" class="text-xs leading-5 text-red-800">
-                {{ stepIndex + 1 }}. {{ step }}
-              </li>
-            </ol>
-          </div>
-          <div v-if="finding.next_action" class="mt-3 text-xs font-bold text-red-900">{{ finding.next_action }}</div>
         </div>
       </div>
       <div v-else class="mt-4 rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3 text-xs text-emerald-700">
@@ -1294,13 +1417,13 @@ watch(visibleTabs, (tabs) => {
     </div>
 
     <!-- Tab Navigation -->
-    <div class="sticky top-0 z-10 flex flex-wrap gap-1 rounded-lg border border-gray-200 bg-gray-100 p-1">
+    <div class="sticky top-0 z-10 flex flex-wrap gap-1 rounded-lg border border-gray-200 bg-white/90 p-1 shadow-sm backdrop-blur">
       <button
         v-for="tab in visibleTabs"
         :key="tab.key"
         @click="activeTab = tab.key"
         class="flex items-center gap-1.5 px-4 py-2 rounded-md text-xs font-bold transition-all"
-        :class="activeTab === tab.key ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'"
+        :class="activeTab === tab.key ? 'bg-gray-950 text-white shadow-sm' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-800'"
       >
         <component :is="tab.icon" :size="14" />
         {{ tab.label }}
@@ -1309,7 +1432,7 @@ watch(visibleTabs, (tabs) => {
 
     <!-- Tab: Report -->
     <div v-if="activeTab === 'report'" class="space-y-4">
-      <div v-if="run.final_report" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+      <div v-if="run.final_report" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
         <div class="flex flex-col gap-3 border-b border-gray-100 pb-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">完整测试报告</h3>
@@ -1332,7 +1455,7 @@ watch(visibleTabs, (tabs) => {
             <div class="mt-2 text-sm font-bold text-gray-900">
               {{ run.final_report.api_test_summary?.passed || 0 }}/{{ run.final_report.api_test_summary?.total || 0 }} 通过
             </div>
-            <ul class="mt-3 space-y-1">
+            <ul class="mt-3 max-h-40 space-y-1 overflow-auto pr-1">
               <li v-for="(finding, i) in ensureList(run.final_report.api_test_summary?.key_findings)" :key="`api-finding-${i}`" class="text-xs leading-5 text-gray-600">
                 {{ finding }}
               </li>
@@ -1343,7 +1466,7 @@ watch(visibleTabs, (tabs) => {
             <div class="mt-2 text-sm font-bold text-gray-900">
               {{ run.final_report.ui_test_summary?.passed || 0 }}/{{ run.final_report.ui_test_summary?.total || 0 }} 通过
             </div>
-            <ul class="mt-3 space-y-1">
+            <ul class="mt-3 max-h-40 space-y-1 overflow-auto pr-1">
               <li v-for="(finding, i) in ensureList(run.final_report.ui_test_summary?.key_findings)" :key="`ui-finding-${i}`" class="text-xs leading-5 text-gray-600">
                 {{ finding }}
               </li>
@@ -1353,7 +1476,7 @@ watch(visibleTabs, (tabs) => {
 
         <div v-if="run.final_report.execution_notes?.length" class="mt-4 rounded-lg border border-blue-100 bg-blue-50 p-4">
           <div class="text-[10px] font-bold uppercase tracking-widest text-blue-500">执行说明</div>
-          <ul class="mt-2 space-y-1">
+          <ul class="mt-2 max-h-44 space-y-1 overflow-auto pr-1">
             <li v-for="(note, i) in run.final_report.execution_notes" :key="`note-${i}`" class="text-xs leading-5 text-blue-700">{{ note }}</li>
           </ul>
         </div>
@@ -1371,17 +1494,20 @@ watch(visibleTabs, (tabs) => {
 
         <div v-if="run.final_report.recommendations?.length" class="mt-4 rounded-lg border border-amber-100 bg-amber-50 p-4">
           <div class="text-[10px] font-bold uppercase tracking-widest text-amber-500">后续建议</div>
-          <ul class="mt-2 space-y-1">
+          <ul class="mt-2 max-h-44 space-y-1 overflow-auto pr-1">
             <li v-for="(rec, i) in run.final_report.recommendations" :key="`report-rec-${i}`" class="text-xs leading-5 text-amber-800">{{ rec }}</li>
           </ul>
         </div>
       </div>
 
       <!-- Bugs Found -->
-      <div v-if="run.final_report?.bugs_found?.length" class="bg-white border border-red-200 rounded-xl shadow-sm p-6">
-        <h3 class="text-xs font-bold text-red-400 uppercase tracking-widest mb-4">发现的缺陷</h3>
-        <div class="space-y-3">
-          <div v-for="(bug, i) in run.final_report.bugs_found" :key="i" class="p-4 bg-red-50 rounded-lg border border-red-100">
+      <div v-if="reportBugs.length" class="bg-white border border-red-200 rounded-lg shadow-sm p-6">
+        <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <h3 class="text-xs font-bold text-red-400 uppercase tracking-widest">发现的缺陷</h3>
+          <InlinePager v-model:page="reportBugPage" :page-size="reportBugPageSize" :total="reportBugs.length" label="缺陷" />
+        </div>
+        <div class="max-h-[520px] space-y-3 overflow-auto pr-1">
+          <div v-for="{ item: bug, index: i } in pagedReportBugs" :key="i" class="p-4 bg-red-50 rounded-lg border border-red-100">
             <div class="flex items-center justify-between mb-2">
               <span class="font-bold text-sm text-red-900">{{ bug.title }}</span>
               <span class="px-2 py-0.5 bg-red-200 text-red-800 rounded text-[10px] font-bold">{{ bug.severity }}</span>
@@ -1392,7 +1518,7 @@ watch(visibleTabs, (tabs) => {
       </div>
 
       <!-- Execution Result (legacy) -->
-      <div v-if="run.execution_result && !run.final_report" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+      <div v-if="run.execution_result && !run.final_report" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
         <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">执行结果</h3>
         <div class="grid grid-cols-2 gap-4 mb-4">
           <div class="p-3 bg-gray-50 rounded-lg border border-gray-100">
@@ -1415,8 +1541,11 @@ watch(visibleTabs, (tabs) => {
 
     <!-- Tab: API Tests -->
     <div v-if="activeTab === 'api'" class="space-y-4">
-      <div v-if="run.api_execution_result" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
-        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">API 测试结果</h3>
+      <div v-if="run.api_execution_result" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
+        <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">API 测试结果</h3>
+          <InlinePager v-model:page="apiResultPage" :page-size="apiResultPageSize" :total="apiResults.length" label="接口" />
+        </div>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
           <div class="p-3 bg-gray-50 rounded-lg border border-gray-100">
             <div class="text-[10px] font-bold text-gray-400 uppercase">总计</div>
@@ -1436,9 +1565,9 @@ watch(visibleTabs, (tabs) => {
           </div>
         </div>
 
-        <div class="overflow-x-auto">
-          <table class="w-full text-left text-xs">
-            <thead>
+        <div class="max-h-[640px] overflow-auto rounded-lg border border-gray-100">
+          <table class="w-full min-w-[760px] text-left text-xs">
+            <thead class="sticky top-0 z-[1]">
               <tr class="bg-gray-50 text-gray-500 border-b border-gray-100">
                 <th class="px-4 py-2 font-semibold uppercase tracking-wider text-[10px] w-6"></th>
                 <th class="px-4 py-2 font-semibold uppercase tracking-wider text-[10px]">状态</th>
@@ -1450,7 +1579,7 @@ watch(visibleTabs, (tabs) => {
               </tr>
             </thead>
             <tbody class="divide-y divide-gray-100">
-              <template v-for="(r, i) in run.api_execution_result.results" :key="i">
+              <template v-for="{ item: r, index: i } in pagedApiResults" :key="i">
               <tr @click="toggleApiRow(i)" class="hover:bg-gray-50 cursor-pointer">
                 <td class="px-4 py-2">
                   <ChevronDown v-if="expandedApiRow === i" :size="12" class="text-gray-400" />
@@ -1469,14 +1598,14 @@ watch(visibleTabs, (tabs) => {
               </tr>
               <tr v-if="expandedApiRow === i">
                 <td colspan="7" class="px-4 py-3 bg-gray-50">
-                  <div class="grid grid-cols-2 gap-3">
+                  <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
                     <div>
                       <div class="text-[10px] font-bold text-gray-400 uppercase mb-1">请求头</div>
-                      <pre class="bg-gray-900 text-gray-200 rounded-lg p-3 text-[10px] font-mono overflow-auto max-h-32">{{ JSON.stringify(r.request_headers || {}, null, 2) }}</pre>
+                      <pre class="bg-gray-950 text-gray-200 rounded-lg p-3 text-[10px] font-mono overflow-auto max-h-32 whitespace-pre-wrap break-words">{{ JSON.stringify(r.request_headers || {}, null, 2) }}</pre>
                     </div>
                     <div>
                       <div class="text-[10px] font-bold text-gray-400 uppercase mb-1">响应体</div>
-                      <pre class="bg-gray-900 text-gray-200 rounded-lg p-3 text-[10px] font-mono overflow-auto max-h-32">{{ typeof r.body === 'object' ? JSON.stringify(r.body, null, 2) : r.body }}</pre>
+                      <pre class="bg-gray-950 text-gray-200 rounded-lg p-3 text-[10px] font-mono overflow-auto max-h-32 whitespace-pre-wrap break-words">{{ typeof r.body === 'object' ? JSON.stringify(r.body, null, 2) : r.body }}</pre>
                     </div>
                   </div>
                   <div v-if="r.error" class="mt-2">
@@ -1507,7 +1636,7 @@ watch(visibleTabs, (tabs) => {
 
     <!-- Tab: UI Tests -->
     <div v-if="activeTab === 'ui'" class="space-y-4">
-      <div v-if="run.ui_execution_result" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+      <div v-if="run.ui_execution_result" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
         <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">UI 测试结果</h3>
         <div class="grid grid-cols-3 gap-4 mb-4">
           <div class="p-3 bg-gray-50 rounded-lg border border-gray-100">
@@ -1528,26 +1657,42 @@ watch(visibleTabs, (tabs) => {
         </div>
 
         <!-- Commands log -->
-        <div class="space-y-2">
-          <div v-for="(cmd, i) in run.ui_execution_result.commands" :key="i"
-            class="flex items-center gap-3 p-3 rounded-lg border text-xs"
+        <div v-if="uiCommandRows.length" class="rounded-lg border border-gray-100 bg-gray-50 p-3">
+          <div class="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">命令日志</div>
+            <InlinePager v-model:page="uiCommandPage" :page-size="uiCommandPageSize" :total="uiCommandRows.length" label="命令" />
+          </div>
+          <div class="max-h-[420px] space-y-2 overflow-auto pr-1">
+          <div v-for="{ item: cmd, index: i } in pagedUiCommandRows" :key="i"
+            class="flex flex-col gap-2 rounded-lg border p-3 text-xs sm:flex-row sm:items-center sm:gap-3"
             :class="cmd.status_code === 0 ? 'bg-emerald-50 border-emerald-100' : 'bg-red-50 border-red-100'"
           >
             <span v-if="cmd.case_title" class="text-gray-400 shrink-0">{{ cmd.case_title }}</span>
-            <span class="font-mono font-bold text-gray-700 shrink-0">{{ cmd.normalized_command || cmd.command }}</span>
-            <span v-if="cmd.normalization" class="text-blue-500 truncate">{{ cmd.normalization }}</span>
-            <span v-if="cmd.stderr" class="text-red-500 truncate">{{ cmd.stderr }}</span>
+            <span class="break-all font-mono font-bold text-gray-700 sm:shrink-0">{{ cmd.normalized_command || cmd.command }}</span>
+            <span v-if="cmd.normalization" class="min-w-0 break-words text-blue-500 sm:truncate">{{ cmd.normalization }}</span>
+            <span v-if="cmd.stderr" class="min-w-0 break-words text-red-500 sm:truncate">{{ cmd.stderr }}</span>
+          </div>
           </div>
         </div>
 
         <!-- Screenshots -->
         <div v-if="uiCaseEvidence.length" class="mt-6">
-          <h4 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3 flex items-center gap-2">
-            <Camera :size="14" /> 截图证据 ({{ uiScreenshotCount }})
-          </h4>
+          <div class="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <h4 class="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
+              <Camera :size="14" /> 截图证据预览 ({{ uiScreenshotCount }})
+            </h4>
+            <button
+              v-if="hasScreenshots"
+              type="button"
+              class="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-[11px] font-bold text-gray-600 transition-all hover:bg-gray-50 hover:text-gray-900"
+              @click="activeTab = 'screenshots'"
+            >
+              查看全部证据
+            </button>
+          </div>
           <div class="space-y-4">
             <div
-              v-for="caseEvidence in uiCaseEvidence"
+              v-for="caseEvidence in uiCaseEvidencePreview"
               :key="caseEvidence.case_index"
               class="rounded-lg border border-gray-200 bg-gray-50 p-3"
             >
@@ -1597,16 +1742,19 @@ watch(visibleTabs, (tabs) => {
 
     <!-- Tab: Screenshot Evidence -->
     <div v-if="activeTab === 'screenshots'" class="space-y-4">
-      <div v-if="uiCaseEvidence.length" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
-        <div class="mb-4 flex items-center justify-between">
+      <div v-if="uiCaseEvidence.length" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
+        <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
             <Camera :size="14" /> 截图证据
           </h3>
-          <span class="rounded bg-gray-100 px-2 py-1 text-[10px] font-bold text-gray-500">{{ uiScreenshotCount }} 张</span>
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="rounded bg-gray-100 px-2 py-1 text-[10px] font-bold text-gray-500">{{ uiScreenshotCount }} 张</span>
+            <InlinePager v-model:page="screenshotCasePage" :page-size="screenshotCasePageSize" :total="uiCaseEvidence.length" label="用例" />
+          </div>
         </div>
-        <div class="space-y-5">
+        <div class="max-h-[760px] space-y-5 overflow-auto pr-1">
           <div
-            v-for="caseEvidence in uiCaseEvidence"
+            v-for="{ item: caseEvidence } in pagedScreenshotCases"
             :key="caseEvidence.case_index"
             class="rounded-lg border border-gray-200 bg-gray-50 p-4"
           >
@@ -1622,7 +1770,7 @@ watch(visibleTabs, (tabs) => {
                 {{ caseEvidence.status }}
               </span>
             </div>
-            <div v-if="caseEvidence.screenshots.length" class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div v-if="caseEvidence.screenshots.length" class="grid max-h-[560px] grid-cols-1 gap-4 overflow-auto pr-1 md:grid-cols-2 xl:grid-cols-3">
               <div
                 v-for="(shot, i) in caseEvidence.screenshots"
                 :key="screenshotPath(shot)"
@@ -1655,7 +1803,7 @@ watch(visibleTabs, (tabs) => {
 
     <!-- Tab: Tools -->
     <div v-if="activeTab === 'tools'" class="space-y-4">
-      <div v-if="hasRagSurface" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+      <div v-if="hasRagSurface" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
         <div class="mb-4 flex items-center justify-between gap-3">
           <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
             <BookOpen :size="14" /> {{ ragPanelTitle }}
@@ -1689,7 +1837,7 @@ watch(visibleTabs, (tabs) => {
           </div>
         </div>
 
-        <div v-if="ragSources.length" class="mt-4 grid gap-3 md:grid-cols-2">
+        <div v-if="ragSources.length" class="mt-4 grid max-h-[420px] gap-3 overflow-auto pr-1 md:grid-cols-2">
           <div
             v-for="source in ragSources"
             :key="source.id"
@@ -1706,7 +1854,7 @@ watch(visibleTabs, (tabs) => {
         <pre v-if="run.rag_context" class="mt-4 max-h-44 overflow-auto rounded-lg border border-gray-100 bg-gray-950 p-3 text-[11px] leading-relaxed text-gray-100">{{ run.rag_context }}</pre>
       </div>
 
-      <div v-if="skillPlan.length" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+      <div v-if="skillPlan.length" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
         <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-2">
           <Activity :size="14" /> Skill 调度
         </h3>
@@ -1731,16 +1879,19 @@ watch(visibleTabs, (tabs) => {
         </div>
       </div>
 
-      <div v-if="toolCalls.length" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
-        <div class="mb-4 flex items-center justify-between">
+      <div v-if="toolCalls.length" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
+        <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
             <Terminal :size="14" /> 工具调用记录
           </h3>
-          <span class="rounded bg-gray-100 px-2 py-1 text-[10px] font-bold text-gray-500">{{ toolCalls.length }} 次</span>
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="rounded bg-gray-100 px-2 py-1 text-[10px] font-bold text-gray-500">{{ toolCalls.length }} 次</span>
+            <InlinePager v-model:page="toolCallPage" :page-size="toolCallPageSize" :total="recentToolCalls.length" label="调用" />
+          </div>
         </div>
-        <div class="space-y-2">
+        <div class="max-h-[640px] space-y-2 overflow-auto pr-1">
           <div
-            v-for="(call, i) in toolCalls.slice().reverse().slice(0, 120)"
+            v-for="{ item: call, index: i } in pagedToolCalls"
             :key="`${call.tool}-${i}-${call.timestamp}`"
             class="rounded-lg border border-gray-100 bg-gray-50 p-3"
           >
@@ -1758,8 +1909,8 @@ watch(visibleTabs, (tabs) => {
               </span>
             </div>
             <div class="mt-2 grid gap-2 md:grid-cols-2">
-              <pre v-if="call.input" class="max-h-28 overflow-auto rounded bg-white p-2 text-[10px] font-mono text-gray-500 border border-gray-100">{{ formatPreview(call.input, 1000) }}</pre>
-              <pre v-if="call.output" class="max-h-28 overflow-auto rounded bg-white p-2 text-[10px] font-mono text-gray-500 border border-gray-100">{{ formatPreview(call.output, 1000) }}</pre>
+              <pre v-if="call.input" class="max-h-28 overflow-auto rounded bg-white p-2 text-[10px] font-mono text-gray-500 border border-gray-100 whitespace-pre-wrap break-words">{{ formatPreview(call.input, 1000) }}</pre>
+              <pre v-if="call.output" class="max-h-28 overflow-auto rounded bg-white p-2 text-[10px] font-mono text-gray-500 border border-gray-100 whitespace-pre-wrap break-words">{{ formatPreview(call.output, 1000) }}</pre>
             </div>
           </div>
         </div>
@@ -1770,7 +1921,7 @@ watch(visibleTabs, (tabs) => {
 
     <!-- Tab: Test Cases -->
     <div v-if="activeTab === 'cases'" class="space-y-4">
-      <div v-if="hasGeneratedCaseAssets" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+      <div v-if="hasGeneratedCaseAssets" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
         <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">用例资产</h3>
@@ -1785,7 +1936,7 @@ watch(visibleTabs, (tabs) => {
             <button
               @click="saveAcceptedCaseAssets"
               :disabled="caseAssetSaving || !acceptedCaseAssetCount"
-              class="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-3 text-xs font-bold text-white transition-all hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-300"
+              class="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg bg-gray-950 px-3 text-xs font-bold text-white transition-all hover:bg-gray-800 disabled:cursor-not-allowed disabled:bg-gray-300"
             >
               <Loader2 v-if="caseAssetSaving" :size="14" class="animate-spin" />
               <Save v-else :size="14" />
@@ -1799,11 +1950,14 @@ watch(visibleTabs, (tabs) => {
       </div>
 
       <!-- API Cases -->
-      <div v-if="apiCaseAssetDrafts.length" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
-        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">API 测试用例 ({{ apiCaseAssetDrafts.length }})</h3>
-        <div class="space-y-3">
+      <div v-if="apiCaseAssetDrafts.length" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
+        <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">API 测试用例 ({{ apiCaseAssetDrafts.length }})</h3>
+          <InlinePager v-model:page="apiCaseAssetPage" :page-size="caseAssetPageSize" :total="apiCaseAssetDrafts.length" label="用例" />
+        </div>
+        <div class="max-h-[720px] space-y-3 overflow-auto pr-1">
           <div
-            v-for="draft in apiCaseAssetDrafts"
+            v-for="{ item: draft } in pagedApiCaseAssetDrafts"
             :key="draft.key"
             class="rounded-lg border p-4 transition-all"
             :class="draft.status === 'accepted' ? 'border-emerald-200 bg-emerald-50/40' : 'border-gray-200 bg-gray-50 opacity-75'"
@@ -1838,12 +1992,12 @@ watch(visibleTabs, (tabs) => {
             </div>
 
             <div class="grid gap-3 md:grid-cols-[120px_160px_minmax(0,1fr)]">
-              <select v-model="draft.priority" class="h-9 rounded-lg border border-gray-200 bg-white px-2 text-xs font-bold text-gray-700 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100">
+              <StyledSelect v-model="draft.priority" size="sm">
                 <option value="P0">P0</option>
                 <option value="P1">P1</option>
                 <option value="P2">P2</option>
                 <option value="P3">P3</option>
-              </select>
+              </StyledSelect>
               <input v-model="draft.category" class="h-9 rounded-lg border border-gray-200 bg-white px-3 text-xs text-gray-700 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" />
               <textarea v-model="draft.expectedText" rows="2" class="min-h-9 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs leading-5 text-gray-600 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"></textarea>
             </div>
@@ -1853,11 +2007,14 @@ watch(visibleTabs, (tabs) => {
       </div>
 
       <!-- UI Cases -->
-      <div v-if="uiCaseAssetDrafts.length" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
-        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">UI 测试用例 ({{ uiCaseAssetDrafts.length }})</h3>
-        <div class="space-y-3">
+      <div v-if="uiCaseAssetDrafts.length" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
+        <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">UI 测试用例 ({{ uiCaseAssetDrafts.length }})</h3>
+          <InlinePager v-model:page="uiCaseAssetPage" :page-size="caseAssetPageSize" :total="uiCaseAssetDrafts.length" label="用例" />
+        </div>
+        <div class="max-h-[720px] space-y-3 overflow-auto pr-1">
           <div
-            v-for="draft in uiCaseAssetDrafts"
+            v-for="{ item: draft } in pagedUiCaseAssetDrafts"
             :key="draft.key"
             class="rounded-lg border p-4 transition-all"
             :class="draft.status === 'accepted' ? 'border-emerald-200 bg-emerald-50/40' : 'border-gray-200 bg-gray-50 opacity-75'"
@@ -1886,12 +2043,12 @@ watch(visibleTabs, (tabs) => {
             </div>
 
             <div class="grid gap-3 md:grid-cols-[120px_160px_minmax(0,1fr)]">
-              <select v-model="draft.priority" class="h-9 rounded-lg border border-gray-200 bg-white px-2 text-xs font-bold text-gray-700 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100">
+              <StyledSelect v-model="draft.priority" size="sm">
                 <option value="P0">P0</option>
                 <option value="P1">P1</option>
                 <option value="P2">P2</option>
                 <option value="P3">P3</option>
-              </select>
+              </StyledSelect>
               <input v-model="draft.category" class="h-9 rounded-lg border border-gray-200 bg-white px-3 text-xs text-gray-700 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" />
               <textarea v-model="draft.expectedText" rows="2" class="min-h-9 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs leading-5 text-gray-600 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"></textarea>
             </div>
@@ -1899,7 +2056,7 @@ watch(visibleTabs, (tabs) => {
 
             <div v-if="caseCommands(draft.raw).length" class="mt-3">
               <div class="text-[10px] font-bold text-gray-400 uppercase mb-1">Playwright 命令</div>
-              <pre class="bg-gray-100 rounded p-2 text-[10px] font-mono text-gray-600 overflow-auto max-h-32">{{ caseCommands(draft.raw).join('\n') }}</pre>
+              <pre class="bg-gray-100 rounded p-2 text-[10px] font-mono text-gray-600 overflow-auto max-h-32 whitespace-pre-wrap break-words">{{ caseCommands(draft.raw).join('\n') }}</pre>
             </div>
           </div>
         </div>
@@ -1910,7 +2067,7 @@ watch(visibleTabs, (tabs) => {
 
     <!-- Tab: Script -->
     <div v-if="activeTab === 'script'" class="space-y-4">
-      <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+      <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
         <div class="flex items-center justify-between mb-4">
           <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
             <Terminal :size="14" /> 可复现 Playwright 脚本
@@ -1924,14 +2081,14 @@ watch(visibleTabs, (tabs) => {
             </button>
             <button
               @click="downloadScript"
-              class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all"
+              class="px-3 py-1.5 bg-gray-950 hover:bg-gray-800 text-white rounded-lg text-xs font-bold transition-all"
             >
               下载
             </button>
           </div>
         </div>
         <div v-if="run.ui_reproducible_script || run.artifacts?.ui_reproducible_script">
-          <pre class="bg-gray-900 text-green-400 rounded-xl p-4 text-xs font-mono overflow-auto max-h-[600px] whitespace-pre-wrap">{{ run.ui_reproducible_script || run.artifacts?.ui_reproducible_script }}</pre>
+          <pre class="bg-gray-950 text-green-400 rounded-lg p-4 text-xs font-mono overflow-auto max-h-[600px] whitespace-pre-wrap break-words">{{ run.ui_reproducible_script || run.artifacts?.ui_reproducible_script }}</pre>
         </div>
         <div v-else class="text-center py-12 text-gray-400 text-sm">
           暂无脚本 — 运行 UI 测试后会自动生成可复现脚本
@@ -1939,13 +2096,13 @@ watch(visibleTabs, (tabs) => {
       </div>
 
       <!-- Login Info -->
-      <div v-if="run.setup_instructions || run.login_instructions" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+      <div v-if="run.setup_instructions || run.login_instructions" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
         <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">测试前置说明</h3>
         <p class="text-sm text-gray-700 whitespace-pre-wrap">{{ run.setup_instructions || run.login_instructions }}</p>
       </div>
 
       <!-- Login Snapshot -->
-      <div v-if="run.ui_login_snapshot" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+      <div v-if="run.ui_login_snapshot" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
         <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">登录后页面快照</h3>
         <pre class="bg-gray-50 rounded-lg p-3 text-[10px] font-mono text-gray-600 overflow-auto max-h-60 whitespace-pre-wrap">{{ run.ui_login_snapshot?.slice(0, 3000) }}</pre>
       </div>
@@ -1954,13 +2111,16 @@ watch(visibleTabs, (tabs) => {
     <!-- Tab: Logs -->
     <div v-if="activeTab === 'logs'" class="space-y-4">
       <!-- Workflow Steps Log -->
-      <div v-if="run.workflow_steps?.length" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
-        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-2">
-          <Terminal :size="14" /> 工作流日志
-        </h3>
-        <div class="space-y-2">
+      <div v-if="run.workflow_steps?.length" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
+        <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
+            <Terminal :size="14" /> 工作流日志
+          </h3>
+          <InlinePager v-model:page="workflowStepPage" :page-size="workflowStepPageSize" :total="workflowSteps.length" label="步骤" />
+        </div>
+        <div class="max-h-[560px] space-y-2 overflow-auto pr-1">
           <div
-            v-for="(step, idx) in run.workflow_steps"
+            v-for="{ item: step, index: idx } in pagedWorkflowSteps"
             :key="idx"
             class="flex items-start gap-3 p-3 rounded-lg border font-mono text-xs"
             :class="step.status === 'done' ? 'bg-emerald-50 border-emerald-200' : step.status === 'failed' ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200'"
@@ -1969,7 +2129,7 @@ watch(visibleTabs, (tabs) => {
             <span class="px-1.5 py-0.5 rounded text-[10px] font-bold shrink-0"
               :class="step.status === 'done' ? 'bg-emerald-200 text-emerald-800' : step.status === 'failed' ? 'bg-red-200 text-red-800' : 'bg-gray-200 text-gray-600'"
             >{{ step.node }}</span>
-            <span class="text-gray-600 flex-1">{{ step.detail }}</span>
+            <span class="min-w-0 flex-1 break-words text-gray-600">{{ step.detail }}</span>
             <span class="text-[10px] shrink-0"
               :class="step.status === 'done' ? 'text-emerald-600' : step.status === 'failed' ? 'text-red-600' : 'text-gray-400'"
             >{{ step.status }}</span>
@@ -1977,8 +2137,34 @@ watch(visibleTabs, (tabs) => {
         </div>
       </div>
 
+      <!-- Progress Events Log -->
+      <div v-if="progressEvents.length" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
+        <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
+            <Activity :size="14" /> 进度事件
+          </h3>
+          <InlinePager v-model:page="progressEventPage" :page-size="progressEventPageSize" :total="progressEvents.length" label="事件" />
+        </div>
+        <div class="max-h-[560px] space-y-2 overflow-auto pr-1">
+          <div
+            v-for="{ item: event, index: idx } in pagedProgressEvents"
+            :key="`${event.timestamp || idx}-${event.node || event.stage || 'event'}`"
+            class="rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs"
+          >
+            <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div class="min-w-0 break-all font-mono font-bold text-gray-800">{{ event.node || event.stage || event.event || `event ${idx + 1}` }}</div>
+              <div class="flex shrink-0 flex-wrap items-center gap-2">
+                <span class="rounded bg-white px-2 py-0.5 text-[10px] font-bold text-gray-500">{{ event.status || event.source || 'progress' }}</span>
+                <span v-if="event.timestamp" class="font-mono text-[10px] text-gray-400">{{ new Date(event.timestamp).toLocaleString('zh-CN') }}</span>
+              </div>
+            </div>
+            <p v-if="event.detail || event.message" class="mt-2 break-words leading-5 text-gray-600">{{ event.detail || event.message }}</p>
+          </div>
+        </div>
+      </div>
+
       <!-- Execution Result Log -->
-      <div v-if="run.execution_result" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+      <div v-if="run.execution_result" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
         <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-2">
           <Terminal :size="14" /> 执行日志
         </h3>
@@ -2002,11 +2188,11 @@ watch(visibleTabs, (tabs) => {
         </div>
         <div v-if="run.execution_result.stdout" class="mb-3">
           <div class="text-[10px] font-bold text-gray-400 uppercase mb-1">标准输出 (stdout)</div>
-          <pre class="bg-gray-900 text-gray-100 rounded-lg p-4 text-[11px] font-mono overflow-auto max-h-60 leading-relaxed">{{ run.execution_result.stdout }}</pre>
+          <pre class="bg-gray-950 text-gray-100 rounded-lg p-4 text-[11px] font-mono overflow-auto max-h-60 leading-relaxed whitespace-pre-wrap break-words">{{ run.execution_result.stdout }}</pre>
         </div>
         <div v-if="run.execution_result.stderr">
           <div class="text-[10px] font-bold text-red-400 uppercase mb-1">错误输出 (stderr)</div>
-          <pre class="bg-gray-900 text-red-300 rounded-lg p-4 text-[11px] font-mono overflow-auto max-h-60 leading-relaxed">{{ run.execution_result.stderr }}</pre>
+          <pre class="bg-gray-950 text-red-300 rounded-lg p-4 text-[11px] font-mono overflow-auto max-h-60 leading-relaxed whitespace-pre-wrap break-words">{{ run.execution_result.stderr }}</pre>
         </div>
         <div v-if="run.execution_result.trace_path" class="mt-3">
           <div class="text-[10px] font-bold text-gray-400 uppercase mb-1">Trace 路径</div>
@@ -2015,28 +2201,28 @@ watch(visibleTabs, (tabs) => {
       </div>
 
       <!-- Generated Code -->
-      <div v-if="run.generated_code" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+      <div v-if="run.generated_code" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
         <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-2">
           <FileText :size="14" /> 生成代码
         </h3>
-        <pre class="bg-gray-900 text-gray-100 rounded-lg p-4 text-[11px] font-mono overflow-auto max-h-80 leading-relaxed">{{ run.generated_code }}</pre>
+        <pre class="bg-gray-950 text-gray-100 rounded-lg p-4 text-[11px] font-mono overflow-auto max-h-80 leading-relaxed whitespace-pre-wrap break-words">{{ run.generated_code }}</pre>
       </div>
 
       <!-- Raw Execution Log -->
-      <div v-if="run.execution_log" class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
+      <div v-if="run.execution_log" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
         <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-2">
           <Terminal :size="14" /> 原始日志 (JSON)
         </h3>
-        <pre class="bg-gray-900 text-gray-100 rounded-lg p-4 text-[11px] font-mono overflow-auto max-h-80 leading-relaxed">{{ (() => { try { return JSON.stringify(JSON.parse(run.execution_log), null, 2) } catch { return run.execution_log } })() }}</pre>
+        <pre class="bg-gray-950 text-gray-100 rounded-lg p-4 text-[11px] font-mono overflow-auto max-h-80 leading-relaxed whitespace-pre-wrap break-words">{{ formatJson(run.execution_log) }}</pre>
       </div>
 
-      <div v-if="!run.workflow_steps?.length && !run.execution_result && !run.generated_code && !run.execution_log" class="text-center py-12 text-gray-400 text-sm">暂无日志</div>
+      <div v-if="!run.workflow_steps?.length && !progressEvents.length && !run.execution_result && !run.generated_code && !run.execution_log" class="text-center py-12 text-gray-400 text-sm">暂无日志</div>
     </div>
   </div>
 
   <div v-else-if="!loading" class="flex flex-col items-center justify-center py-24 text-center">
     <div class="text-gray-400 text-sm">运行不存在或加载失败</div>
-    <button @click="router.push('/history')" class="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-700 transition-all">
+    <button @click="router.push('/history')" class="mt-4 px-4 py-2 bg-gray-950 text-white rounded-lg text-sm font-bold hover:bg-gray-800 transition-all">
       返回历史记录
     </button>
   </div>

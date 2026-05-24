@@ -28,7 +28,7 @@ const settingsLinks = [
         v-for="link in settingsLinks"
         :key="link.path"
         @click="router.push(link.path)"
-        class="bg-white border border-gray-200 rounded-xl p-5 shadow-sm hover:border-blue-200 transition-all cursor-pointer group flex items-center gap-4"
+        class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm hover:border-blue-200 transition-all cursor-pointer group flex items-center gap-4"
       >
         <div class="p-3 rounded-lg bg-gray-50 text-gray-400 group-hover:bg-blue-50 group-hover:text-blue-600 transition-all">
           <component :is="link.icon" :size="20" />

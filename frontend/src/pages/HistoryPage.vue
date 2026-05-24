@@ -6,6 +6,7 @@ import StatusBadge from '../components/StatusBadge.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Pagination from '../components/Pagination.vue'
+import StyledSelect from '../components/StyledSelect.vue'
 import { useToast } from '../composables/useToast'
 import { Eye, Filter, Trash2 } from 'lucide-vue-next'
 
@@ -93,51 +94,63 @@ onUnmounted(() => stopPolling())
 </script>
 
 <template>
-  <div class="mx-auto max-w-7xl space-y-4 pb-10">
-    <div class="flex flex-col gap-1 border-b border-gray-200 pb-4">
+  <div class="mx-auto max-w-7xl space-y-5 pb-10">
+    <div class="flex flex-col gap-1 border-b border-gray-200/80 pb-5">
+      <div class="tc-page-kicker">Runs</div>
       <h2 class="text-xl font-semibold tracking-tight text-gray-950">运行历史</h2>
-      <p class="text-gray-500 text-sm">筛选、查看和管理测试智能体的历史运行。</p>
+      <p class="text-sm text-gray-500">筛选、查看和管理测试智能体的历史运行。</p>
     </div>
 
     <!-- Filters -->
-    <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-3 flex flex-wrap gap-3 items-center">
-      <div class="flex items-center gap-2">
+    <div class="grid gap-3 rounded-lg border border-gray-200 bg-white p-3 shadow-sm lg:grid-cols-[auto_minmax(0,1fr)_auto] lg:items-end">
+      <div class="flex items-center gap-2 self-start lg:self-center">
         <Filter :size="14" class="text-gray-400" />
         <span class="text-xs text-gray-500 font-bold">筛选</span>
       </div>
-      <select
-        v-model="filterStatus"
-        @change="resetAndFetchRuns"
-        class="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:border-blue-500"
-      >
-        <option value="">全部状态</option>
-        <option value="succeeded">通过</option>
-        <option value="failed">失败</option>
-        <option value="bug_found">缺陷</option>
-        <option value="queued">排队中</option>
-        <option value="running">运行中</option>
-      </select>
-      <select
-        v-model="filterType"
-        @change="resetAndFetchRuns"
-        class="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:border-blue-500"
-      >
-        <option value="">全部类型</option>
-        <option value="AUTO">自动</option>
-        <option value="API">API</option>
-        <option value="UI">UI</option>
-      </select>
-      <div class="flex items-center gap-2">
-        <span class="text-xs text-gray-500 font-bold">每页</span>
-        <select
-          v-model.number="pageSize"
-          @change="resetAndFetchRuns"
-          class="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs outline-none focus:border-blue-500"
-        >
-          <option v-for="size in pageSizeOptions" :key="size" :value="size">{{ size }} 条</option>
-        </select>
+      <div class="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-[minmax(132px,168px)_minmax(124px,160px)_minmax(104px,132px)] lg:w-fit">
+        <label class="grid min-w-0 gap-1">
+          <span class="whitespace-nowrap text-[10px] font-bold uppercase tracking-widest text-gray-400">状态</span>
+          <StyledSelect
+            v-model="filterStatus"
+            @change="resetAndFetchRuns"
+            class="w-full"
+            size="sm"
+          >
+            <option value="">全部状态</option>
+            <option value="succeeded">通过</option>
+            <option value="failed">失败</option>
+            <option value="bug_found">缺陷</option>
+            <option value="queued">排队中</option>
+            <option value="running">运行中</option>
+          </StyledSelect>
+        </label>
+        <label class="grid min-w-0 gap-1">
+          <span class="whitespace-nowrap text-[10px] font-bold uppercase tracking-widest text-gray-400">类型</span>
+          <StyledSelect
+            v-model="filterType"
+            @change="resetAndFetchRuns"
+            class="w-full"
+            size="sm"
+          >
+            <option value="">全部类型</option>
+            <option value="AUTO">自动</option>
+            <option value="API">API</option>
+            <option value="UI">UI</option>
+          </StyledSelect>
+        </label>
+        <label class="grid min-w-0 gap-1">
+          <span class="whitespace-nowrap text-[10px] font-bold uppercase tracking-widest text-gray-400">每页</span>
+          <StyledSelect
+            v-model.number="pageSize"
+            @change="resetAndFetchRuns"
+            class="w-full"
+            size="sm"
+          >
+            <option v-for="size in pageSizeOptions" :key="size" :value="size">{{ size }} 条</option>
+          </StyledSelect>
+        </label>
       </div>
-      <span class="text-xs text-gray-400 ml-auto">
+      <span class="justify-self-start whitespace-nowrap rounded-lg bg-gray-50 px-2.5 py-1.5 text-xs font-medium text-gray-500 lg:justify-self-end">
         {{ loading ? '正在加载记录...' : `${total} 条记录` }}
       </span>
     </div>
@@ -155,13 +168,13 @@ onUnmounted(() => stopPolling())
         v-for="run in runs"
         :key="run.id"
         @click="router.push(`/runs/${run.id}`)"
-        class="cursor-pointer border-b border-gray-100 p-4 transition-colors last:border-b-0 hover:bg-blue-50/40 group"
+        class="group cursor-pointer border-b border-gray-100 p-4 transition-colors last:border-b-0 hover:bg-gray-50"
       >
         <div class="flex items-start justify-between gap-4">
           <div class="min-w-0 flex-1">
             <div class="mb-2 flex flex-wrap items-center gap-2">
               <StatusBadge :status="run.status" />
-              <span class="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px] font-bold uppercase">{{ run.test_type }}</span>
+              <span class="rounded-md bg-gray-100 px-2 py-0.5 text-[10px] font-bold uppercase text-gray-600">{{ run.test_type }}</span>
               <span class="text-[11px] text-gray-400">{{ formatTime(run.created_at) }}</span>
             </div>
             <div class="font-bold text-gray-900 text-sm truncate">{{ run.objective }}</div>
