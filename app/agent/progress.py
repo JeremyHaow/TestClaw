@@ -36,6 +36,7 @@ EXECUTION_LOG_KEYS = (
     "api_path_prefix_rewrite",
     "auth_headers",
     "custom_headers",
+    "auth_preflight",
     "current_step",
     "progress_events",
     "cancelled",
@@ -54,6 +55,7 @@ EXECUTION_LOG_KEYS = (
     "ui_login_snapshot",
     "ui_login_screenshot",
     "login_playwright_commands",
+    "ui_captcha_result",
     "ui_reproducible_script",
     "ui_execution_context_plan",
 )

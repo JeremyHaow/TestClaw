@@ -10,6 +10,7 @@ from app.core.redaction import (
     redact_sensitive_text,
 )
 from app.core import security
+from app.worker.tasks import _safe_task_result
 
 
 def test_mask_secret():
@@ -172,3 +173,37 @@ def test_redact_sensitive_text_redacts_spaced_credential_markers():
     for secret in ("jwt-secret", "csrf-secret", "xcsrf-secret", "xsrf-secret", "cookie-secret"):
         assert secret not in redacted
     assert REDACTED_VALUE in redacted
+
+
+def test_worker_task_result_strips_runtime_auth_material():
+    safe = _safe_task_result(
+        {
+            "db_session": object(),
+            "auth_config": {"enabled": True, "password": "password-secret"},
+            "auth_headers": {"Authorization": "Bearer token-secret"},
+            "custom_headers": {"X-Api-Key": "api-key-secret"},
+            "auth_credentials": {"username": "admin", "password": "credential-secret"},
+            "auth_preflight": {"auth_preflight_id": "cached-preflight-token"},
+            "login_playwright_commands": ['fill "#password" "fill-secret"'],
+            "setup_instructions": "password=setup-secret",
+            "safe": "visible",
+        }
+    )
+
+    serialized = json.dumps(safe, ensure_ascii=False)
+    assert "auth_config" not in safe
+    assert "auth_headers" not in safe
+    assert "custom_headers" not in safe
+    assert "auth_credentials" not in safe
+    assert "auth_preflight" not in safe
+    for secret in (
+        "password-secret",
+        "token-secret",
+        "api-key-secret",
+        "credential-secret",
+        "cached-preflight-token",
+        "fill-secret",
+        "setup-secret",
+    ):
+        assert secret not in serialized
+    assert "visible" in serialized

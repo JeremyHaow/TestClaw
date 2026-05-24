@@ -46,6 +46,118 @@
 - UI may describe Multi-Agent only as role-based agent orchestration: Planner/Coder/Vision model defaults plus LangGraph nodes for planning, case generation, execution, reporting, and memory.
 - Do not imply autonomous peer-to-peer agent collaboration unless the backend implements that behavior.
 
+## Scenario: Run Auth Preflight and Captcha Modes
+
+### 1. Scope / Trigger
+
+- Trigger: run creation must no longer rely on implicit "auto" orchestration or unauthenticated protected API execution.
+- Applies to `app/api/v1/runs.py`, `app/services/api_auth.py`, `app/agent/nodes/ui_login.py`, `app/agent/progress.py`, `app/agent/state.py`, and `frontend/src/pages/RunPage.vue`.
+- Purpose: make auth readiness explicit for API and UI runs, keep captcha handling mode-specific, and prevent launching tests until protected access or no-auth access is proven.
+
+### 2. Signatures
+
+- New run payload:
+  ```python
+  RunCreate(
+      test_type: "api" | "ui",  # "auto" is history/list compatibility only
+      auth_mode: "auto" | "manual" | "none_confirmed",
+      captcha_mode: "none" | "static" | "dynamic",
+      auth_credentials: {"username": str | None, "password": str | None, "captcha": str | None} | None,
+      auth_preflight_id: str | None,
+  )
+  ```
+- Preflight response:
+  ```json
+  {
+    "auth_preflight": {
+      "auth_preflight_id": "...",
+      "auth_mode": "auto",
+      "captcha_mode": "dynamic",
+      "status": "passed|blocked|warning",
+      "strategy": "auto_login|manual_header|none_confirmed|ui_browser_login",
+      "steps": [],
+      "missing_fields": [],
+      "validation_results": [],
+      "can_start": true
+    }
+  }
+  ```
+- API captcha helper:
+  ```python
+  await fetch_captcha_context(config, source=source, input_type=input_type, target_url=target_url, endpoints=endpoints)
+  ```
+
+### 3. Contracts
+
+- `POST /runs` and `/runs/preflight` accept new runs only with `test_type="api"` or `"ui"`; existing stored `AUTO` runs and list/detail filters remain supported.
+- `auth_mode="auto"` requires usable login credentials and may infer login/token/captcha/csrf endpoints from OpenAPI. Execution is limited to auth-related endpoints plus read-only verification endpoints.
+- `auth_mode="manual"` must still validate the supplied Token/Header against protected read-only endpoints before launch.
+- `auth_mode="none_confirmed"` must call read-only endpoints without auth and may launch only when no-auth access is verified.
+- API dynamic captcha fetches captcha context only. It may use returned `uuid`, `captchaKey`, session cookie names, csrf/xsrf header names, `img`, and `captchaEnabled`; it must not call OCR/Vision. If login requires captcha text and the API does not return clear text, preflight is blocked and asks for static captcha.
+- UI dynamic captcha requires a default Vision model. Runtime UI login opens the page, screenshots it, asks Vision for the captcha text, fills it through the planner-generated login steps, and verifies the post-login page before UI test planning continues.
+- `auth_preflight_id` is an in-process reusable preflight token. Create run may reuse it only when the request fingerprint still matches and the preflight has not expired; otherwise create run re-runs auth preflight server-side.
+
+### 4. Validation & Error Matrix
+
+- New `test_type="auto"` on `/runs` or `/runs/preflight` -> `400` with allowed values `api, ui`.
+- Auto auth without username/password or login body -> blocked `auth_preflight`, missing `username/password`.
+- Manual auth without auth-like header/token -> blocked `auth_preflight`, missing `token_or_header`.
+- Token/cookie acquired but protected read-only validation fails -> blocked create/preflight.
+- API dynamic captcha returns image/context but no clear code while login requires captcha -> blocked, missing `captcha`.
+- UI dynamic captcha without default Vision model -> blocked, missing `vision_model`.
+- Valid `auth_preflight_id` with changed payload -> ignored; server re-runs preflight.
+
+### 5. Good/Base/Bad Cases
+
+- Good: API auto login gets a token, verifies 2-3 protected GET/HEAD/OPTIONS endpoints, then dispatches the worker with redacted auth headers and refresh config.
+- Good: API dynamic captcha fetches `/captcha`, records context-field availability, and blocks before submitting `/login` when only an image is available.
+- Good: UI dynamic captcha verifies Vision availability before launch and runtime login stops before UI cases when recognition or post-login verification fails.
+- Base: legacy clients that send a token without `auth_mode` are treated like manual auth for compatibility.
+- Bad: preflight marks manual Token/Header as ready without a protected read-only request.
+- Bad: API preflight sends a captcha image to Vision/OCR or persists raw captcha/session/cookie values in response/logs.
+
+### 6. Tests Required
+
+- Preflight: `test_type="auto"` is rejected for new run entrypoints.
+- Preflight: API dynamic captcha fetches context and does not submit login when captcha text is unavailable.
+- Preflight: UI dynamic captcha blocks when no default Vision model exists.
+- Preflight/create: token/cookie acquisition must be followed by protected read-only validation.
+- Regression: serialized preflight and execution logs do not expose token, password, cookie, session, csrf/xsrf, or captcha values.
+- Frontend build: `RunPage.vue` compiles with two modes, three auth modes, three captcha modes, `auth_credentials`, and `auth_preflight_id`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+headers, resolution = await resolve_auto_auth_headers(payload.auth_config, ...)
+if resolution.ok:
+    run_agent_task.delay(task.id, ..., auth_headers=headers)
+```
+
+#### Correct
+
+```python
+auth_preflight, headers, runtime_config, resolution = await _run_auth_preflight(...)
+if not auth_preflight.can_start:
+    raise HTTPException(status_code=400, detail="auth preflight required")
+run_agent_task.delay(task.id, ..., auth_headers=headers, auth_config=runtime_config)
+```
+
+#### Wrong
+
+```python
+captcha_text = await llm_gateway.get_vision(db).ainvoke([captcha_image])
+```
+
+#### Correct
+
+```python
+captcha = await fetch_captcha_context(...)
+if captcha_required and not captcha.captcha_text:
+    block_preflight("static captcha required")
+```
+
 ## Scenario: Automatic API Auth Preflight
 
 ### 1. Scope / Trigger

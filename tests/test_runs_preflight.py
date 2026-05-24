@@ -173,6 +173,48 @@ def _auth_required_openapi() -> dict:
     }
 
 
+def _captcha_required_openapi() -> dict:
+    document = _auth_required_openapi()
+    document["paths"]["/captcha"] = {
+        "get": {
+            "summary": "Captcha context",
+            "responses": {"200": {"description": "ok"}},
+        }
+    }
+    login_schema = document["paths"]["/auth/login"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+    login_schema["required"] = ["username", "password", "code"]
+    login_schema["properties"]["code"] = {"type": "string"}
+    return document
+
+
+def _protected_write_only_openapi() -> dict:
+    return {
+        "openapi": "3.0.0",
+        "info": {"title": "Write Protected API", "version": "1.0.0"},
+        "servers": [{"url": "https://api.example.test"}],
+        "paths": {
+            "/public": {
+                "get": {
+                    "summary": "Public endpoint",
+                    "responses": {"200": {"description": "ok"}},
+                }
+            },
+            "/private": {
+                "post": {
+                    "summary": "Private write endpoint",
+                    "security": [{"BearerAuth": []}],
+                    "responses": {"200": {"description": "ok"}},
+                }
+            },
+        },
+        "components": {
+            "securitySchemes": {
+                "BearerAuth": {"type": "http", "scheme": "bearer"},
+            }
+        },
+    }
+
+
 def _check_by_key(body: dict, key: str) -> dict:
     return next(check for check in body["checks"] if check["key"] == key)
 
@@ -333,8 +375,155 @@ def test_run_preflight_auto_auth_resolves_token_without_returning_secret(monkeyp
     assert body["auth_resolved"] is True
     assert body["auth_strategy"] == "auto_login"
     assert body["auth_header_name"] == "Authorization"
+    assert body["auth_preflight"]["auth_preflight_id"]
+    assert body["auth_preflight"]["protected_validation_count"] == 1
     assert _check_by_key(body, "auth")["status"] == "ready"
     assert "login-secret" not in json.dumps(body)
+
+
+def test_run_preflight_api_dynamic_captcha_fetches_context_without_ocr(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class FakeCaptchaResponse:
+        status_code = 200
+        headers = {}
+        cookies = {"captcha-session": "secret-cookie"}
+
+        def json(self) -> dict:
+            return {
+                "uuid": "captcha-uuid",
+                "captchaKey": "captcha-key",
+                "img": "data:image/png;base64,abc",
+                "captchaEnabled": True,
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def get(self, url: str, **kwargs) -> FakeCaptchaResponse:
+            calls.append(("GET", url))
+            return FakeCaptchaResponse()
+
+        async def request(self, method: str, url: str, **kwargs):
+            raise AssertionError("API dynamic captcha preflight must not submit login without captcha text")
+
+    monkeypatch.setattr(api_auth.httpx, "AsyncClient", FakeAsyncClient)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": json.dumps(_captcha_required_openapi()),
+                "test_type": "api",
+                "auth_mode": "auto",
+                "captcha_mode": "dynamic",
+                "auth_credentials": {"username": "admin", "password": "secret"},
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert calls == [("GET", "https://api.example.test/captcha")]
+    assert body["readiness"] == "blocked"
+    assert body["auth_preflight"]["missing_fields"] == ["captcha"]
+    assert "不会识别图片" in body["auth_preflight"]["captcha_handling"]
+    serialized = json.dumps(body, ensure_ascii=False)
+    assert "secret-cookie" not in serialized
+
+
+def test_run_preflight_rejects_new_auto_test_type() -> None:
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={"source": "https://app.example.test", "test_type": "auto"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 400
+    assert "api" in response.json()["detail"]
+    assert "ui" in response.json()["detail"]
+
+
+def test_run_preflight_ui_dynamic_captcha_requires_vision_model(monkeypatch) -> None:
+    async def fake_worker_readiness() -> tuple[str, str, str | None]:
+        return "ready", "检测到 1 个活跃 Worker", None
+
+    async def fake_reachability(source: str) -> str:
+        return "ready"
+
+    monkeypatch.setattr(runs, "_best_effort_worker_readiness", fake_worker_readiness)
+    monkeypatch.setattr(runs, "_best_effort_reachability", fake_reachability)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": "https://app.example.test/login",
+                "test_type": "ui",
+                "auth_mode": "auto",
+                "captcha_mode": "dynamic",
+                "auth_credentials": {"username": "admin", "password": "secret"},
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["readiness"] == "blocked"
+    assert body["auth_preflight"]["strategy"] == "ui_browser_login"
+    assert body["auth_preflight"]["missing_fields"] == ["vision_model"]
+    assert "Vision" in body["auth_preflight"]["next_action"]
+
+
+def test_run_preflight_manual_auth_requires_protected_readonly_validation(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs):
+            calls.append((method, url))
+            raise AssertionError("manual auth must not validate against public read-only endpoints")
+
+    monkeypatch.setattr(api_auth.httpx, "AsyncClient", FakeAsyncClient)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": json.dumps(_protected_write_only_openapi()),
+                "test_type": "api",
+                "auth_mode": "manual",
+                "token": "manual-token-secret",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert calls == []
+    assert body["readiness"] == "blocked"
+    assert body["auth_preflight"]["missing_fields"] == ["protected_read_only_endpoint"]
+    assert "manual-token-secret" not in json.dumps(body, ensure_ascii=False)
 
 
 def test_run_preflight_auto_auth_reports_missing_login_inputs() -> None:
@@ -487,6 +676,20 @@ def test_create_run_rejects_auth_required_api_without_token_header_or_auto_auth(
     assert "需要鉴权" in response.json()["detail"]
 
 
+def test_create_run_rejects_new_auto_test_type() -> None:
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs",
+            json={"source": "https://app.example.test", "test_type": "auto"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 400
+    assert "api" in response.json()["detail"]
+    assert "ui" in response.json()["detail"]
+
+
 def test_create_run_auto_auth_injects_resolved_header(monkeypatch) -> None:
     dispatched = {}
 
@@ -539,3 +742,63 @@ def test_create_run_auto_auth_injects_resolved_header(monkeypatch) -> None:
     assert dispatched["target_url"] == "https://api.example.test"
     assert dispatched["kwargs"]["auth_headers"] == {"Authorization": "Bearer login-token"}
     assert dispatched["kwargs"]["auth_config"]["enabled"] is True
+
+
+def test_create_run_reuses_matching_auth_preflight_id(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+    dispatched = {}
+
+    class FakeResponse:
+        status_code = 200
+        headers = {}
+
+        def json(self) -> dict:
+            return {"access_token": "cached-login-token"}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append((method, url))
+            return FakeResponse()
+
+    def fake_delay(task_id: str, objective: str, target_url: str, **kwargs) -> None:
+        dispatched["kwargs"] = kwargs
+
+    monkeypatch.setattr(api_auth.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(runs.run_agent_task, "delay", fake_delay)
+
+    payload = {
+        "source": json.dumps(_auth_required_openapi()),
+        "test_type": "api",
+        "auth_mode": "auto",
+        "auth_config": {
+            "enabled": True,
+            "login_url": "/auth/login",
+            "body": {"username": "admin", "password": "secret"},
+        },
+    }
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        preflight = client.post("/api/v1/runs/preflight", json=payload, headers=headers)
+        assert preflight.status_code == 200
+        auth_preflight_id = preflight.json()["auth_preflight"]["auth_preflight_id"]
+        calls.clear()
+        created = client.post(
+            "/api/v1/runs",
+            json={**payload, "auth_preflight_id": auth_preflight_id},
+            headers=headers,
+        )
+
+    assert created.status_code == 200
+    assert calls == []
+    assert dispatched["kwargs"]["auth_headers"] == {"Authorization": "Bearer cached-login-token"}

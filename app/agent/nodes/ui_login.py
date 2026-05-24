@@ -1,3 +1,4 @@
+import base64
 import json
 import hashlib
 import logging
@@ -130,6 +131,118 @@ def _clean_login_value(value) -> str | None:
     if not text or text.lower() in {"null", "none", "unknown", "n/a"}:
         return None
     return text
+
+
+def _state_auth_credentials(state: AgentState) -> dict[str, str]:
+    raw = state.get("auth_credentials") or {}
+    if not isinstance(raw, dict):
+        return {}
+    credentials: dict[str, str] = {}
+    for key in ("username", "password", "captcha"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            credentials[key] = value.strip()
+    return credentials
+
+
+def _merge_runtime_credentials(
+    login_details: dict,
+    credentials: dict[str, str],
+    captcha_value: str | None,
+) -> dict:
+    if not credentials and not captcha_value:
+        return login_details
+    merged = dict(login_details)
+    provided = dict(merged.get("provided_values") or {})
+    for key in ("username", "password"):
+        if credentials.get(key):
+            provided[key] = credentials[key]
+    if captcha_value:
+        provided["captcha"] = captcha_value
+    elif credentials.get("captcha"):
+        provided["captcha"] = credentials["captcha"]
+    merged["provided_values"] = provided
+    if credentials.get("username") or credentials.get("password"):
+        merged["requires_browser_setup"] = True
+        merged["setup_type"] = merged.get("setup_type") or "login"
+    return merged
+
+
+def _instructions_with_runtime_credentials(
+    login_instructions: str | None,
+    credentials: dict[str, str],
+    captcha_value: str | None,
+    captcha_mode: str,
+) -> str:
+    parts = [(login_instructions or "").strip()]
+    credential_lines = []
+    if credentials.get("username"):
+        credential_lines.append(f"用户名: {credentials['username']}")
+    if credentials.get("password"):
+        credential_lines.append(f"密码: {credentials['password']}")
+    effective_captcha = captcha_value or credentials.get("captcha")
+    if effective_captcha:
+        credential_lines.append(f"验证码: {effective_captcha}")
+    elif captcha_mode == "dynamic":
+        credential_lines.append("验证码: 使用页面图片识别结果")
+    if credential_lines:
+        parts.append("测试登录凭据:\n" + "\n".join(credential_lines))
+    if captcha_mode == "dynamic":
+        parts.append("验证码策略: 动态图片验证码，已由 Vision 模型识别后填写。")
+    elif captcha_mode == "static":
+        parts.append("验证码策略: 固定验证码，使用用户填写的验证码。")
+    return "\n".join(part for part in parts if part).strip()
+
+
+def _extract_captcha_text_from_model_response(value: str) -> str | None:
+    text = str(value or "").strip()
+    parsed = _parse_json_object(text)
+    for key in ("captcha", "code", "text", "value"):
+        candidate = _clean_login_value(parsed.get(key)) if parsed else None
+        if candidate and 2 <= len(candidate) <= 12:
+            return candidate
+    match = re.search(r"[A-Za-z0-9]{2,12}", text)
+    return match.group(0) if match else None
+
+
+async def _recognize_dynamic_captcha_with_vision(
+    db,
+    *,
+    screenshot_path: Path,
+    page_snapshot: str,
+) -> tuple[str | None, str]:
+    if db is None:
+        return None, "未提供数据库会话，无法加载默认 Vision 模型。"
+    if not screenshot_path.exists():
+        return None, "登录页截图不存在，无法识别动态验证码。"
+    try:
+        image_b64 = base64.b64encode(screenshot_path.read_bytes()).decode("ascii")
+        llm = await llm_gateway.get_vision(db)
+        message = HumanMessage(
+            content=[
+                {
+                    "type": "text",
+                    "text": (
+                        "识别登录页面中的图片验证码。只输出 JSON，例如 "
+                        '{"captcha":"A1B2"}。如果看不到验证码，输出 {"captcha": null}。\n'
+                        f"页面结构摘要：{page_snapshot[:1500]}"
+                    ),
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                },
+            ]
+        )
+        resp = await llm.ainvoke([message])
+        content = resp.content if hasattr(resp, "content") else str(resp)
+        captcha = _extract_captcha_text_from_model_response(str(content))
+        if captcha:
+            return captcha, "Vision 模型已识别动态验证码。"
+        return None, "Vision 模型未能识别动态验证码。"
+    except Exception as exc:
+        logger.warning("Dynamic captcha vision recognition failed: %s", exc)
+        return None, f"Vision 模型识别动态验证码失败：{str(exc)[:160]}"
 
 
 _BLOCKING_PAGE_ERROR_MARKERS = (
@@ -275,7 +388,11 @@ async def run(state: AgentState) -> AgentState:
     decides whether browser setup is required.
     """
     install_tool_context(state)
+    credentials = _state_auth_credentials(state)
+    captcha_mode = str(state.get("captcha_mode") or "none").lower()
     login_instructions = state.get("setup_instructions") or state.get("login_instructions")
+    if credentials and not login_instructions:
+        login_instructions = "使用测试账号登录目标系统，登录后验证已进入受保护页面。"
     target_url = state.get("target_url", "")
     task_id = state.get("task_id", "unknown")
     db = state.get("db_session")
@@ -309,6 +426,7 @@ async def run(state: AgentState) -> AgentState:
     login_screenshot = None
     login_snapshot = None
     initial_snapshot = ""
+    recognized_captcha = None
 
     try:
         # Step 1: Open the target page
@@ -346,6 +464,61 @@ async def run(state: AgentState) -> AgentState:
         shot_cmd = f'screenshot --filename "{initial_screenshot_path}"'
         await _run_setup_playwright_command(state, shot_cmd)
         login_commands.append("screenshot")
+
+        if captcha_mode == "dynamic":
+            recognized_captcha, captcha_reason = await _recognize_dynamic_captcha_with_vision(
+                db,
+                screenshot_path=initial_screenshot_path,
+                page_snapshot=initial_snapshot,
+            )
+            state["ui_captcha_result"] = {
+                "mode": "dynamic",
+                "recognized": bool(recognized_captcha),
+                "reason": captcha_reason,
+            }
+            record_tool_call(
+                state,
+                tool_name="vision.captcha_recognize",
+                layer="ui",
+                status="success" if recognized_captcha else "failed",
+                input_summary={"phase": "ui_login", "screenshot": str(initial_screenshot_path)},
+                output_summary={"recognized": bool(recognized_captcha), "reason": captcha_reason},
+            )
+            if not recognized_captcha:
+                state["last_error"] = captcha_reason
+                state["setup_instructions"] = str(login_instructions)
+                state["login_instructions"] = str(login_instructions)
+                state["login_playwright_commands"] = login_commands
+                state["ui_login_snapshot"] = initial_snapshot
+                state["ui_login_screenshot"] = str(initial_screenshot_path)
+                state["login_result"] = {
+                    "required": True,
+                    "executed": False,
+                    "verified": False,
+                    "reason": captcha_reason,
+                    "setup_type": "login",
+                }
+                state["setup_result"] = state["login_result"]
+                state["login_verified"] = False
+                state["login_verification_reason"] = captcha_reason
+                state["authenticated_ui_context"] = {
+                    "setup_required": True,
+                    "setup_executed": False,
+                    "detected_page_kind": "captcha_unresolved",
+                    "state_path": None,
+                }
+                await _attach_setup_screenshot_evidence(
+                    state,
+                    task_id=task_id,
+                    screenshot_path=initial_screenshot_path,
+                    label="动态验证码识别失败",
+                    detail=captcha_reason,
+                )
+                state.setdefault("workflow_steps", []).append(
+                    {"node": "ui_login", "status": "failed", "detail": captcha_reason}
+                )
+                await persist_progress(state, "ui_login", "failed", captcha_reason)
+                return state
 
         if _looks_like_blocking_page_error(initial_snapshot):
             reason = "目标页面显示系统错误，无法执行登录或其他前置准备。"
@@ -389,9 +562,15 @@ async def run(state: AgentState) -> AgentState:
         login_details = await _extract_login_details_with_llm(
             db,
             page_snapshot=initial_snapshot,
-            login_instructions=str(login_instructions),
+            login_instructions=_instructions_with_runtime_credentials(
+                str(login_instructions),
+                credentials,
+                recognized_captcha,
+                captcha_mode,
+            ),
             target_url=target_url,
         )
+        login_details = _merge_runtime_credentials(login_details, credentials, recognized_captcha)
 
         if login_details.get("requires_browser_setup") is False:
             post_login_url = _extract_page_url(initial_snapshot)
@@ -471,7 +650,12 @@ async def run(state: AgentState) -> AgentState:
         llm = await llm_gateway.get_planner(db)
         prompt = LOGIN_ASSIST_PROMPT.format(
             page_snapshot=initial_snapshot[:4000],
-            login_instructions=login_instructions,
+            login_instructions=_instructions_with_runtime_credentials(
+                str(login_instructions),
+                credentials,
+                recognized_captcha,
+                captcha_mode,
+            ),
             login_details=json.dumps(login_details, ensure_ascii=False),
             target_url=target_url,
         )

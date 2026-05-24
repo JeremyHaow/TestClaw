@@ -12,6 +12,7 @@ from app.agent.progress import (
     persist_progress,
     persist_task_state,
 )
+from app.core.redaction import redact_sensitive_data
 from app.database import AsyncSessionLocal
 from app.models.bug_report import BugReport
 from app.models.task import TaskStatus
@@ -35,6 +36,20 @@ def _coerce_text(value: Any, fallback: str = "") -> str:
     if isinstance(value, dict):
         return json.dumps(value, ensure_ascii=False)
     return str(value)
+
+
+def _safe_task_result(state: dict[str, Any]) -> dict[str, Any]:
+    result = dict(state)
+    for key in (
+        "db_session",
+        "auth_config",
+        "auth_headers",
+        "custom_headers",
+        "auth_credentials",
+        "auth_preflight",
+    ):
+        result.pop(key, None)
+    return redact_sensitive_data(result)
 
 
 @celery_app.task(bind=True, name="run_agent_task")
@@ -175,7 +190,4 @@ async def _run(task_id: str, objective: str, target_url: str, **kwargs: Any):
                         await db.rollback()
                         logger.warning("Failed to persist bug report for task %s: %s", task_id, exc)
 
-        # Remove non-serializable db_session before returning to Celery
-        final_state.pop("db_session", None)
-        final_state.pop("auth_config", None)
-        return final_state
+        return _safe_task_result(final_state)

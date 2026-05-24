@@ -1,9 +1,12 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
+import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -30,13 +33,18 @@ from app.core.redaction import (
 from app.database import AsyncSessionLocal
 from app.models.environment import Environment
 from app.models.llm_provider import LLMProvider
-from app.models.task import Task, TaskStatus, TestType
+from app.models.task import Task, TaskStatus
 from app.models.test_case import TestCase, TestSuite
 from app.schemas.task import TaskListItemRead, TaskRead, parse_task_detail
 from app.services.api_auth import (
     AuthResolution,
+    CaptchaContextResolution,
+    captcha_required_by_login,
     coerce_auth_config,
+    fetch_captcha_context,
     has_auth_like_header,
+    load_auth_endpoints,
+    login_endpoint_for_config,
     merge_token_header,
     normalize_headers,
     resolve_auto_auth_headers,
@@ -54,6 +62,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+NEW_RUN_TEST_TYPES = {"api", "ui"}
+AUTH_MODES = {"auto", "manual", "none_confirmed"}
+CAPTCHA_MODES = {"none", "static", "dynamic"}
+AUTH_PREFLIGHT_CACHE_TTL_SECONDS = 10 * 60
+AUTH_PREFLIGHT_VALID_STATUSES = {"passed", "warning"}
+_AUTH_PREFLIGHT_CACHE: dict[str, dict[str, Any]] = {}
+
 
 class AuthAcquireConfig(BaseModel):
     enabled: bool = False
@@ -62,6 +77,7 @@ class AuthAcquireConfig(BaseModel):
     captcha: str | None = None
     tenant: str | None = None
     login_url: str | None = None
+    captcha_url: str | None = None
     method: str = "POST"
     content_type: str = "json"  # json or form
     headers: dict[str, Any] | None = None
@@ -71,14 +87,24 @@ class AuthAcquireConfig(BaseModel):
     token_prefix: str = "Bearer"
 
 
+class AuthCredentials(BaseModel):
+    username: str | None = None
+    password: str | None = None
+    captcha: str | None = None
+
+
 class RunCreate(BaseModel):
     source: str  # URL, Swagger URL, or Swagger JSON/YAML text
-    test_type: str = "auto"  # auto, api, ui
+    test_type: str = "api"  # new runs accept api or ui; auto is historical only
     objective: str = ""  # optional objective description
     base_url: str | None = None  # optional base URL override
     headers: dict | None = None  # optional headers injection
     token: str | None = None  # optional auth token
+    auth_mode: str = "auto"  # auto, manual, none_confirmed
+    captcha_mode: str = "none"  # none, static, dynamic
+    auth_credentials: AuthCredentials | None = None
     auth_config: AuthAcquireConfig | None = None  # optional login-to-token config
+    auth_preflight_id: str | None = None
     api_execution_policy: str = "safe_read_only"  # safe_read_only, safe_with_auth, write_allowed
     setup_instructions: str = ""  # optional pre-test setup/context instructions
     login_instructions: str = ""  # deprecated alias kept for compatibility
@@ -86,11 +112,14 @@ class RunCreate(BaseModel):
 
 class RunPreflightRequest(BaseModel):
     source: str
-    test_type: str = "auto"
+    test_type: str = "api"
     objective: str = ""
     base_url: str | None = None
     headers: dict | None = None
     token: str | None = None
+    auth_mode: str = "auto"
+    captcha_mode: str = "none"
+    auth_credentials: AuthCredentials | None = None
     auth_config: AuthAcquireConfig | None = None
     api_execution_policy: str = "safe_read_only"
     setup_instructions: str = ""
@@ -102,6 +131,38 @@ class RunPreflightCheck(BaseModel):
     status: str
     detail: str
     action: str | None = None
+
+
+class RunAuthPreflightValidation(BaseModel):
+    method: str
+    url: str
+    status: str
+    status_code: int | None = None
+    detail: str
+
+
+class RunAuthPreflightStep(BaseModel):
+    key: str
+    label: str
+    status: str
+    detail: str
+
+
+class RunAuthPreflight(BaseModel):
+    auth_preflight_id: str | None = None
+    auth_mode: str
+    captcha_mode: str
+    status: str
+    strategy: str
+    plan: str
+    captcha_handling: str
+    steps: list[RunAuthPreflightStep] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    validation_results: list[RunAuthPreflightValidation] = Field(default_factory=list)
+    auth_header_name: str | None = None
+    protected_validation_count: int = 0
+    can_start: bool = False
+    next_action: str | None = None
 
 
 class RunPreflightCorrectionPrompt(BaseModel):
@@ -195,6 +256,7 @@ class RunPreflightResponse(BaseModel):
     checks: list[RunPreflightCheck]
     mission_preview: RunPreflightMissionPreview | None = None
     target_memory: RunTargetMemory | None = None
+    auth_preflight: RunAuthPreflight | None = None
     warnings: list[str] = []
     endpoint_count: int | None = None
     auth_required_count: int | None = None
@@ -419,6 +481,14 @@ def _resolve_run_target_url(source: str, input_type: str, base_url: str | None =
     return (base_url or source).strip()
 
 
+def _normalize_new_run_test_type(value: str | None) -> str:
+    normalized = (value or "api").strip().lower()
+    if normalized not in NEW_RUN_TEST_TYPES:
+        allowed = ", ".join(sorted(NEW_RUN_TEST_TYPES))
+        raise ValueError(f"New runs accept test_type values: {allowed}")
+    return normalized
+
+
 def _expected_flow_for(input_type: str, test_type: str, has_base_url: bool = False) -> list[str]:
     if test_type == "api":
         return ["识别输入", "解析 API", "生成接口用例", "执行 API 测试", "生成报告"]
@@ -441,6 +511,16 @@ async def _count_default_planners(db: DbSession) -> int:
         select(func.count()).select_from(LLMProvider).where(
             LLMProvider.is_active.is_(True),
             LLMProvider.is_default_planner.is_(True),
+        )
+    )
+    return int(result.scalar_one())
+
+
+async def _count_default_vision_models(db: DbSession) -> int:
+    result = await db.execute(
+        select(func.count()).select_from(LLMProvider).where(
+            LLMProvider.is_active.is_(True),
+            LLMProvider.is_default_vision.is_(True),
         )
     )
     return int(result.scalar_one())
@@ -618,6 +698,770 @@ async def _prepare_run_auth(
     if resolution.ok:
         headers.update(resolution.headers)
     return headers, resolution
+
+
+def _normalize_auth_mode(payload: RunCreate | RunPreflightRequest) -> str:
+    mode = (payload.auth_mode or "auto").strip().lower()
+    if mode not in AUTH_MODES:
+        mode = "auto"
+    if mode == "auto":
+        legacy_headers = normalize_headers(payload.headers)
+        merge_token_header(payload.token, legacy_headers)
+        auth_config = coerce_auth_config(payload.auth_config)
+        if has_auth_like_header(legacy_headers) and not auth_config.get("enabled") and not _has_login_credentials(payload):
+            return "manual"
+    return mode
+
+
+def _normalize_captcha_mode(payload: RunCreate | RunPreflightRequest) -> str:
+    mode = (payload.captcha_mode or "none").strip().lower()
+    return mode if mode in CAPTCHA_MODES else "none"
+
+
+def _auth_credentials_dict(payload: RunCreate | RunPreflightRequest) -> dict[str, str]:
+    credentials = payload.auth_credentials
+    data: dict[str, str] = {}
+    if credentials is not None:
+        for key in ("username", "password", "captcha"):
+            value = getattr(credentials, key, None)
+            if isinstance(value, str) and value.strip():
+                data[key] = value.strip()
+    config = coerce_auth_config(payload.auth_config)
+    for key in ("username", "password", "captcha", "tenant"):
+        value = config.get(key)
+        if isinstance(value, str) and value.strip() and key not in data:
+            data[key] = value.strip()
+    return data
+
+
+def _auth_config_with_credentials(
+    payload: RunCreate | RunPreflightRequest,
+    *,
+    enabled: bool,
+    captcha_text: str | None = None,
+) -> dict[str, Any]:
+    config = coerce_auth_config(payload.auth_config)
+    credentials = _auth_credentials_dict(payload)
+    for key in ("username", "password", "captcha", "tenant"):
+        if credentials.get(key) and not config.get(key):
+            config[key] = credentials[key]
+    if captcha_text:
+        config["captcha"] = captcha_text
+    if enabled:
+        config["enabled"] = True
+    return config
+
+
+def _has_login_credentials(payload: RunCreate | RunPreflightRequest) -> bool:
+    credentials = _auth_credentials_dict(payload)
+    if credentials.get("username") and credentials.get("password"):
+        return True
+    config = coerce_auth_config(payload.auth_config)
+    body = config.get("body")
+    if isinstance(body, dict) and body:
+        return True
+    return False
+
+
+def _auth_preflight_fingerprint(payload: RunCreate | RunPreflightRequest) -> str:
+    data = {
+        "source": payload.source,
+        "test_type": payload.test_type,
+        "objective": payload.objective,
+        "base_url": payload.base_url,
+        "headers": payload.headers,
+        "token": payload.token,
+        "auth_mode": _normalize_auth_mode(payload),
+        "captcha_mode": _normalize_captcha_mode(payload),
+        "auth_credentials": payload.auth_credentials.model_dump(mode="json", exclude_none=True)
+        if payload.auth_credentials
+        else None,
+        "auth_config": payload.auth_config.model_dump(mode="json", exclude_none=True)
+        if payload.auth_config
+        else None,
+        "api_execution_policy": payload.api_execution_policy,
+        "setup_instructions": payload.setup_instructions,
+        "login_instructions": getattr(payload, "login_instructions", ""),
+    }
+    if not data["setup_instructions"] and data["login_instructions"]:
+        data["setup_instructions"] = data["login_instructions"]
+    data.pop("login_instructions", None)
+    encoded = json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _cache_auth_preflight(
+    *,
+    fingerprint: str,
+    auth_preflight: RunAuthPreflight,
+    auth_headers: dict[str, str],
+    runtime_auth_config: dict[str, Any] | None,
+    auth_resolution: AuthResolution,
+) -> str:
+    auth_preflight_id = str(uuid.uuid4())
+    auth_preflight.auth_preflight_id = auth_preflight_id
+    _AUTH_PREFLIGHT_CACHE[auth_preflight_id] = {
+        "created_at": time.time(),
+        "fingerprint": fingerprint,
+        "auth_preflight": auth_preflight,
+        "auth_headers": dict(auth_headers),
+        "runtime_auth_config": runtime_auth_config,
+        "auth_resolution": auth_resolution,
+    }
+    return auth_preflight_id
+
+
+def _get_cached_auth_preflight(
+    payload: RunCreate,
+) -> tuple[RunAuthPreflight, dict[str, str], dict[str, Any] | None, AuthResolution] | None:
+    preflight_id = (payload.auth_preflight_id or "").strip()
+    if not preflight_id:
+        return None
+    cached = _AUTH_PREFLIGHT_CACHE.get(preflight_id)
+    if not cached:
+        return None
+    if time.time() - float(cached.get("created_at") or 0) > AUTH_PREFLIGHT_CACHE_TTL_SECONDS:
+        _AUTH_PREFLIGHT_CACHE.pop(preflight_id, None)
+        return None
+    if cached.get("fingerprint") != _auth_preflight_fingerprint(payload):
+        return None
+    auth_preflight = cached.get("auth_preflight")
+    if not isinstance(auth_preflight, RunAuthPreflight):
+        return None
+    if auth_preflight.status not in AUTH_PREFLIGHT_VALID_STATUSES or not auth_preflight.can_start:
+        return None
+    auth_resolution = cached.get("auth_resolution")
+    if not isinstance(auth_resolution, AuthResolution):
+        auth_resolution = AuthResolution(ok=False, detail="No cached auth resolution")
+    return (
+        auth_preflight,
+        dict(cached.get("auth_headers") or {}),
+        cached.get("runtime_auth_config"),
+        auth_resolution,
+    )
+
+
+async def _load_preflight_endpoints(source: str, input_type: str) -> list[dict[str, Any]]:
+    if input_type == "url":
+        return []
+    try:
+        _, endpoints = await load_auth_endpoints(source, input_type)
+        return endpoints
+    except Exception as exc:
+        logger.debug("Unable to load auth preflight endpoints: %s", exc)
+        return []
+
+
+def _api_validation_candidates(
+    endpoints: list[dict[str, Any]],
+    target_url: str,
+    *,
+    protected_only: bool,
+    limit: int = 3,
+) -> list[dict[str, str]]:
+    from app.agent.nodes.api_runner import SAFE_API_METHODS, _build_request_url, _resolve_path_params
+
+    candidates: list[dict[str, str]] = []
+    for endpoint in endpoints:
+        method = str(endpoint.get("method") or "GET").upper()
+        if method not in SAFE_API_METHODS:
+            continue
+        if protected_only and not endpoint.get("auth_required"):
+            continue
+        path = _resolve_path_params(str(endpoint.get("path") or ""), endpoint)
+        url = _build_request_url(target_url, path)
+        if not url:
+            continue
+        candidates.append({"method": method, "url": url, "path": path})
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
+def _is_preflight_auth_failure(status_code: int, payload: Any) -> bool:
+    if status_code in {401, 403}:
+        return True
+    if isinstance(payload, dict):
+        for key in ("code", "status", "status_code"):
+            value = payload.get(key)
+            try:
+                if int(value) in {401, 403}:
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
+
+
+async def _validate_readonly_auth_access(
+    candidates: list[dict[str, str]],
+    headers: dict[str, str],
+) -> tuple[list[RunAuthPreflightValidation], int]:
+    results: list[RunAuthPreflightValidation] = []
+    success_count = 0
+    async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+        for candidate in candidates:
+            method = candidate["method"]
+            url = candidate["url"]
+            try:
+                response = await client.request(method, url, headers=headers or None)
+                try:
+                    payload = response.json()
+                except ValueError:
+                    payload = {}
+                auth_failed = _is_preflight_auth_failure(response.status_code, payload)
+                ok = 200 <= response.status_code < 400 and not auth_failed
+                if ok:
+                    success_count += 1
+                status_text = "passed" if ok else "failed"
+                detail = "只读接口验证通过" if ok else "只读接口验证未通过"
+                if auth_failed:
+                    detail = "只读接口仍返回 401/403"
+                results.append(
+                    RunAuthPreflightValidation(
+                        method=method,
+                        url=_redact_url_for_preview(url),
+                        status=status_text,
+                        status_code=response.status_code,
+                        detail=detail,
+                    )
+                )
+            except Exception as exc:
+                safe_detail = redact_sensitive_data(str(exc)) if str(exc) else "未知错误"
+                results.append(
+                    RunAuthPreflightValidation(
+                        method=method,
+                        url=_redact_url_for_preview(url),
+                        status="failed",
+                        status_code=None,
+                        detail=f"只读接口验证请求失败：{safe_detail[:120]}",
+                    )
+                )
+    return results, success_count
+
+
+def _auth_preflight_response(
+    *,
+    auth_mode: str,
+    captcha_mode: str,
+    test_type: str,
+    status: str,
+    strategy: str,
+    plan: str,
+    captcha_handling: str,
+    steps: list[RunAuthPreflightStep],
+    missing_fields: list[str] | None = None,
+    validation_results: list[RunAuthPreflightValidation] | None = None,
+    auth_header_name: str | None = None,
+    protected_validation_count: int = 0,
+    next_action: str | None = None,
+) -> RunAuthPreflight:
+    can_start = status in AUTH_PREFLIGHT_VALID_STATUSES
+    if test_type == "api" and validation_results is not None:
+        can_start = can_start and (protected_validation_count > 0 or auth_mode == "none_confirmed")
+    return RunAuthPreflight(
+        auth_mode=auth_mode,
+        captcha_mode=captcha_mode,
+        status=status,
+        strategy=strategy,
+        plan=plan,
+        captcha_handling=captcha_handling,
+        steps=steps,
+        missing_fields=missing_fields or [],
+        validation_results=validation_results or [],
+        auth_header_name=auth_header_name,
+        protected_validation_count=protected_validation_count,
+        can_start=can_start,
+        next_action=next_action,
+    )
+
+
+def _captcha_context_summary(captcha: CaptchaContextResolution | None) -> str:
+    if captcha is None:
+        return "无验证码"
+    if not captcha.ok:
+        return captcha.detail or "验证码上下文获取失败"
+    fields = [key for key in captcha.context.keys() if key not in {"status_code"}]
+    if captcha.captcha_text:
+        return f"已获取验证码上下文（{len(fields)} 个字段），接口返回了明文验证码。"
+    return f"已获取验证码上下文（{len(fields)} 个字段）；接口测试不会识别图片验证码。"
+
+
+async def _run_auth_preflight(
+    payload: RunCreate | RunPreflightRequest,
+    *,
+    db: DbSession,
+    source: str,
+    input_type: str,
+    target_url: str,
+    test_type: str,
+    auth_required_count: int | None,
+) -> tuple[RunAuthPreflight, dict[str, str], dict[str, Any] | None, AuthResolution]:
+    auth_mode = _normalize_auth_mode(payload)
+    captcha_mode = _normalize_captcha_mode(payload)
+    endpoints = await _load_preflight_endpoints(source, input_type)
+    headers = normalize_headers(payload.headers)
+    merge_token_header(payload.token, headers)
+    runtime_auth_config: dict[str, Any] | None = None
+    auth_resolution = AuthResolution(ok=False, detail="未执行自动鉴权")
+    steps: list[RunAuthPreflightStep] = [
+        RunAuthPreflightStep(
+            key="mode",
+            label="鉴权模式",
+            status="passed",
+            detail={
+                "auto": "智能体自动鉴权",
+                "manual": "手动 Header/Token",
+                "none_confirmed": "确认无需鉴权",
+            }[auth_mode],
+        )
+    ]
+
+    if test_type == "ui":
+        vision_count = await _count_default_vision_models(db)
+        if captcha_mode == "dynamic" and not vision_count:
+            steps.append(
+                RunAuthPreflightStep(
+                    key="captcha",
+                    label="动态验证码",
+                    status="blocked",
+                    detail="UI 动态验证码需要默认 Vision 模型，当前未配置。",
+                )
+            )
+            auth_preflight = _auth_preflight_response(
+                auth_mode=auth_mode,
+                captcha_mode=captcha_mode,
+                test_type=test_type,
+                status="blocked",
+                strategy="ui_browser_login",
+                plan="浏览器打开登录页，由页面结构和测试账号推理登录步骤；动态验证码由 Vision 模型识别。",
+                captcha_handling="动态验证码：运行时使用 Vision 模型识别页面验证码图片。",
+                steps=steps,
+                missing_fields=["vision_model"],
+                next_action="在模型管理中设置默认 Vision 模型，或改用固定验证码/无验证码。",
+            )
+            return auth_preflight, headers, None, auth_resolution
+        if auth_mode == "manual" and not has_auth_like_header(headers):
+            steps.append(
+                RunAuthPreflightStep(
+                    key="manual_auth",
+                    label="手动鉴权",
+                    status="blocked",
+                    detail="手动模式需要提供 Token 或鉴权 Header。",
+                )
+            )
+            auth_preflight = _auth_preflight_response(
+                auth_mode=auth_mode,
+                captcha_mode=captcha_mode,
+                test_type=test_type,
+                status="blocked",
+                strategy="ui_manual_header",
+                plan="浏览器测试将使用手动凭据作为上下文，但启动前需要先提供凭据。",
+                captcha_handling="UI 手动模式不处理验证码，除非同时提供登录说明。",
+                steps=steps,
+                missing_fields=["token_or_header"],
+                next_action="填写 Token/Header，或切换到智能体自动鉴权。",
+            )
+            return auth_preflight, headers, None, auth_resolution
+        if auth_mode == "auto" and not _has_login_credentials(payload):
+            steps.append(
+                RunAuthPreflightStep(
+                    key="credentials",
+                    label="登录凭据",
+                    status="blocked",
+                    detail="智能体自动鉴权需要账号和密码；如果页面无需登录，请选择确认无需鉴权。",
+                )
+            )
+            auth_preflight = _auth_preflight_response(
+                auth_mode=auth_mode,
+                captcha_mode=captcha_mode,
+                test_type=test_type,
+                status="blocked",
+                strategy="ui_browser_login",
+                plan="浏览器打开登录页，由页面结构和测试账号推理登录步骤。",
+                captcha_handling="验证码策略会在 UI 登录步骤中执行。",
+                steps=steps,
+                missing_fields=["username", "password"],
+                next_action="填写账号密码，或选择确认无需鉴权。",
+            )
+            return auth_preflight, headers, None, auth_resolution
+        steps.append(
+            RunAuthPreflightStep(
+                key="ui_runtime_verify",
+                label="登录后页面验证",
+                status="passed",
+                detail="UI 执行前会验证已进入登录后页面；验证失败不会继续 UI 用例。",
+            )
+        )
+        auth_preflight = _auth_preflight_response(
+            auth_mode=auth_mode,
+            captcha_mode=captcha_mode,
+            test_type=test_type,
+            status="passed",
+            strategy="ui_browser_login" if auth_mode == "auto" else auth_mode,
+            plan="浏览器打开目标入口，模型根据页面结构推理登录链路并执行；登录后验证页面状态。",
+            captcha_handling={
+                "none": "无验证码。",
+                "static": "固定验证码：使用用户填写的验证码。",
+                "dynamic": "动态验证码：运行时使用默认 Vision 模型识别页面验证码图片。",
+            }[captcha_mode],
+            steps=steps,
+            auth_header_name=None,
+            protected_validation_count=0,
+            next_action=None,
+        )
+        return auth_preflight, headers, None, auth_resolution
+
+    protected_candidates = _api_validation_candidates(
+        endpoints,
+        target_url,
+        protected_only=True,
+        limit=3,
+    )
+    any_read_candidates = _api_validation_candidates(
+        endpoints,
+        target_url,
+        protected_only=False,
+        limit=3,
+    )
+    captcha_context: CaptchaContextResolution | None = None
+    captcha_text: str | None = None
+
+    if auth_mode == "none_confirmed":
+        candidates = protected_candidates or any_read_candidates
+        if not candidates:
+            steps.append(
+                RunAuthPreflightStep(
+                    key="readonly_validation",
+                    label="无鉴权验证",
+                    status="blocked",
+                    detail="没有可用于确认无需鉴权的只读接口。",
+                )
+            )
+            auth_preflight = _auth_preflight_response(
+                auth_mode=auth_mode,
+                captcha_mode=captcha_mode,
+                test_type=test_type,
+                status="blocked",
+                strategy="none_confirmed",
+                plan="不注入任何鉴权信息，仅验证只读接口无鉴权可访问。",
+                captcha_handling="无验证码。",
+                steps=steps,
+                missing_fields=["read_only_endpoint"],
+                next_action="提供 OpenAPI 中可访问的 GET/HEAD/OPTIONS 接口，或改用自动/手动鉴权。",
+            )
+            return auth_preflight, {}, None, auth_resolution
+        validation_results, success_count = await _validate_readonly_auth_access(candidates, {})
+        status = "passed" if success_count >= max(1, min(2, len(candidates))) else "blocked"
+        steps.append(
+            RunAuthPreflightStep(
+                key="readonly_validation",
+                label="无鉴权验证",
+                status=status,
+                detail=f"无鉴权只读验证通过 {success_count}/{len(candidates)} 个接口。",
+            )
+        )
+        auth_preflight = _auth_preflight_response(
+            auth_mode=auth_mode,
+            captcha_mode=captcha_mode,
+            test_type=test_type,
+            status=status,
+            strategy="none_confirmed",
+            plan="不注入任何鉴权信息，仅在只读接口确认可访问后启动。",
+            captcha_handling="无验证码。",
+            steps=steps,
+            validation_results=validation_results,
+            protected_validation_count=success_count,
+            next_action=None if status == "passed" else "目标仍需要鉴权；请选择自动鉴权或手动 Header/Token。",
+        )
+        return auth_preflight, {}, None, auth_resolution
+
+    if auth_mode == "manual":
+        if not has_auth_like_header(headers):
+            steps.append(
+                RunAuthPreflightStep(
+                    key="manual_auth",
+                    label="手动鉴权",
+                    status="blocked",
+                    detail="手动模式需要提供 Token 或鉴权 Header。",
+                )
+            )
+            auth_preflight = _auth_preflight_response(
+                auth_mode=auth_mode,
+                captcha_mode=captcha_mode,
+                test_type=test_type,
+                status="blocked",
+                strategy="manual_header",
+                plan="使用用户提供的 Header/Token 调用受保护只读接口。",
+                captcha_handling="手动 Header/Token 模式不处理验证码。",
+                steps=steps,
+                missing_fields=["token_or_header"],
+                next_action="填写 Token/Header 后重新预检。",
+            )
+            return auth_preflight, headers, None, auth_resolution
+        candidates = protected_candidates
+        if not candidates:
+            steps.append(
+                RunAuthPreflightStep(
+                    key="protected_validation",
+                    label="受保护接口验证",
+                    status="blocked",
+                    detail="没有可用于验证手动鉴权的受保护只读接口。",
+                )
+            )
+            auth_preflight = _auth_preflight_response(
+                auth_mode=auth_mode,
+                captcha_mode=captcha_mode,
+                test_type=test_type,
+                status="blocked",
+                strategy="manual_header",
+                plan="使用用户提供的 Header/Token 调用受保护只读接口。",
+                captcha_handling="手动 Header/Token 模式不处理验证码。",
+                steps=steps,
+                missing_fields=["protected_read_only_endpoint"],
+                auth_header_name="Authorization" if (payload.token or "").strip() else None,
+                next_action="补充 OpenAPI 中带 security 的 GET/HEAD/OPTIONS 接口，或改用可验证的登录链路。",
+            )
+            return auth_preflight, headers, None, auth_resolution
+        validation_results, success_count = await _validate_readonly_auth_access(candidates, headers)
+        status = "passed" if success_count >= max(1, min(2, len(candidates))) else "blocked"
+        steps.append(
+            RunAuthPreflightStep(
+                key="protected_validation",
+                label="受保护接口验证",
+                status=status,
+                detail=f"手动鉴权只读验证通过 {success_count}/{len(candidates)} 个接口。",
+            )
+        )
+        runtime_auth_config = coerce_auth_config(payload.auth_config)
+        if not runtime_auth_config.get("enabled"):
+            runtime_auth_config = None
+        auth_preflight = _auth_preflight_response(
+            auth_mode=auth_mode,
+            captcha_mode=captcha_mode,
+            test_type=test_type,
+            status=status,
+            strategy="manual_header",
+            plan="使用用户提供的 Header/Token 调用受保护只读接口，通过后再启动接口测试。",
+            captcha_handling="手动 Header/Token 模式不处理验证码。",
+            steps=steps,
+            validation_results=validation_results,
+            auth_header_name="Authorization" if (payload.token or "").strip() else None,
+            protected_validation_count=success_count,
+            next_action=None if status == "passed" else "确认 Token/Header 有效，并确保受保护只读接口可访问。",
+        )
+        return auth_preflight, headers, runtime_auth_config, AuthResolution(
+            ok=status == "passed",
+            headers=headers,
+            strategy="manual_header",
+            header_name="Authorization" if (payload.token or "").strip() else None,
+            detail="手动 Header/Token 预检通过" if status == "passed" else "手动 Header/Token 预检失败",
+        )
+
+    if not _has_login_credentials(payload):
+        configured_auto = coerce_auth_config(payload.auth_config)
+        if configured_auto.get("enabled"):
+            auth_resolution = await resolve_auto_auth_headers(
+                configured_auto,
+                source=source,
+                input_type=input_type,
+                target_url=target_url,
+                endpoints=endpoints,
+            )
+            missing_fields = auth_resolution.missing_inputs or ["username", "password"]
+            detail = auth_resolution.detail or "智能体自动鉴权缺少登录凭据。"
+            next_action = auth_resolution.next_action or "补齐登录凭据，或选择手动 Header/Token。"
+            required_fields = auth_resolution.required_fields or missing_fields
+        else:
+            missing_fields = ["username", "password"]
+            detail = "检测到鉴权预检未完成；必须提供 Token/Header、填写账号密码，或选择确认无需鉴权。"
+            next_action = "填写账号密码，或选择手动 Header/Token / 确认无需鉴权。"
+            required_fields = missing_fields
+        steps.append(
+            RunAuthPreflightStep(
+                key="credentials",
+                label="登录凭据",
+                status="blocked",
+                detail=detail,
+            )
+        )
+        auth_preflight = _auth_preflight_response(
+            auth_mode=auth_mode,
+            captcha_mode=captcha_mode,
+            test_type=test_type,
+            status="blocked",
+            strategy="auto_login",
+            plan="根据 OpenAPI 推理 login/token/captcha/csrf 链路，并限制为登录相关接口与只读验证接口。",
+            captcha_handling="验证码策略尚未执行。",
+            steps=steps,
+            missing_fields=required_fields,
+            next_action=next_action,
+        )
+        return auth_preflight, headers, None, auth_resolution
+
+    auth_config = _auth_config_with_credentials(payload, enabled=True)
+    login_url, login_endpoint = login_endpoint_for_config(
+        auth_config,
+        endpoints=endpoints,
+        target_url=target_url,
+    )
+    if captcha_mode == "static":
+        captcha_value = _auth_credentials_dict(payload).get("captcha") or str(auth_config.get("captcha") or "").strip()
+        if not captcha_value:
+            steps.append(
+                RunAuthPreflightStep(
+                    key="captcha",
+                    label="固定验证码",
+                    status="blocked",
+                    detail="固定验证码模式需要填写验证码。",
+                )
+            )
+            auth_preflight = _auth_preflight_response(
+                auth_mode=auth_mode,
+                captcha_mode=captcha_mode,
+                test_type=test_type,
+                status="blocked",
+                strategy="auto_login",
+                plan="使用用户填写的固定验证码执行登录。",
+                captcha_handling="固定验证码：缺少用户填写的验证码。",
+                steps=steps,
+                missing_fields=["captcha"],
+                next_action="填写验证码后重新预检。",
+            )
+            return auth_preflight, headers, None, auth_resolution
+        auth_config["captcha"] = captcha_value
+    elif captcha_mode == "dynamic":
+        captcha_context = await fetch_captcha_context(
+            auth_config,
+            source=source,
+            input_type=input_type,
+            target_url=target_url,
+            endpoints=endpoints,
+        )
+        captcha_text = captcha_context.captcha_text if captcha_context.ok else None
+        steps.append(
+            RunAuthPreflightStep(
+                key="captcha",
+                label="动态验证码上下文",
+                status="passed" if captcha_context.ok else "blocked",
+                detail=_captcha_context_summary(captcha_context),
+            )
+        )
+        if captcha_context.ok and captcha_text:
+            auth_config["captcha"] = captcha_text
+        elif captcha_required_by_login(auth_config, login_endpoint):
+            auth_preflight = _auth_preflight_response(
+                auth_mode=auth_mode,
+                captcha_mode=captcha_mode,
+                test_type=test_type,
+                status="blocked",
+                strategy="auto_login",
+                plan="接口测试只获取验证码上下文，不做图片识别。",
+                captcha_handling=_captcha_context_summary(captcha_context),
+                steps=steps,
+                missing_fields=["captcha"],
+                next_action="接口动态验证码未返回明文 code；请改用固定验证码并填写验证码。",
+            )
+            return auth_preflight, headers, None, auth_resolution
+
+    if not login_url:
+        steps.append(
+            RunAuthPreflightStep(
+                key="login_plan",
+                label="登录链路",
+                status="blocked",
+                detail="未提供登录 URL，且无法从 API 文档推断。",
+            )
+        )
+    auth_resolution = await resolve_auto_auth_headers(
+        auth_config,
+        source=source,
+        input_type=input_type,
+        target_url=target_url,
+        endpoints=endpoints,
+    )
+    steps.append(
+        RunAuthPreflightStep(
+            key="login",
+            label="登录换取 Token/Cookie",
+            status="passed" if auth_resolution.ok else "blocked",
+            detail=auth_resolution.detail or ("自动获取成功" if auth_resolution.ok else "自动获取失败"),
+        )
+    )
+    if auth_resolution.ok:
+        headers.update(auth_resolution.headers)
+    else:
+        auth_preflight = _auth_preflight_response(
+            auth_mode=auth_mode,
+            captcha_mode=captcha_mode,
+            test_type=test_type,
+            status="blocked",
+            strategy="auto_login",
+            plan="根据 OpenAPI 推理 login/token/captcha/csrf 链路，并限制为登录相关接口与只读验证接口。",
+            captcha_handling=_captcha_context_summary(captcha_context)
+            if captcha_mode == "dynamic"
+            else {"none": "无验证码。", "static": "固定验证码：使用用户填写的验证码。"}[captcha_mode],
+            steps=steps,
+            missing_fields=auth_resolution.missing_inputs,
+            auth_header_name=auth_resolution.header_name,
+            next_action=auth_resolution.next_action or "补齐登录信息后重新预检。",
+        )
+        return auth_preflight, headers, None, auth_resolution
+
+    candidates = protected_candidates
+    if not candidates:
+        steps.append(
+            RunAuthPreflightStep(
+                key="protected_validation",
+                label="受保护接口验证",
+                status="blocked",
+                detail="没有可用于验证 Token/Cookie 的受保护只读接口。",
+            )
+        )
+        auth_preflight = _auth_preflight_response(
+            auth_mode=auth_mode,
+            captcha_mode=captcha_mode,
+            test_type=test_type,
+            status="blocked",
+            strategy="auto_login",
+            plan="根据 OpenAPI 推理 login/token/captcha/csrf 链路，并限制为登录相关接口与只读验证接口。",
+            captcha_handling=_captcha_context_summary(captcha_context)
+            if captcha_mode == "dynamic"
+            else {"none": "无验证码。", "static": "固定验证码：使用用户填写的验证码。"}[captcha_mode],
+            steps=steps,
+            missing_fields=["protected_read_only_endpoint"],
+            auth_header_name=auth_resolution.header_name,
+            next_action="OpenAPI 需要提供受保护 GET/HEAD/OPTIONS 接口用于鉴权预检。",
+        )
+        return auth_preflight, headers, None, auth_resolution
+
+    validation_results, success_count = await _validate_readonly_auth_access(candidates, headers)
+    status = "passed" if success_count >= max(1, min(2, len(candidates))) else "blocked"
+    steps.append(
+        RunAuthPreflightStep(
+            key="protected_validation",
+            label="受保护接口验证",
+            status=status,
+            detail=f"自动鉴权只读验证通过 {success_count}/{len(candidates)} 个接口。",
+        )
+    )
+    runtime_auth_config = auth_config if auth_config.get("enabled") else None
+    auth_preflight = _auth_preflight_response(
+        auth_mode=auth_mode,
+        captcha_mode=captcha_mode,
+        test_type=test_type,
+        status=status,
+        strategy="auto_login",
+        plan="根据 OpenAPI 推理 login/token/captcha/csrf 链路；执行层仅允许登录、验证码、token/refresh/csrf 相关接口和只读验证接口。",
+        captcha_handling=_captcha_context_summary(captcha_context)
+        if captcha_mode == "dynamic"
+        else {"none": "无验证码。", "static": "固定验证码：使用用户填写的验证码。"}[captcha_mode],
+        steps=steps,
+        validation_results=validation_results,
+        auth_header_name=auth_resolution.header_name,
+        protected_validation_count=success_count,
+        next_action=None if status == "passed" else "Token/Cookie 获取成功，但受保护接口验证失败；请检查账号权限。",
+    )
+    return auth_preflight, headers, runtime_auth_config, auth_resolution
 
 
 def _preflight_readiness(checks: list[RunPreflightCheck]) -> str:
@@ -3213,10 +4057,10 @@ async def create_run(payload: RunCreate, db: DbSession, _: CurrentUser):
         raise HTTPException(status_code=400, detail="source is required")
 
     try:
-        db_test_type = normalize_test_type(payload.test_type, default=TestType.AUTO)
+        agent_test_type = _normalize_new_run_test_type(payload.test_type)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    agent_test_type = normalize_agent_test_type(db_test_type, default="auto")
+    db_test_type = normalize_test_type(agent_test_type)
 
     input_type = classify_input(source)
 
@@ -3256,26 +4100,30 @@ async def create_run(payload: RunCreate, db: DbSession, _: CurrentUser):
     api_profile = await _best_effort_api_profile(source, input_type, api_execution_policy)
     if not payload.base_url and api_profile.get("target_url"):
         target_url = str(api_profile["target_url"])
-    extra_headers, auth_resolution = await _prepare_run_auth(
-        payload,
-        source=source,
-        input_type=input_type,
-        target_url=target_url,
-    )
-    runtime_auth_config = coerce_auth_config(payload.auth_config)
-    if not runtime_auth_config.get("enabled"):
-        runtime_auth_config = None
-    auth_required_count = api_profile.get("auth_required_count")
-    has_auth = bool((payload.token or "").strip() or has_auth_like_header(extra_headers))
-    if auth_required_count and not has_auth:
-        detail = (
-            f"检测到 {auth_required_count} 个接口需要鉴权。请提供 Token/Header，"
-            "或选择自动获取 Token 并填写可通过的基础登录凭据后再执行。"
+    cached_auth = _get_cached_auth_preflight(payload)
+    if cached_auth is not None:
+        auth_preflight, extra_headers, runtime_auth_config, auth_resolution = cached_auth
+    else:
+        auth_preflight, extra_headers, runtime_auth_config, auth_resolution = await _run_auth_preflight(
+            payload,
+            db=db,
+            source=source,
+            input_type=input_type,
+            target_url=target_url,
+            test_type=agent_test_type,
+            auth_required_count=api_profile.get("auth_required_count"),
         )
-        if payload.auth_config and payload.auth_config.enabled and auth_resolution.detail:
-            detail = f"{detail} 自动获取 Token 失败：{auth_resolution.detail}"
-            if auth_resolution.next_action:
-                detail = f"{detail} {auth_resolution.next_action}"
+        _cache_auth_preflight(
+            fingerprint=_auth_preflight_fingerprint(payload),
+            auth_preflight=auth_preflight,
+            auth_headers=extra_headers,
+            runtime_auth_config=runtime_auth_config,
+            auth_resolution=auth_resolution,
+        )
+    if not auth_preflight.can_start:
+        detail = f"需要鉴权预检通过后才能启动。{auth_preflight.next_action or '鉴权预检未通过，无法启动测试。'}"
+        if auth_resolution.detail:
+            detail = f"{detail} {auth_resolution.detail}"
         raise HTTPException(status_code=400, detail=detail)
 
     task = await task_service.create(
@@ -3299,6 +4147,10 @@ async def create_run(payload: RunCreate, db: DbSession, _: CurrentUser):
             input_type=input_type,
             auth_headers=extra_headers or None,
             auth_config=runtime_auth_config,
+            auth_mode=_normalize_auth_mode(payload),
+            captcha_mode=_normalize_captcha_mode(payload),
+            auth_credentials=_auth_credentials_dict(payload) or None,
+            auth_preflight=auth_preflight.model_dump(mode="json"),
             base_url_override=payload.base_url,
             api_execution_policy=api_execution_policy,
             setup_instructions=setup_instructions,
@@ -3317,6 +4169,10 @@ async def create_run(payload: RunCreate, db: DbSession, _: CurrentUser):
                 "input_type": input_type,
                 "auth_headers": extra_headers or None,
                 "auth_config": runtime_auth_config,
+                "auth_mode": _normalize_auth_mode(payload),
+                "captcha_mode": _normalize_captcha_mode(payload),
+                "auth_credentials": _auth_credentials_dict(payload) or None,
+                "auth_preflight": auth_preflight.model_dump(mode="json"),
                 "base_url_override": payload.base_url,
                 "api_execution_policy": api_execution_policy,
                 "setup_instructions": setup_instructions,
@@ -3343,10 +4199,9 @@ async def preflight_run(payload: RunPreflightRequest, db: DbSession, _: CurrentU
         raise HTTPException(status_code=400, detail="source is required")
 
     try:
-        db_test_type = normalize_test_type(payload.test_type, default=TestType.AUTO)
+        agent_test_type = _normalize_new_run_test_type(payload.test_type)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    agent_test_type = normalize_agent_test_type(db_test_type, default="auto")
 
     input_type = classify_input(source)
     api_execution_policy = _normalize_api_execution_policy(payload.api_execution_policy)
@@ -3364,14 +4219,25 @@ async def preflight_run(payload: RunPreflightRequest, db: DbSession, _: CurrentU
     reachability = await _best_effort_reachability(source)
     worker_status, worker_detail, worker_action = await _best_effort_worker_readiness()
     browser_tool_found = shutil.which("playwright-cli") is not None or shutil.which("npx") is not None
-    prepared_headers, auth_resolution = await _prepare_run_auth(
+    auth_preflight, prepared_headers, runtime_auth_config, auth_resolution = await _run_auth_preflight(
         payload,
+        db=db,
         source=source,
         input_type=input_type,
         target_url=target_url,
+        test_type=agent_test_type,
+        auth_required_count=auth_required_count,
     )
-    supplied_auth = bool((payload.token or "").strip() or has_auth_like_header(prepared_headers))
-    auth_attempted = bool(payload.auth_config and payload.auth_config.enabled)
+    _cache_auth_preflight(
+        fingerprint=_auth_preflight_fingerprint(payload),
+        auth_preflight=auth_preflight,
+        auth_headers=prepared_headers,
+        runtime_auth_config=runtime_auth_config,
+        auth_resolution=auth_resolution,
+    )
+    supplied_auth = auth_preflight.can_start or has_auth_like_header(prepared_headers)
+    auth_mode = _normalize_auth_mode(payload)
+    auth_attempted = auth_mode == "auto"
 
     checks = [
         RunPreflightCheck(
@@ -3423,24 +4289,16 @@ async def preflight_run(payload: RunPreflightRequest, db: DbSession, _: CurrentU
         RunPreflightCheck(
             key="auth",
             label="鉴权准备",
-            status="ready" if not auth_required_count or supplied_auth else "missing",
+            status="ready" if auth_preflight.can_start else "missing" if auth_preflight.status == "blocked" else "warning",
             detail=(
-                "未检测到鉴权要求"
-                if not auth_required_count
-                else "自动获取 Token 已通过，运行时会注入鉴权头"
-                if auth_resolution.ok
-                else "已提供 Token/Header"
-                if supplied_auth
-                else (
-                    f"检测到 {auth_required_count} 个接口需要鉴权，且自动获取 Token 未通过：{auth_resolution.detail}"
-                    if auth_attempted
-                    else f"检测到 {auth_required_count} 个接口需要鉴权，必须提供 Token/Header 或选择自动获取 Token"
-                )
+                auth_preflight.steps[-1].detail
+                if auth_preflight.steps
+                else "鉴权预检未完成"
             ),
             action=(
                 None
-                if not auth_required_count or supplied_auth
-                else auth_resolution.next_action or "选择自动获取 Token，或手动提供 Token/Header"
+                if auth_preflight.can_start
+                else auth_preflight.next_action or "选择自动鉴权、手动 Header/Token，或确认无需鉴权。"
             ),
         ),
         RunPreflightCheck(
@@ -3458,14 +4316,14 @@ async def preflight_run(payload: RunPreflightRequest, db: DbSession, _: CurrentU
     warnings: list[str] = []
     if input_type in ("swagger_json", "swagger_yaml") and not payload.base_url:
         warnings.append("原文 Swagger 未提供 Base URL 时，系统只能依赖文档 servers 字段推断请求地址。")
-    if agent_test_type in ("ui", "auto") and not payload.setup_instructions.strip():
+    if agent_test_type == "ui" and not payload.setup_instructions.strip():
         warnings.append("如果目标需要登录、验证码或其他前置步骤，请在前置说明里提供测试账号和安全边界。")
     if input_type == "url" and agent_test_type == "api":
         warnings.append("当前输入看起来是网页 URL，但测试模式选择了 API；建议确认是否应使用 Swagger/OpenAPI。")
-    if auth_required_count and not supplied_auth:
-        warnings.append(f"检测到 {auth_required_count} 个接口声明需要鉴权；未提供可用鉴权时不会允许创建 API 任务。")
-    if auth_attempted and not auth_resolution.ok:
-        warnings.append(f"自动获取 Token 预检失败：{auth_resolution.detail}")
+    if not auth_preflight.can_start:
+        warnings.append(f"鉴权预检未通过：{auth_preflight.next_action or auth_preflight.status}")
+    if auth_attempted and auth_resolution.detail and not auth_resolution.ok:
+        warnings.append(f"自动鉴权预检失败：{auth_resolution.detail}")
     if estimated_skipped_count:
         warnings.append(f"当前 API 策略预计会跳过 {estimated_skipped_count} 个写入/变更接口，避免误改真实数据。")
     if api_profile.get("api_path_prefix_rewrite"):
@@ -3508,6 +4366,7 @@ async def preflight_run(payload: RunPreflightRequest, db: DbSession, _: CurrentU
         checks=checks,
         mission_preview=mission_preview,
         target_memory=target_memory,
+        auth_preflight=auth_preflight,
         warnings=warnings,
         endpoint_count=endpoint_count,
         auth_required_count=auth_required_count,
@@ -3515,13 +4374,15 @@ async def preflight_run(payload: RunPreflightRequest, db: DbSession, _: CurrentU
         estimated_skipped_count=estimated_skipped_count,
         api_execution_policy=api_execution_policy,
         api_path_prefix_rewrite=api_profile.get("api_path_prefix_rewrite"),
-        auth_resolved=auth_resolution.ok,
-        auth_strategy=auth_resolution.strategy,
+        auth_resolved=auth_resolution.ok or (
+            auth_preflight.can_start and auth_preflight.strategy == "manual_header"
+        ),
+        auth_strategy=auth_resolution.strategy or auth_preflight.strategy,
         auth_header_name=auth_resolution.header_name,
-        auth_error=None if auth_resolution.ok or not auth_attempted else auth_resolution.detail,
-        auth_missing_inputs=[] if auth_resolution.ok or not auth_attempted else auth_resolution.missing_inputs,
-        auth_next_action=None if auth_resolution.ok or not auth_attempted else auth_resolution.next_action,
-        auth_required_fields=[] if auth_resolution.ok or not auth_attempted else auth_resolution.required_fields,
+        auth_error=None if auth_preflight.can_start else auth_resolution.detail or auth_preflight.next_action,
+        auth_missing_inputs=[] if auth_preflight.can_start else auth_preflight.missing_fields or auth_resolution.missing_inputs,
+        auth_next_action=None if auth_preflight.can_start else auth_preflight.next_action or auth_resolution.next_action,
+        auth_required_fields=[] if auth_preflight.can_start else auth_resolution.required_fields or auth_preflight.missing_fields,
     )
 
 

@@ -59,6 +59,7 @@ class AgentState(TypedDict, total=False):
     login_verified: bool | None  # whether login appears successful
     login_verification_reason: str | None  # human-readable verification reason
     ui_login_screenshot: str | None  # final login screenshot evidence
+    ui_captcha_result: dict | None
     authenticated_ui_context: dict | None  # post-login/authenticated UI context summary
     ui_reproducible_script: str | None  # full reproducible playwright-cli script
     ui_execution_context_plan: list[dict] | None  # per-case execution context decisions
@@ -80,6 +81,10 @@ class AgentState(TypedDict, total=False):
     current_step: dict | None
     auth_headers: dict[str, str] | None
     auth_config: dict[str, Any] | None
+    auth_mode: Literal["auto", "manual", "none_confirmed"] | None
+    captcha_mode: Literal["none", "static", "dynamic"] | None
+    auth_credentials: dict[str, str] | None
+    auth_preflight: dict[str, Any] | None
     custom_headers: dict[str, str] | None
     base_url_override: str | None
     api_execution_policy: Literal["safe_read_only", "safe_with_auth", "write_allowed"] | None

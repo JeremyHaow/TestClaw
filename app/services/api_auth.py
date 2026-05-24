@@ -21,6 +21,18 @@ class AuthResolution:
     required_fields: list[str] = field(default_factory=list)
 
 
+@dataclass
+class CaptchaContextResolution:
+    ok: bool
+    endpoint: str | None = None
+    method: str = "GET"
+    context: dict[str, Any] = field(default_factory=dict)
+    captcha_text: str | None = None
+    detail: str = ""
+    missing_inputs: list[str] = field(default_factory=list)
+    next_action: str = ""
+
+
 def coerce_auth_config(config: Any) -> dict[str, Any]:
     if config is None:
         return {}
@@ -92,6 +104,25 @@ def infer_login_url(endpoints: list[dict[str, Any]], base_url: str) -> str | Non
     if not candidates:
         return None
     candidates.sort(key=lambda item: 0 if "login" in str(item.get("path", "")).lower() else 1)
+    return join_auth_url(base_url, str(candidates[0].get("path") or ""))
+
+
+def infer_captcha_url(endpoints: list[dict[str, Any]], base_url: str) -> str | None:
+    if not base_url:
+        return None
+    markers = ("captcha", "verifycode", "verificationcode", "validcode", "validatecode")
+    candidates: list[dict[str, Any]] = []
+    for endpoint in endpoints:
+        path = str(endpoint.get("path") or "")
+        method = str(endpoint.get("method") or "GET").upper()
+        if method not in {"GET", "HEAD", "OPTIONS"}:
+            continue
+        lowered = path.lower().replace("_", "").replace("-", "")
+        if any(marker in lowered for marker in markers):
+            candidates.append(endpoint)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: str(item.get("path") or "").lower().find("captcha"))
     return join_auth_url(base_url, str(candidates[0].get("path") or ""))
 
 
@@ -308,6 +339,207 @@ def missing_required_body_fields(
 
 def missing_inputs_for_body_fields(field_names: list[str]) -> list[str]:
     return _unique([_input_key_for_field(field_name) for field_name in field_names])
+
+
+def login_endpoint_for_config(
+    config: Any,
+    *,
+    endpoints: list[dict[str, Any]],
+    target_url: str,
+) -> tuple[str | None, dict[str, Any] | None]:
+    config_data = coerce_auth_config(config)
+    login_url = str(config_data.get("login_url") or "").strip()
+    if login_url:
+        login_url = join_auth_url(target_url, login_url)
+    else:
+        login_url = infer_login_url(endpoints, target_url) or ""
+    if not login_url:
+        return None, None
+    return login_url, _match_login_endpoint(endpoints, login_url)
+
+
+def captcha_required_by_login(config: Any, login_endpoint: dict[str, Any] | None = None) -> bool:
+    body = build_login_body(coerce_auth_config(config), login_endpoint)
+    required_fields = missing_required_body_fields(body, login_endpoint)
+    if any(_input_key_for_field(field) == "captcha" for field in required_fields):
+        return True
+    return any(_input_key_for_field(field) == "captcha" for field in body)
+
+
+def _extract_context_fields(payload: Any) -> dict[str, Any]:
+    context: dict[str, Any] = {}
+    interesting = {
+        "uuid",
+        "id",
+        "captchaid",
+        "captchakey",
+        "key",
+        "sessionid",
+        "session",
+        "csrf",
+        "csrftoken",
+        "xsrf",
+        "xsrftoken",
+        "img",
+        "image",
+        "imagebase64",
+        "captchaenabled",
+        "enabled",
+    }
+
+    def visit(value: Any, prefix: str = "") -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                key_text = str(key)
+                normalized = _normalize_name(key_text)
+                next_prefix = f"{prefix}.{key_text}" if prefix else key_text
+                if normalized in interesting:
+                    if isinstance(nested, (str, int, float, bool)) or nested is None:
+                        context[next_prefix] = nested
+                    elif isinstance(nested, (dict, list)):
+                        context[next_prefix] = f"{type(nested).__name__}:{len(nested)}"
+                visit(nested, next_prefix)
+        elif isinstance(value, list):
+            for index, nested in enumerate(value[:5]):
+                visit(nested, f"{prefix}[{index}]")
+
+    visit(payload)
+    return context
+
+
+def _extract_clear_captcha_text(payload: Any) -> str | None:
+    exact_names = {
+        "captcha",
+        "captchacode",
+        "verifycode",
+        "verificationcode",
+        "validcode",
+        "validatecode",
+        "text",
+    }
+
+    def visit(value: Any, key_hint: str = "") -> str | None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                normalized = _normalize_name(str(key))
+                if normalized in exact_names and isinstance(nested, (str, int, float)):
+                    text = str(nested).strip()
+                    if 2 <= len(text) <= 12:
+                        return text
+                found = visit(nested, str(key))
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for nested in value:
+                found = visit(nested, key_hint)
+                if found:
+                    return found
+        elif _normalize_name(key_hint) == "code" and isinstance(value, str):
+            text = value.strip()
+            if 2 <= len(text) <= 8 and text not in {"0", "00", "200"}:
+                return text
+        return None
+
+    return visit(payload)
+
+
+async def fetch_captcha_context(
+    config: Any,
+    *,
+    source: str,
+    input_type: str,
+    target_url: str,
+    endpoints: list[dict[str, Any]] | None = None,
+) -> CaptchaContextResolution:
+    config_data = coerce_auth_config(config)
+    loaded_endpoints = endpoints
+    captcha_url = str(config_data.get("captcha_url") or "").strip()
+    if captcha_url:
+        captcha_url = join_auth_url(target_url, captcha_url)
+    else:
+        try:
+            if loaded_endpoints is None:
+                _, loaded_endpoints = await load_auth_endpoints(source, input_type)
+            captcha_url = infer_captcha_url(loaded_endpoints or [], target_url) or ""
+        except Exception:
+            captcha_url = ""
+
+    if not captcha_url:
+        return CaptchaContextResolution(
+            ok=False,
+            detail="未提供验证码 URL，且无法从 API 文档推断",
+            missing_inputs=["captcha_url"],
+            next_action="填写固定验证码，或在高级登录选项中补充验证码接口 URL。",
+        )
+    if not captcha_url.startswith(("http://", "https://")):
+        return CaptchaContextResolution(
+            ok=False,
+            endpoint=captcha_url,
+            detail="验证码 URL 必须是 http(s) 地址，或提供 Base URL 后使用相对路径",
+            missing_inputs=["base_url", "captcha_url"],
+            next_action="填写 Base URL，或把验证码 URL 改成完整 http(s) 地址。",
+        )
+
+    request_headers = normalize_headers(config_data.get("headers"))
+    try:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+            response = await client.get(captcha_url, headers=request_headers or None)
+    except httpx.TimeoutException:
+        return CaptchaContextResolution(
+            ok=False,
+            endpoint=captcha_url,
+            detail="验证码请求超时",
+            missing_inputs=["captcha_url"],
+            next_action="检查验证码 URL、Base URL 和网络可达性。",
+        )
+    except httpx.RequestError:
+        return CaptchaContextResolution(
+            ok=False,
+            endpoint=captcha_url,
+            detail="验证码请求失败",
+            missing_inputs=["captcha_url"],
+            next_action="检查验证码 URL 是否正确；接口测试不会识别验证码图片。",
+        )
+
+    context: dict[str, Any] = {
+        "status_code": response.status_code,
+        "cookie_names": list(response.cookies.keys()),
+    }
+    for header_name in ("x-csrf-token", "x-xsrf-token", "csrf-token", "set-cookie"):
+        header_value = response.headers.get(header_name)
+        if header_value:
+            context.setdefault("header_names", []).append(header_name)
+
+    payload: Any
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+        text = str(getattr(response, "text", "") or "")
+        if text.strip():
+            context["body_preview_type"] = "text"
+            context["body_chars"] = len(text)
+
+    if isinstance(payload, (dict, list)):
+        context.update(_extract_context_fields(payload))
+    captcha_text = _extract_clear_captcha_text(payload)
+    if response.status_code >= 400:
+        return CaptchaContextResolution(
+            ok=False,
+            endpoint=captcha_url,
+            context=context,
+            detail=f"验证码接口返回 HTTP {response.status_code}",
+            missing_inputs=["captcha_url"],
+            next_action="检查验证码 URL 和环境状态。",
+        )
+
+    return CaptchaContextResolution(
+        ok=True,
+        endpoint=captcha_url,
+        context=context,
+        captcha_text=captcha_text,
+        detail="已获取验证码上下文字段" if not captcha_text else "已获取验证码上下文字段和明文验证码",
+    )
 
 
 async def resolve_auto_auth_headers(

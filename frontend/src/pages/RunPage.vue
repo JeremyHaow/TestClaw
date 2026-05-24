@@ -19,7 +19,6 @@ import {
   SlidersHorizontal,
   Target,
   Terminal,
-  Zap,
 } from 'lucide-vue-next'
 
 type PreflightCheck = {
@@ -28,6 +27,38 @@ type PreflightCheck = {
   status: string
   detail: string
   action?: string | null
+}
+
+type AuthPreflightStep = {
+  key: string
+  label: string
+  status: string
+  detail: string
+}
+
+type AuthPreflightValidation = {
+  method: string
+  url: string
+  status: string
+  status_code?: number | null
+  detail: string
+}
+
+type AuthPreflight = {
+  auth_preflight_id?: string | null
+  auth_mode: string
+  captcha_mode: string
+  status: string
+  strategy: string
+  plan: string
+  captcha_handling: string
+  steps: AuthPreflightStep[]
+  missing_fields: string[]
+  validation_results: AuthPreflightValidation[]
+  auth_header_name?: string | null
+  protected_validation_count: number
+  can_start: boolean
+  next_action?: string | null
 }
 
 type MissionCorrectionPrompt = {
@@ -121,6 +152,7 @@ type PreflightResponse = {
   checks: PreflightCheck[]
   mission_preview?: MissionPreview | null
   target_memory?: TargetMemory | null
+  auth_preflight?: AuthPreflight | null
   warnings: string[]
   endpoint_count?: number | null
   auth_required_count?: number | null
@@ -147,10 +179,11 @@ const preflight = ref<PreflightResponse | null>(null)
 
 const form = reactive({
   source: '',
-  test_type: 'auto',
+  test_type: 'api',
   objective: '',
   base_url: '',
   auth_mode: 'auto',
+  captcha_mode: 'none',
   token: '',
   custom_headers: '',
   auth_refresh_enabled: false,
@@ -158,6 +191,7 @@ const form = reactive({
   auth_password: '',
   auth_captcha: '',
   auth_login_url: '',
+  auth_captcha_url: '',
   auth_method: 'POST',
   auth_content_type: 'json',
   auth_token_path: '',
@@ -170,9 +204,8 @@ const form = reactive({
 })
 
 const modes = [
-  { value: 'auto', label: '自动编排', desc: '根据输入决定 API/UI 路径', icon: Zap },
-  { value: 'api', label: 'API 检查', desc: '聚焦接口契约和断言', icon: FileJson },
-  { value: 'ui', label: 'UI 巡检', desc: '聚焦页面路径和证据截图', icon: Globe },
+  { value: 'api', label: '接口测试', desc: '聚焦接口契约、鉴权和断言', icon: FileJson },
+  { value: 'ui', label: 'UI 测试', desc: '聚焦页面路径、登录和截图证据', icon: Globe },
 ]
 
 const safetyPresets = [
@@ -188,17 +221,25 @@ const apiPolicies = [
 ]
 
 const authModes = [
-  { value: 'auto', label: '自动获取 Token', desc: '填写登录凭据，运行前自动换取鉴权 Header。', icon: RefreshCw },
-  { value: 'manual', label: '手动提供 Token/Header', desc: '直接粘贴当前 Token 或自定义 Header。', icon: KeyRound },
+  { value: 'auto', label: '智能体自动鉴权', desc: '填写账号、密码和验证码策略，运行前先预检。', icon: RefreshCw },
+  { value: 'manual', label: '手动 Header/Token', desc: '高级兜底，仍会先验证受保护接口。', icon: KeyRound },
+  { value: 'none_confirmed', label: '确认无需鉴权', desc: '只在无鉴权访问验证通过后允许运行。', icon: ShieldCheck },
 ]
 
-const advancedAuthInputs = new Set(['base_url', 'login_url', 'login_body', 'login_headers', 'token_path', 'method', 'content_type'])
+const captchaModes = [
+  { value: 'none', label: '无验证码', desc: '登录链路不提交验证码。' },
+  { value: 'static', label: '固定验证码', desc: '使用下方填写的验证码。' },
+  { value: 'dynamic', label: '动态验证码', desc: '接口只取上下文；UI 使用 Vision 识别。' },
+]
+
+const advancedAuthInputs = new Set(['base_url', 'login_url', 'captcha_url', 'login_body', 'login_headers', 'token_path', 'method', 'content_type'])
 const authInputLabels: Record<string, string> = {
   username: '用户名',
   password: '密码',
   captcha: '验证码',
   base_url: 'Base URL',
   login_url: '登录 URL',
+  captcha_url: '验证码 URL',
   login_body: '登录请求体 JSON',
   login_headers: '登录请求头 JSON',
   token_path: 'Token 路径',
@@ -215,13 +256,13 @@ const manualAuthSupplied = computed(() => Boolean(form.token.trim() || form.cust
 const isAutoAuthMode = computed(() => form.auth_mode === 'auto')
 const isManualAuthMode = computed(() => form.auth_mode === 'manual')
 const manualRefreshEnabled = computed(() => isManualAuthMode.value && form.auth_refresh_enabled && manualAuthSupplied.value)
-const shouldSendAuthConfig = computed(() => isAutoAuthMode.value || manualRefreshEnabled.value)
+const shouldSendAuthConfig = computed(() => isApiMode.value && (isAutoAuthMode.value || manualRefreshEnabled.value))
 const showLoginCredentialPanel = computed(() => isAutoAuthMode.value || (isManualAuthMode.value && form.auth_refresh_enabled))
 const authMissingInputs = computed(() => preflight.value?.auth_missing_inputs || [])
 const authRequiredFields = computed(() => preflight.value?.auth_required_fields || [])
 const authMissingLabels = computed(() => authMissingInputs.value.map((key) => authInputLabels[key] || key))
 const authNeedsAdvanced = computed(() => authMissingInputs.value.some((key) => advancedAuthInputs.has(key)))
-const showAuthPrompt = computed(() => isApiMode.value && Boolean(preflight.value?.auth_error) && authMissingInputs.value.length > 0)
+const showAuthPrompt = computed(() => Boolean(preflight.value?.auth_error) && authMissingInputs.value.length > 0)
 const readiness = computed(() => preflight.value?.readiness || (form.source.trim() ? 'needs_review' : 'blocked'))
 const readinessLabel = computed(() => {
   if (readiness.value === 'ready') return 'Ready'
@@ -282,11 +323,13 @@ const targetMemoryCountItems = computed(() => {
 })
 const authProvidedLabel = computed(() => {
   if (isAutoAuthMode.value) return preflight.value?.auth_resolved ? '自动获取成功' : '自动获取'
+  if (form.auth_mode === 'none_confirmed') return preflight.value?.auth_preflight?.can_start ? '无需鉴权已验证' : '确认无需鉴权'
   if (manualAuthSupplied.value) return form.auth_refresh_enabled ? '手动提供 + 可刷新' : '手动提供'
   return '未提供'
 })
 const authProvidedTone = computed(() => {
   if (isAutoAuthMode.value) return preflight.value?.auth_resolved ? 'text-emerald-700' : 'text-amber-700'
+  if (form.auth_mode === 'none_confirmed') return preflight.value?.auth_preflight?.can_start ? 'text-emerald-700' : 'text-amber-700'
   if (manualAuthSupplied.value) return 'text-emerald-700'
   if (form.auth_refresh_enabled) return 'text-amber-700'
   return 'text-gray-500'
@@ -318,7 +361,7 @@ function applyRoutePrefill() {
 
   if (source) form.source = source
   if (objective) form.objective = objective
-  if (['auto', 'api', 'ui'].includes(testType)) form.test_type = testType
+  if (['api', 'ui'].includes(testType)) form.test_type = testType
   if (baseUrl) form.base_url = baseUrl
   if (setupInstructions) form.setup_instructions = setupInstructions
   if (apiPolicies.some((policy) => policy.value === apiPolicy)) form.api_execution_policy = apiPolicy
@@ -329,7 +372,7 @@ function resetPreflight() {
   preflight.value = null
 }
 
-function setExample(source: string, objective: string, mode = 'auto') {
+function setExample(source: string, objective: string, mode = 'api') {
   form.source = source
   form.objective = objective
   form.test_type = mode
@@ -431,6 +474,7 @@ function buildAuthConfig() {
   if (form.auth_password.trim()) config.password = form.auth_password.trim()
   if (form.auth_captcha.trim()) config.captcha = form.auth_captcha.trim()
   if (form.auth_login_url.trim()) config.login_url = form.auth_login_url.trim()
+  if (form.auth_captcha_url.trim()) config.captcha_url = form.auth_captcha_url.trim()
   if (showAdvanced.value || form.auth_method !== 'POST') config.method = form.auth_method
   if (showAdvanced.value || form.auth_content_type !== 'json') config.content_type = form.auth_content_type
   if (form.auth_token_path.trim()) config.token_path = form.auth_token_path.trim()
@@ -447,20 +491,35 @@ function buildAuthConfig() {
   return config
 }
 
+function buildAuthCredentials() {
+  const credentials: Record<string, string> = {}
+  if (form.auth_username.trim()) credentials.username = form.auth_username.trim()
+  if (form.auth_password.trim()) credentials.password = form.auth_password.trim()
+  if (form.auth_captcha.trim()) credentials.captcha = form.auth_captcha.trim()
+  return Object.keys(credentials).length ? credentials : undefined
+}
+
 function buildRunPayload() {
   const headers = isManualAuthMode.value ? buildHeaders() : undefined
   const payload: any = {
     source: form.source.trim(),
     test_type: form.test_type,
+    auth_mode: form.auth_mode,
+    captcha_mode: form.captcha_mode,
   }
   if (form.objective.trim()) payload.objective = form.objective.trim()
   if (form.base_url.trim()) payload.base_url = form.base_url.trim()
+  const authCredentials = buildAuthCredentials()
+  if (authCredentials) payload.auth_credentials = authCredentials
+  if (isManualAuthMode.value && form.token.trim()) payload.token = form.token.trim()
+  if (headers && Object.keys(headers).length) payload.headers = headers
   if (isApiMode.value) {
     payload.api_execution_policy = form.api_execution_policy
-    if (isManualAuthMode.value && form.token.trim()) payload.token = form.token.trim()
-    if (headers && Object.keys(headers).length) payload.headers = headers
     const authConfig = buildAuthConfig()
     if (authConfig) payload.auth_config = authConfig
+  }
+  if (preflight.value?.auth_preflight?.auth_preflight_id) {
+    payload.auth_preflight_id = preflight.value.auth_preflight.auth_preflight_id
   }
   if (form.setup_instructions.trim()) payload.setup_instructions = form.setup_instructions.trim()
   return payload
@@ -608,7 +667,7 @@ onMounted(applyRoutePrefill)
 
             <div>
               <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">测试模式</label>
-              <div class="grid gap-3 md:grid-cols-3">
+              <div class="grid gap-3 md:grid-cols-2">
                 <button
                   v-for="mode in modes"
                   :key="mode.value"
@@ -697,18 +756,18 @@ onMounted(applyRoutePrefill)
           </div>
         </div>
 
-        <div v-if="isApiMode" class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+        <div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
           <div class="mb-4 flex items-start gap-3">
             <div class="flex items-center gap-2">
               <KeyRound :size="17" class="text-gray-500" />
               <div>
-                <h3 class="text-sm font-bold text-gray-900">API 凭据</h3>
-                <p class="mt-1 text-xs leading-5 text-gray-500">选择自动获取 Token，或手动提供 Token/Header。</p>
+                <h3 class="text-sm font-bold text-gray-900">鉴权预检</h3>
+                <p class="mt-1 text-xs leading-5 text-gray-500">接口测试和 UI 测试都会先确认鉴权路径，再启动任务。</p>
               </div>
             </div>
           </div>
 
-          <div class="grid gap-3 md:grid-cols-2">
+          <div class="grid gap-3 md:grid-cols-3">
             <button
               v-for="mode in authModes"
               :key="mode.value"
@@ -748,7 +807,7 @@ onMounted(applyRoutePrefill)
               </div>
             </div>
 
-            <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-xs font-bold text-gray-700">
+            <label v-if="isApiMode" class="flex cursor-pointer items-start gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-xs font-bold text-gray-700">
               <input
                 v-model="form.auth_refresh_enabled"
                 type="checkbox"
@@ -763,23 +822,23 @@ onMounted(applyRoutePrefill)
               </span>
             </label>
 
-            <div v-if="form.auth_refresh_enabled && !manualAuthSupplied" class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800">
+            <div v-if="isApiMode && form.auth_refresh_enabled && !manualAuthSupplied" class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800">
               手动模式需要先提供当前 Token/Header，自动刷新只负责 Token 过期后的重取。
             </div>
           </div>
 
           <div v-if="isAutoAuthMode" class="mt-4 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">
-            默认会从 OpenAPI 文档推断 login/token 接口和请求体；通常只需要先填账号、密码或验证码。
+            {{ isApiMode ? '默认会从 OpenAPI 文档推断 login/token/captcha 接口和请求体。' : 'UI 测试会打开登录页，由模型根据页面结构推理登录步骤。' }}
           </div>
 
           <div v-if="showLoginCredentialPanel" class="mt-4 space-y-4 rounded-lg border border-emerald-100 bg-emerald-50/60 p-4">
             <div class="flex items-center justify-between gap-3">
               <div>
                 <div class="text-sm font-bold text-emerald-900">
-                  {{ isAutoAuthMode ? '自动获取 Token' : '自动刷新凭据' }}
+                  {{ isAutoAuthMode ? '智能体自动鉴权' : '自动刷新凭据' }}
                 </div>
                 <p class="mt-1 text-xs leading-5 text-emerald-700">
-                  {{ isAutoAuthMode ? '运行前先尝试登录并注入鉴权头。' : '手动 Token 失效后才会使用这些信息重新登录。' }}
+                  {{ isAutoAuthMode ? '运行前先预检登录链路；UI 动态验证码会交给 Vision 模型。' : '手动 Token 失效后才会使用这些信息重新登录。' }}
                 </p>
               </div>
             </div>
@@ -806,15 +865,31 @@ onMounted(applyRoutePrefill)
                   @input="resetPreflight"
                 />
               </div>
-              <div>
+              <div v-if="form.captcha_mode === 'static'">
                 <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-emerald-700">验证码</label>
                 <input
                   v-model="form.auth_captcha"
-                  placeholder="可选"
+                  placeholder="固定验证码"
                   class="w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition-all"
                   :class="authInputNeeds('captcha') ? 'border-amber-400 bg-amber-50 focus:border-amber-500' : 'border-emerald-200 bg-white focus:border-emerald-500'"
                   @input="resetPreflight"
                 />
+              </div>
+            </div>
+
+            <div>
+              <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-emerald-700">验证码策略</label>
+              <div class="grid gap-3 md:grid-cols-3">
+                <button
+                  v-for="mode in captchaModes"
+                  :key="mode.value"
+                  @click="form.captcha_mode = mode.value; resetPreflight()"
+                  class="min-w-0 rounded-lg border p-3 text-left transition-all"
+                  :class="form.captcha_mode === mode.value ? 'border-emerald-500 bg-white text-emerald-800' : 'border-emerald-100 bg-emerald-50 text-emerald-700 hover:border-emerald-300'"
+                >
+                  <div class="text-xs font-bold">{{ mode.label }}</div>
+                  <p class="mt-1 text-[11px] leading-4 opacity-80">{{ mode.desc }}</p>
+                </button>
               </div>
             </div>
 
@@ -861,6 +936,17 @@ onMounted(applyRoutePrefill)
                     <option value="form">Form</option>
                   </select>
                 </div>
+              </div>
+
+              <div v-if="isApiMode">
+                <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">验证码 URL</label>
+                <input
+                  v-model="form.auth_captcha_url"
+                  placeholder="留空时从 OpenAPI captcha/verifyCode 接口推断"
+                  class="w-full rounded-lg border px-4 py-2.5 font-mono text-sm outline-none transition-all"
+                  :class="authInputNeeds('captcha_url') ? 'border-amber-400 bg-amber-50 focus:border-amber-500' : 'border-gray-200 bg-white focus:border-blue-500'"
+                  @input="resetPreflight"
+                />
               </div>
 
               <div class="grid gap-4 lg:grid-cols-3">
@@ -922,15 +1008,31 @@ onMounted(applyRoutePrefill)
           </div>
 
           <div
-            v-if="preflight?.auth_resolved || preflight?.auth_error"
+            v-if="preflight?.auth_preflight"
             class="mt-4 rounded-lg border px-3 py-2 text-xs font-bold"
-            :class="preflight.auth_resolved ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-red-200 bg-red-50 text-red-700'"
+            :class="preflight.auth_preflight.can_start ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-red-200 bg-red-50 text-red-700'"
           >
             {{
-              preflight.auth_resolved
-                ? `${isAutoAuthMode ? '自动获取成功' : '自动更新可用'}：${preflight.auth_header_name || 'Authorization'}`
-                : `${isAutoAuthMode ? '自动获取失败' : '自动更新失败'}：${preflight.auth_error}`
+              preflight.auth_preflight.can_start
+                ? `鉴权预检通过：${preflight.auth_preflight.strategy}`
+                : `鉴权预检阻断：${preflight.auth_preflight.next_action || preflight.auth_error}`
             }}
+          </div>
+
+          <div v-if="preflight?.auth_preflight" class="mt-4 space-y-2">
+            <div class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-xs leading-5 text-gray-700">
+              <div class="font-bold text-gray-900">{{ preflight.auth_preflight.plan }}</div>
+              <div class="mt-1">{{ preflight.auth_preflight.captcha_handling }}</div>
+            </div>
+            <div
+              v-for="step in preflight.auth_preflight.steps"
+              :key="step.key"
+              class="rounded-lg border px-3 py-2 text-xs"
+              :class="checkTone(step.status === 'passed' ? 'ready' : step.status === 'blocked' ? 'missing' : 'warning')"
+            >
+              <div class="font-bold">{{ step.label }}</div>
+              <div class="mt-0.5 leading-5 opacity-90">{{ step.detail }}</div>
+            </div>
           </div>
 
           <div v-if="showAuthPrompt" class="mt-4 space-y-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
