@@ -6,6 +6,7 @@ from app.core.redaction import (
     REDACTED_VALUE,
     is_sensitive_header,
     redact_json_text,
+    redact_sensitive_data,
     redact_sensitive_text,
 )
 from app.core import security
@@ -101,6 +102,50 @@ def test_redact_json_text_strips_control_chars_from_keys_and_values():
     parsed = json.loads(redacted)
     body = parsed["api_execution_result"]["results"][0]["body"]
     assert body == {"badkey": "safevalue"}
+
+
+def test_redaction_preserves_nested_openapi_source_json_security_shape():
+    openapi_source = json.dumps(
+        {
+            "openapi": "3.0.3",
+            "info": {"title": "Example API", "version": "1.0.0"},
+            "servers": [{"url": "https://api.example.test"}],
+            "paths": {
+                "/private": {
+                    "get": {
+                        "security": [{"Authorization": []}],
+                        "responses": {"200": {"description": "OK"}},
+                        "description": "example password=source-secret",
+                    }
+                }
+            },
+            "components": {
+                "securitySchemes": {
+                    "Authorization": {
+                        "type": "apiKey",
+                        "name": "Authorization",
+                        "in": "header",
+                    }
+                }
+            },
+        }
+    )
+    payload = {
+        "source_input": openapi_source,
+        "auth_headers": {"Authorization": "Bearer runtime-secret"},
+    }
+
+    redacted = redact_sensitive_data(payload)
+    serialized = json.dumps(redacted, ensure_ascii=False)
+    nested_source = json.loads(redacted["source_input"])
+
+    assert nested_source["paths"]["/private"]["get"]["security"] == [{"Authorization": []}]
+    assert (
+        nested_source["components"]["securitySchemes"]["Authorization"]["name"]
+        == "Authorization"
+    )
+    assert "source-secret" not in serialized
+    assert "runtime-secret" not in serialized
 
 
 def test_redact_sensitive_text_redacts_embedded_playwright_fill_and_type_values():

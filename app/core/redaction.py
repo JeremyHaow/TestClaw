@@ -143,6 +143,20 @@ def redact_sensitive_text(text: str) -> str:
     return _redact_playwright_like_command(redacted)
 
 
+def _redact_structured_text(text: str) -> str | None:
+    stripped = text.strip()
+    if not (
+        (stripped.startswith("{") and stripped.endswith("}"))
+        or (stripped.startswith("[") and stripped.endswith("]"))
+    ):
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except Exception:
+        return None
+    return json.dumps(redact_sensitive_data(parsed), ensure_ascii=False, default=str)
+
+
 def _redact_playwright_like_command(text: str) -> str:
     redacted = _PLAYWRIGHT_TWO_QUOTED_ARGS_RE.sub(
         lambda match: (
@@ -175,13 +189,20 @@ def redact_sensitive_data(value: Any) -> Any:
             elif key_text.lower() in _SAFE_SENSITIVE_METADATA_KEYS:
                 redacted[safe_key] = redact_sensitive_data(child)
             elif is_sensitive_header(key_text):
-                redacted[safe_key] = REDACTED_VALUE
+                redacted[safe_key] = (
+                    redact_sensitive_data(child)
+                    if isinstance(child, (dict, list))
+                    else REDACTED_VALUE
+                )
             else:
                 redacted[safe_key] = redact_sensitive_data(child)
         return redacted
     if isinstance(value, list):
         return [redact_sensitive_data(item) for item in value]
     if isinstance(value, str):
+        structured = _redact_structured_text(value)
+        if structured is not None:
+            return structured
         return redact_sensitive_text(value)
     return value
 

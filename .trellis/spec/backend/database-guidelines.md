@@ -755,6 +755,7 @@ progress = derive_from(workflow_steps, progress_events, current_step)
 - Suite UI cases must carry a UI seed URL or equivalent `input_type="url"` metadata so `_after_api_runner(...)` can continue to the UI path.
 - Rerun must rebuild worker kwargs from `execution_log`, not only from the task row, because the task row does not store selected cases, setup/login instructions, safe custom headers, or URL role metadata.
 - Rerun header rehydration must drop sensitive header names and `[REDACTED]` placeholder values. It may preserve non-sensitive plain headers such as `X-Tenant` or `X-Trace-ID`, but must never replay `Authorization`, `Cookie`, `X-API-Key`, token-like headers, or redacted placeholders from stored logs.
+- Persisted `source_input` for pasted OpenAPI JSON must remain structurally parseable after redaction. Redact secret-bearing scalar values, but do not corrupt OpenAPI metadata such as `security: [{"Authorization": []}]` or `components.securitySchemes.Authorization`; rerun and preflight depend on parsing that stored source.
 
 ### 4. Validation & Error Matrix
 
@@ -764,12 +765,14 @@ progress = derive_from(workflow_steps, progress_events, current_step)
 - Rerun with stored `api_cases`/`ui_cases` -> new worker task receives those exact cases.
 - Missing stored `source_input` but stored `ui_seed_url` -> rerun uses `ui_seed_url` as the source input fallback.
 - Rerun with stored `auth_headers.Authorization="[REDACTED]"` or old unredacted sensitive headers -> worker kwargs omit those headers.
+- Stored OpenAPI `source_input` with `security: [{"Authorization": []}]` and a redacted auth header -> persisted `source_input` is still valid JSON and can be parsed for endpoints; the runtime auth header value remains redacted.
 
 ### 5. Good/Base/Bad Cases
 
 - Good: a user enters `source=https://web/login` and `base_url=https://api`; UI login opens the web page while API tests use the API base.
 - Base: API-only Swagger rerun has no UI seed and executes only API paths.
 - Bad: `target_url` is replaced with the API base during run creation, so login/planning opens `https://api` instead of the page URL.
+- Bad: regex redaction turns an OpenAPI security requirement into `{"Authorization": [REDACTED]}`, making stored `source_input` invalid JSON and breaking rerun/preflight.
 
 ### 6. Tests Required
 
@@ -777,6 +780,7 @@ progress = derive_from(workflow_steps, progress_events, current_step)
 - Unit: `source_loader` keeps URL page `target_url` while preserving `base_url_override`.
 - Unit: suite worker kwargs include selected API/UI cases plus UI seed metadata.
 - Unit: rerun context rehydrates source, cases, setup/login instructions, base URL override, safe custom headers, UI seed, and input type from stored `execution_log`; sensitive or redacted headers are filtered.
+- Unit: execution-log redaction preserves nested OpenAPI source JSON structure, including security requirement arrays and security scheme metadata, while redacting actual auth/header values.
 - Unit: tc generator preserves suite-selected cases instead of replacing them.
 
 ### 7. Wrong vs Correct
@@ -818,6 +822,20 @@ run_agent_task.delay(new_task.id, objective, target_url, auth_headers=headers)
 ```python
 headers = filter_rehydratable_headers(json.loads(task.execution_log).get("auth_headers"))
 run_agent_task.delay(new_task.id, objective, target_url, auth_headers=headers or None)
+```
+
+#### Wrong
+
+```python
+source_input = redact_sensitive_text(source_input)
+# {"security": [{"Authorization": []}]} becomes invalid JSON.
+```
+
+#### Correct
+
+```python
+payload = redact_sensitive_data({"source_input": source_input})
+# JSON structure survives; only secret-bearing scalar values are redacted.
 ```
 
 ## Scenario: Agent-Analyzed UI Execution Context and Bounded Browser Tools
