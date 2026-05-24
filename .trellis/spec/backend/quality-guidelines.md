@@ -540,6 +540,21 @@ assert _after_ui_login({"login_instructions": "demo", "login_verified": False}) 
   ```python
   {"total": int, "executed": int, "skipped": int, "passed": int, "failed": int}
   ```
+- Runtime execution budget:
+  ```text
+  API_MAX_EXECUTED_REQUESTS=120
+  ```
+- Additional runner result fields may include:
+  ```python
+  {
+      "http_executed": int,
+      "execution_budget": int | None,
+      "budget_exhausted": bool,
+      "environment_skipped": int,
+      "budget_skipped": int,
+      "advisory": int,
+  }
+  ```
 
 ### 3. Contracts
 
@@ -551,6 +566,10 @@ assert _after_ui_login({"login_instructions": "demo", "login_verified": False}) 
 - If a Swagger document is served through a public proxy prefix, the loader may rewrite documented paths such as `/dev-api/*` to the reachable public prefix such as `/api/*`; the rewrite must be surfaced in preflight and run detail state.
 - Status matching must consider both HTTP status and common JSON envelope status fields such as `code` or `status`.
 - API result entries may include `envelope_status_code`, `failure_type`, and `failure_reason` so reporter output can distinguish backend validation/contract failures from generic runner assertions.
+- `API_MAX_EXECUTED_REQUESTS` bounds real outbound HTTP attempts for an API run. Policy/dependency/environment skips do not consume this budget. When the budget is reached, every remaining generated request must be recorded as `skipped=True` with `skip_type="execution_budget_exhausted"`; do not silently drop pending requests.
+- If a write method (`POST`, `PUT`, `PATCH`, `DELETE`) returns HTTP 405, treat it as `skip_type="environment_not_executable"` instead of a product failure. Record the 405 evidence, then skip later requests for the same origin + method without sending more traffic.
+- AUTH negative probes that expect `401/403` still pass when HTTP status or JSON envelope status is unauthorized. If such a probe returns HTTP 2xx instead, record an advisory finding (`advisory=True`, `skip_type="auth_advisory"`) and exclude it from the main pass-rate failure count.
+- API response bodies persisted in `api_execution_result` or `execution_result` must be safe for JSON storage. Non-JSON and non-text content types are stored as a summary (`content_type`, byte count, preview note), and text values must strip NUL/control characters before persistence.
 
 ### 4. Validation & Error Matrix
 
@@ -560,12 +579,20 @@ assert _after_ui_login({"login_instructions": "demo", "login_verified": False}) 
 - Swagger path prefix differs from reachable public prefix -> apply and record `api_path_prefix_rewrite`; do not send requests to the internal-only prefix.
 - JSON envelope returns `{"code": 401}` with HTTP 200 -> treat as unauthorized for matching and reporting.
 - Invalid-input negative case returns HTTP 200 with body `{"code": 500}` -> keep the API case failed and classify it as `backend_validation_contract`, not generic `api_assertion`.
+- Large OpenAPI schema with more executable requests than `API_MAX_EXECUTED_REQUESTS` -> execute up to the budget and record all remaining requests as budget skips, with `complete=true` and no pending silent omissions.
+- Write request returns HTTP 405 from nginx or an upstream method gate -> mark that request environment-not-executable, then skip same-origin same-method write requests without counting them as failures.
+- AUTH negative probe returns HTTP 200 with no unauthorized envelope -> record an advisory/security warning and keep main `failed` count unchanged.
+- Binary export response such as `application/octet-stream` -> persist only a safe summary; no `\u0000` or raw control characters may appear in serialized execution logs.
 
 ### 5. Good/Base/Bad Cases
 
 - Good: real-environment API run reports `executed=44`, `skipped=93`, `failed=0` when all executable read checks pass and write checks are intentionally skipped.
 - Base: no credentials are provided; the report explains skipped auth-positive checks and recommends adding token/header or configuring login.
+- Base: a real environment blocks writes at the gateway with 405; the report explains the environment limitation and does not turn hundreds of write probes into business failures.
+- Base: an auth negative probe returns 200; the report keeps a warning/advisory finding without lowering the main pass rate.
 - Bad: skipped write requests or auth-positive checks are counted as failed, producing a false `BUG_FOUND` run.
+- Bad: a large OpenAPI document keeps sending every generated request until the Celery hard time limit kills the worker.
+- Bad: binary export bytes or NUL/control characters are persisted directly into `Task.execution_log`, breaking JSONB casts or UI history parsing.
 
 ### 6. Tests Required
 
@@ -574,6 +601,10 @@ assert _after_ui_login({"login_instructions": "demo", "login_verified": False}) 
 - Regression: API runner skips mutation methods under safe policies and does not count skips as failures.
 - Regression: reporter summaries include executed/skipped counts and keep skipped requests out of failed totals.
 - Regression: reporter turns `backend_validation_contract` API result failures into backend validation contract findings.
+- Regression: execution budget skips all remaining requests after `API_MAX_EXECUTED_REQUESTS` real HTTP requests and records `budget_exhausted=true`.
+- Regression: same-origin same-method write requests are skipped after a 405 environment method block and do not lower pass rate.
+- Regression: AUTH negative 200 responses are advisory/skipped while AUTH negative 401/403 responses still pass.
+- Regression: binary/control-character responses are persisted as safe summaries or sanitized text in both `api_execution_result` and `execution_result`.
 - Preflight: response exposes executable/skipped/auth-required counts and policy warnings.
 
 ### 7. Wrong vs Correct
@@ -589,6 +620,25 @@ failed = [item for item in results if not item["passed"]]
 ```python
 failed = [item for item in results if not item.get("skipped") and not item.get("passed")]
 skipped = [item for item in results if item.get("skipped")]
+```
+
+#### Wrong
+
+```python
+for request in generated_requests:
+    response = await client.request(...)
+    results.append({"passed": response.status_code < 400})
+```
+
+#### Correct
+
+```python
+if http_executed_count >= max_executed_requests:
+    results.extend(make_budget_skip(request) for request in remaining_requests)
+elif write_method_blocked(origin, method):
+    results.append(make_environment_skip(request))
+else:
+    response = await client.request(...)
 ```
 
 ## Scenario: Run Detail Triage Summary

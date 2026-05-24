@@ -32,6 +32,12 @@ _HEADER_CONTAINER_KEYS = {
     "auth_headers",
     "custom_headers",
 }
+_SAFE_SENSITIVE_METADATA_KEYS = {
+    "auth_required",
+    "auth_refreshed",
+    "auth_resolved",
+    "authentication_required",
+}
 _SENSITIVE_TEXT_KEY = (
     r"(?:password|passwd|access[_-]?token|refresh[_-]?token|id[_-]?token|"
     r"token|secret|api[_-]?key|authorization|authentication|auth|cookie|credential|"
@@ -75,6 +81,7 @@ _PLAYWRIGHT_UNQUOTED_SELECTOR_QUOTED_VALUE_RE = re.compile(
 _PLAYWRIGHT_UNQUOTED_VALUE_RE = re.compile(
     r"(?i)\b(fill|type)\s+([^\s\"']+)\s+([^\s\"'\[,;)}\]]+)"
 )
+_UNSAFE_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def _compact_header_name(name: str) -> str:
@@ -120,7 +127,12 @@ def redact_sensitive_headers(headers: Any) -> Any:
     }
 
 
+def sanitize_persisted_text(text: str) -> str:
+    return _UNSAFE_CONTROL_CHARS_RE.sub("", text)
+
+
 def redact_sensitive_text(text: str) -> str:
+    text = sanitize_persisted_text(text)
     redacted = _AUTH_SCHEME_RE.sub(lambda match: f"{match.group(1)} {REDACTED_VALUE}", text)
     redacted = _QUOTED_SECRET_RE.sub(
         lambda match: f"{match.group(1)}{match.group(2)}{REDACTED_VALUE}{match.group(2)}",
@@ -159,6 +171,8 @@ def redact_sensitive_data(value: Any) -> Any:
             key_text = str(key)
             if key_text.lower() in _HEADER_CONTAINER_KEYS:
                 redacted[key] = redact_sensitive_headers(child)
+            elif key_text.lower() in _SAFE_SENSITIVE_METADATA_KEYS:
+                redacted[key] = redact_sensitive_data(child)
             elif is_sensitive_header(key_text):
                 redacted[key] = REDACTED_VALUE
             else:

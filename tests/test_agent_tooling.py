@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -753,6 +754,333 @@ async def test_api_runner_classifies_validation_envelope_500_as_backend_contract
     assert failed_validation
     assert {item.get("failure_type") for item in failed_validation} == {"backend_validation_contract"}
     assert all(item.get("envelope_status_code") == 500 for item in failed_validation)
+
+
+@pytest.mark.asyncio
+async def test_api_runner_skips_same_method_writes_after_environment_405(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 405
+        text = "<html><body>405 Not Allowed<hr><center>nginx</center></body></html>"
+        headers = {"content-type": "text/html"}
+        content = text.encode()
+
+        def json(self) -> dict:
+            raise ValueError("not json")
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "http://api.example.test",
+            "api_execution_policy": "write_allowed",
+            "parsed_api_schema": [
+                {
+                    "method": "POST",
+                    "path": "/items",
+                    "request_body_content_type": "application/json",
+                    "request_body_schema": {
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {"name": {"type": "string"}},
+                    },
+                    "response_status": "200",
+                },
+                {
+                    "method": "POST",
+                    "path": "/areas",
+                    "request_body_content_type": "application/json",
+                    "request_body_schema": {
+                        "type": "object",
+                        "required": ["areaName"],
+                        "properties": {"areaName": {"type": "string"}},
+                    },
+                    "response_status": "200",
+                },
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+
+    assert len(calls) == 1
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["url"] == "http://api.example.test/items"
+    assert api_result["total"] > 1
+    assert api_result["http_executed"] == 1
+    assert api_result["executed"] == 0
+    assert api_result["failed"] == 0
+    assert api_result["skipped"] == api_result["total"]
+    assert api_result["environment_skipped"] == api_result["total"]
+    assert api_result["results"][0]["status_code"] == 405
+    assert api_result["results"][0]["skip_type"] == "environment_not_executable"
+    assert all(item.get("skipped") for item in api_result["results"])
+
+
+@pytest.mark.asyncio
+async def test_api_runner_respects_http_execution_budget_and_skips_remainder(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"ok": true}'
+        headers = {"content-type": "application/json"}
+        content = text.encode()
+
+        def json(self) -> dict:
+            return {"ok": True}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 2)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "http://api.example.test",
+            "parsed_api_schema": [
+                {"method": "GET", "path": f"/items/{index}", "response_status": "200"}
+                for index in range(5)
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+
+    assert len(calls) == 2
+    assert api_result["total"] == 5
+    assert api_result["http_executed"] == 2
+    assert api_result["executed"] == 2
+    assert api_result["passed"] == 2
+    assert api_result["failed"] == 0
+    assert api_result["skipped"] == 3
+    assert api_result["budget_skipped"] == 3
+    assert api_result["budget_exhausted"] is True
+    assert api_result["complete"] is True
+    assert all(item.get("skip_type") == "execution_budget_exhausted" for item in api_result["results"][2:])
+
+
+@pytest.mark.asyncio
+async def test_api_runner_auth_negative_200_is_advisory_not_main_failure(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"ok": true}'
+        headers = {"content-type": "application/json"}
+        content = text.encode()
+
+        def json(self) -> dict:
+            return {"ok": True}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "http://api.example.test",
+            "auth_headers": {"Authorization": "Bearer real-token"},
+            "parsed_api_schema": [
+                {
+                    "method": "GET",
+                    "path": "/private",
+                    "auth_required": True,
+                    "response_status": "200",
+                }
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+    auth_result = next(item for item in api_result["results"] if item["category"] == "AUTH")
+    report_state = await reporter.run(result)
+
+    assert len(calls) == 2
+    assert api_result["passed"] == 1
+    assert api_result["failed"] == 0
+    assert api_result["skipped"] == 1
+    assert api_result["advisory"] == 1
+    assert auth_result["advisory_type"] == "auth_negative_unexpected_success"
+    assert auth_result["passed"] is None
+    assert report_state["final_report"]["overall_verdict"] == "PASS"
+    assert report_state["final_report"]["advisory_findings"]
+
+
+@pytest.mark.asyncio
+async def test_api_runner_auth_negative_401_still_passes(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        text = "{}"
+        headers = {"content-type": "application/json"}
+        content = text.encode()
+
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+
+        def json(self) -> dict:
+            return {}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            if (kwargs.get("headers") or {}).get("Authorization"):
+                return FakeResponse(200)
+            return FakeResponse(401)
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "http://api.example.test",
+            "auth_headers": {"Authorization": "Bearer real-token"},
+            "parsed_api_schema": [
+                {
+                    "method": "GET",
+                    "path": "/private",
+                    "auth_required": True,
+                    "response_status": "200",
+                }
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+
+    assert len(calls) == 2
+    assert api_result["passed"] == 2
+    assert api_result["failed"] == 0
+    assert api_result["skipped"] == 0
+    assert api_result["advisory"] == 0
+
+
+@pytest.mark.asyncio
+async def test_api_runner_persists_safe_binary_and_control_character_response_summaries(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, content_type: str, text: str, content: bytes) -> None:
+            self.headers = {"content-type": content_type}
+            self.text = text
+            self.content = content
+
+        def json(self) -> dict:
+            raise ValueError("not json")
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            if url.endswith("/export"):
+                return FakeResponse("application/octet-stream", "\x00raw-binary", b"\x00\x01abc")
+            return FakeResponse("text/plain", "\x00hello\x07", b"\x00hello\x07")
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "http://api.example.test",
+            "api_cases": [
+                {"title": "export", "request_template": {"method": "GET", "path": "/export"}},
+                {"title": "text preview", "request_template": {"method": "GET", "path": "/text"}},
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+    dumped = json.dumps(
+        {
+            "api_execution_result": api_result,
+            "execution_result": result["execution_result"],
+        },
+        ensure_ascii=False,
+        default=str,
+    )
+
+    assert len(calls) == 2
+    assert api_result["failed"] == 0
+    assert api_result["results"][0]["body"] == {
+        "content_type": "application/octet-stream",
+        "byte_count": 5,
+        "preview": api_runner.BINARY_RESPONSE_PREVIEW,
+    }
+    assert api_result["results"][1]["body"] == "hello"
+    assert "\x00" not in dumped
+    assert "\\u0000" not in dumped
+    assert "\x07" not in dumped
 
 
 @pytest.mark.asyncio

@@ -108,6 +108,41 @@ def _collect_failure_details(state: AgentState) -> list[dict]:
     return failures
 
 
+def _collect_api_advisories(state: AgentState) -> list[dict]:
+    api_result = state.get("api_execution_result") or {}
+    advisories = []
+    for result in api_result.get("results", []):
+        if not result.get("advisory"):
+            continue
+        advisories.append(
+            {
+                "source": "api",
+                "title": "API authentication policy advisory",
+                "severity": "WARNING",
+                "method": result.get("method", ""),
+                "url": result.get("url", ""),
+                "status_code": result.get("status_code"),
+                "category": result.get("category", ""),
+                "advisory_type": result.get("advisory_type", "api_advisory"),
+                "description": result.get("warning") or result.get("skip_reason") or "API advisory finding.",
+            }
+        )
+    return advisories
+
+
+def _api_skip_note_counts(state: AgentState) -> dict[str, int]:
+    api_result = state.get("api_execution_result") or {}
+    results = api_result.get("results") or []
+    return {
+        "environment_not_executable": sum(
+            1 for result in results if result.get("skip_type") == "environment_not_executable"
+        ),
+        "execution_budget_exhausted": sum(
+            1 for result in results if result.get("skip_type") == "execution_budget_exhausted"
+        ),
+    }
+
+
 def _ui_command_action_text(command: dict | None) -> str:
     if not command:
         return "执行步骤"
@@ -276,6 +311,11 @@ def _build_recommendations(
         recommendations.append("部分参数校验负向用例返回了成功 HTTP 状态或 5xx 业务错误，建议后端统一返回明确的 4xx 校验失败契约。")
     if any(f.get("status_code", 0) >= 500 for f in failure_details):
         recommendations.append("部分接口返回服务端错误，需要排查后端异常或测试数据状态。")
+    skip_note_counts = _api_skip_note_counts(state)
+    if skip_note_counts["environment_not_executable"]:
+        recommendations.append("部分写入方法被当前环境或上游网关拒绝，建议确认测试环境是否开放 POST/PUT/PATCH/DELETE 后再执行写入覆盖。")
+    if skip_note_counts["execution_budget_exhausted"]:
+        recommendations.append("本次 API 文档规模超过执行预算，建议缩小接口范围或调整 API_MAX_EXECUTED_REQUESTS 后分批执行。")
     if any(
         "not found" in str(command.get("stderr", "")).lower()
         for failure in failure_details
@@ -343,6 +383,7 @@ async def run(state: AgentState) -> AgentState:
     state["tool_summary"] = tool_summary
 
     failure_details = _collect_failure_details(state)
+    advisory_findings = _collect_api_advisories(state)
     api_counts = _summary_counts(api_result)
     ui_counts = _summary_counts(ui_result)
     total_executed = api_counts["executed"] + ui_counts["executed"]
@@ -392,6 +433,19 @@ async def run(state: AgentState) -> AgentState:
         execution_notes.append(
             f"执行前自动修正了 {len(normalization_warnings)} 条生成的 UI 命令，避免脚本语法问题影响结果。"
         )
+    skip_note_counts = _api_skip_note_counts(state)
+    if skip_note_counts["environment_not_executable"]:
+        execution_notes.append(
+            f"当前环境或上游网关拒绝了 {skip_note_counts['environment_not_executable']} 个写入方法请求，这些请求已标记为环境不可执行并从主通过率中排除。"
+        )
+    if skip_note_counts["execution_budget_exhausted"]:
+        execution_notes.append(
+            f"达到 API 请求执行预算后跳过了 {skip_note_counts['execution_budget_exhausted']} 个剩余请求，避免长时间运行触发 Worker 超时。"
+        )
+    if advisory_findings:
+        execution_notes.append(
+            f"记录了 {len(advisory_findings)} 个 API 鉴权策略提醒，未计入主通过率失败。"
+        )
 
     summary = _build_summary(api_counts, ui_counts, verdict, login_failed, login_reason, failure_details)
 
@@ -411,6 +465,7 @@ async def run(state: AgentState) -> AgentState:
             "key_findings": ui_findings,
         },
         "bugs_found": _build_bug_findings(failure_details),
+        "advisory_findings": advisory_findings,
         "recommendations": _build_recommendations(
             state, failure_details, api_counts, ui_counts
         ),

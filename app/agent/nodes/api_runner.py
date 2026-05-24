@@ -3,7 +3,7 @@ import logging
 import re
 import time
 from copy import deepcopy
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from openapi_schema_validator import validate
@@ -12,7 +12,7 @@ from app.agent.progress import persist_progress
 from app.agent.state import AgentState
 from app.agent.tool_registry import install_tool_context, record_tool_call, summarize_tool_calls
 from app.config import settings
-from app.core.redaction import redact_sensitive_data, redact_sensitive_headers
+from app.core.redaction import redact_sensitive_data, redact_sensitive_headers, sanitize_persisted_text
 from app.services.api_auth import coerce_auth_config, has_auth_like_header, resolve_auto_auth_headers
 from app.tools.mock_data import generate_mock_json_body, summarize_mock_body
 
@@ -26,6 +26,95 @@ API_EXECUTION_POLICIES = {
     "safe_with_auth",
     "write_allowed",
 }
+BINARY_RESPONSE_PREVIEW = "Binary or non-text response omitted from execution log"
+
+
+def _max_executed_requests() -> int | None:
+    try:
+        value = int(getattr(settings, "API_MAX_EXECUTED_REQUESTS", 120) or 0)
+    except (TypeError, ValueError):
+        value = 120
+    return value if value > 0 else None
+
+
+def _response_content_type(response) -> str:
+    headers = getattr(response, "headers", {}) or {}
+    try:
+        return str(headers.get("content-type") or headers.get("Content-Type") or "")
+    except AttributeError:
+        return ""
+
+
+def _is_text_content_type(content_type: str | None) -> bool:
+    media_type = (content_type or "").split(";", 1)[0].strip().lower()
+    if not media_type:
+        return True
+    return (
+        media_type.startswith("text/")
+        or "json" in media_type
+        or media_type.endswith("+xml")
+        or media_type
+        in {
+            "application/xml",
+            "application/javascript",
+            "application/x-www-form-urlencoded",
+            "application/yaml",
+            "application/x-yaml",
+        }
+    )
+
+
+def _response_byte_count(response, fallback_text: str = "") -> int:
+    content = getattr(response, "content", None)
+    if isinstance(content, bytes):
+        return len(content)
+    return len(fallback_text.encode("utf-8", errors="replace"))
+
+
+def _safe_text_preview(text: str, limit: int = 500) -> str:
+    return sanitize_persisted_text(text)[:limit]
+
+
+def _response_payload(response):
+    content_type = _response_content_type(response)
+    if _is_json_content_type(content_type):
+        try:
+            return response.json()
+        except Exception:
+            pass
+
+    text = str(getattr(response, "text", "") or "")
+    if _is_text_content_type(content_type):
+        return _safe_text_preview(text)
+
+    return {
+        "content_type": content_type or "application/octet-stream",
+        "byte_count": _response_byte_count(response, text),
+        "preview": BINARY_RESPONSE_PREVIEW,
+    }
+
+
+def _stored_response_body(payload):
+    safe_payload = redact_sensitive_data(payload)
+    if isinstance(safe_payload, (dict, list)):
+        return safe_payload
+    return _safe_text_preview(str(safe_payload))
+
+
+def _origin_for_url(url: str) -> str:
+    parsed = urlsplit(str(url or ""))
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+    return ""
+
+
+def _environment_block_scope(req: dict) -> tuple[str, str]:
+    return (_origin_for_url(str(req.get("url") or "")), str(req.get("method") or "GET").upper())
+
+
+def _environment_block_reason(method: str, origin: str) -> str:
+    target = f"{origin} " if origin else ""
+    return f"当前测试环境或上游网关不允许 {target}{method} 请求，后续同类写入请求已跳过。"
 
 
 def _parse_status(val) -> int:
@@ -72,6 +161,72 @@ def _make_skipped_result(req: dict, reason: str) -> dict:
         "category": req.get("category", "SKIPPED"),
         "assertion_results": [],
     }
+
+
+def _make_budget_skipped_result(req: dict, max_requests: int) -> dict:
+    result = _make_skipped_result(
+        req,
+        f"已达到本次 API 执行预算上限 {max_requests} 个真实 HTTP 请求，剩余请求未继续发送",
+    )
+    result["skip_type"] = "execution_budget_exhausted"
+    return result
+
+
+def _make_environment_skipped_result(
+    req: dict,
+    reason: str,
+    *,
+    status_code: int | None = None,
+    elapsed_ms: float = 0,
+    body=None,
+) -> dict:
+    result = _make_skipped_result(req, reason)
+    result.update(
+        {
+            "status_code": status_code,
+            "elapsed_ms": elapsed_ms,
+            "body": body,
+            "skip_type": "environment_not_executable",
+            "failure_type": "environment_not_executable",
+            "environment_scope": {
+                "origin": _environment_block_scope(req)[0],
+                "method": _environment_block_scope(req)[1],
+            },
+        }
+    )
+    if status_code is not None:
+        result["http_executed"] = True
+    return result
+
+
+def _expected_status_values(expected_status) -> set[int]:
+    if isinstance(expected_status, list):
+        return {_parse_status(value) for value in expected_status}
+    return {_parse_status(expected_status)}
+
+
+def _is_auth_negative_probe(req: dict) -> bool:
+    if str(req.get("category") or "").upper() != "AUTH":
+        return False
+    return bool(_expected_status_values(req.get("expected_status", 200)) & {401, 403})
+
+
+def _auth_negative_success_advisory(req: dict, resp_status: int, payload) -> str | None:
+    if not _is_auth_negative_probe(req):
+        return None
+    if _is_auth_failure(resp_status, payload):
+        return None
+    if 200 <= resp_status < 300:
+        return "鉴权负向探测移除鉴权后仍返回成功状态，已作为安全策略提醒记录，不计入主通过率失败。"
+    return None
+
+
+def _mark_assertions_advisory(assertion_results: list[dict], reason: str) -> None:
+    for assertion_result in assertion_results:
+        assertion_result["passed"] = None
+        assertion_result["skipped"] = True
+        assertion_result["advisory"] = True
+        assertion_result["reason"] = reason
 
 
 def _resolve_path_params(url: str, endpoint: dict) -> str:
@@ -818,9 +973,15 @@ def _update_api_execution_state(
     results: list[dict],
     total_requests: int,
     complete: bool,
+    *,
+    http_executed_count: int | None = None,
+    execution_budget: int | None = None,
 ) -> None:
     safe_results = redact_sensitive_data(results)
     skipped_count = sum(1 for r in results if r.get("skipped"))
+    advisory_count = sum(1 for r in results if r.get("advisory"))
+    environment_skipped_count = sum(1 for r in results if r.get("skip_type") == "environment_not_executable")
+    budget_skipped_count = sum(1 for r in results if r.get("skip_type") == "execution_budget_exhausted")
     executed_count = len(results) - skipped_count
     passed_count = sum(1 for r in results if r.get("passed") is True)
     completed = len(results)
@@ -840,9 +1001,15 @@ def _update_api_execution_state(
         "passed": passed_count,
         "failed": failed_count,
         "skipped": skipped_count,
+        "advisory": advisory_count,
+        "environment_skipped": environment_skipped_count,
+        "budget_skipped": budget_skipped_count,
         "pending": pending_count,
+        "http_executed": http_executed_count if http_executed_count is not None else sum(1 for r in results if r.get("http_executed")),
+        "execution_budget": execution_budget,
+        "budget_exhausted": budget_skipped_count > 0,
         "pass_rate": f"{round(passed_count / executed_count * 100, 1)}%" if executed_count else "0%",
-        "results": results,
+        "results": safe_results,
         "all_passed": all_passed,
         "complete": complete,
     }
@@ -869,6 +1036,9 @@ async def run(state: AgentState) -> AgentState:
     write_allowed = _policy_allows_write(execution_policy)
     retry_count = max(0, int(getattr(settings, "API_REQUEST_RETRY_COUNT", 0) or 0))
     timeout_seconds = float(getattr(settings, "API_REQUEST_TIMEOUT_SECONDS", 30.0) or 30.0)
+    execution_budget = _max_executed_requests()
+    http_executed_count = 0
+    environment_blocked_scopes: set[tuple[str, str]] = set()
     dependency_context: dict[str, object] = {}
 
     results = []
@@ -972,9 +1142,17 @@ async def run(state: AgentState) -> AgentState:
         "api_timeout_seconds": timeout_seconds,
         "api_retry_count": retry_count,
         "api_execution_policy": execution_policy,
+        "api_max_executed_requests": execution_budget,
     }
     state["artifacts"] = artifacts
-    _update_api_execution_state(state, results, total_requests, complete=False)
+    _update_api_execution_state(
+        state,
+        results,
+        total_requests,
+        complete=False,
+        http_executed_count=http_executed_count,
+        execution_budget=execution_budget,
+    )
     await persist_progress(
         state,
         "api_runner",
@@ -984,7 +1162,7 @@ async def run(state: AgentState) -> AgentState:
 
     # Execute all test requests
     async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True) as client:
-        for req in test_requests:
+        for index, req in enumerate(test_requests):
             if req.get("skip_reason"):
                 record_tool_call(
                     state,
@@ -999,7 +1177,14 @@ async def run(state: AgentState) -> AgentState:
                     output_summary={"reason": req.get("skip_reason")},
                 )
                 results.append(_make_skipped_result(req, str(req.get("skip_reason"))))
-                _update_api_execution_state(state, results, total_requests, complete=False)
+                _update_api_execution_state(
+                    state,
+                    results,
+                    total_requests,
+                    complete=False,
+                    http_executed_count=http_executed_count,
+                    execution_budget=execution_budget,
+                )
                 await persist_progress(
                     state,
                     "api_runner",
@@ -1026,7 +1211,14 @@ async def run(state: AgentState) -> AgentState:
                     output_summary={"reason": reason},
                 )
                 results.append(_make_skipped_result(req, reason))
-                _update_api_execution_state(state, results, total_requests, complete=False)
+                _update_api_execution_state(
+                    state,
+                    results,
+                    total_requests,
+                    complete=False,
+                    http_executed_count=http_executed_count,
+                    execution_budget=execution_budget,
+                )
                 await persist_progress(
                     state,
                     "api_runner",
@@ -1060,23 +1252,127 @@ async def run(state: AgentState) -> AgentState:
             ):
                 req = deepcopy(req)
                 req["headers"] = {**(req.get("headers") or {}), **latest_auth_headers}
+            environment_scope = _environment_block_scope(req)
+            if environment_scope in environment_blocked_scopes:
+                reason = _environment_block_reason(environment_scope[1], environment_scope[0])
+                record_tool_call(
+                    state,
+                    tool_name="api.environment_method_gate",
+                    layer="api",
+                    status="skipped",
+                    input_summary={
+                        "method": req.get("method"),
+                        "url": req.get("url"),
+                        "scope": f"{environment_scope[0]} {environment_scope[1]}".strip(),
+                    },
+                    output_summary={"reason": reason},
+                )
+                results.append(_make_environment_skipped_result(req, reason))
+                _update_api_execution_state(
+                    state,
+                    results,
+                    total_requests,
+                    complete=False,
+                    http_executed_count=http_executed_count,
+                    execution_budget=execution_budget,
+                )
+                await persist_progress(
+                    state,
+                    "api_runner",
+                    "running",
+                    f"Skipped {len(results)}/{total_requests}: {req.get('label', req.get('url', 'request'))}",
+                )
+                continue
+            if execution_budget is not None and http_executed_count >= execution_budget:
+                remaining = test_requests[index:]
+                for pending_req in remaining:
+                    results.append(_make_budget_skipped_result(pending_req, execution_budget))
+                record_tool_call(
+                    state,
+                    tool_name="api.execution_budget",
+                    layer="api",
+                    status="skipped",
+                    input_summary={
+                        "max_executed_requests": execution_budget,
+                        "http_executed": http_executed_count,
+                    },
+                    output_summary={"skipped_remaining": len(remaining)},
+                )
+                _update_api_execution_state(
+                    state,
+                    results,
+                    total_requests,
+                    complete=False,
+                    http_executed_count=http_executed_count,
+                    execution_budget=execution_budget,
+                )
+                await persist_progress(
+                    state,
+                    "api_runner",
+                    "running",
+                    f"Skipped remaining {len(remaining)} API request(s) after execution budget was reached",
+                )
+                break
             _record_mock_body_generation(state, req)
             try:
                 start = time.perf_counter()
                 resp, attempts, request_error = await _request_with_retry(client, req, retry_count)
                 elapsed = round((time.perf_counter() - start) * 1000, 2)
+                http_executed_count += attempts
                 if request_error is not None or resp is None:
                     raise request_error or RuntimeError("HTTP request failed")
                 _record_http_request_call(state, req, resp.status_code, attempts, elapsed)
 
-                try:
-                    payload = resp.json()
-                except Exception:
-                    payload = resp.text[:500]
+                payload = _response_payload(resp)
+                stored_body = _stored_response_body(payload)
+
+                if str(req.get("method") or "").upper() in WRITE_API_METHODS and resp.status_code == 405:
+                    environment_blocked_scopes.add(environment_scope)
+                    reason = _environment_block_reason(environment_scope[1], environment_scope[0])
+                    record_tool_call(
+                        state,
+                        tool_name="api.environment_method_gate",
+                        layer="api",
+                        status="skipped",
+                        input_summary={
+                            "method": req.get("method"),
+                            "url": req.get("url"),
+                            "status_code": resp.status_code,
+                        },
+                        output_summary={"reason": reason},
+                        elapsed_ms=elapsed,
+                    )
+                    results.append(
+                        _make_environment_skipped_result(
+                            req,
+                            reason,
+                            status_code=resp.status_code,
+                            elapsed_ms=elapsed,
+                            body=stored_body,
+                        )
+                    )
+                    _update_api_execution_state(
+                        state,
+                        results,
+                        total_requests,
+                        complete=False,
+                        http_executed_count=http_executed_count,
+                        execution_budget=execution_budget,
+                    )
+                    await persist_progress(
+                        state,
+                        "api_runner",
+                        "running",
+                        f"Skipped {len(results)}/{total_requests}: {req.get('label', req.get('url', 'request'))}",
+                    )
+                    continue
 
                 auth_refreshed = False
                 if _is_auth_failure(resp.status_code, payload) and _can_refresh_auth(state, req):
-                    refreshed_headers = await _refresh_auth_for_request(state, req, api_schema or None)
+                    if execution_budget is not None and http_executed_count >= execution_budget:
+                        refreshed_headers = None
+                    else:
+                        refreshed_headers = await _refresh_auth_for_request(state, req, api_schema or None)
                     if refreshed_headers:
                         req = deepcopy(req)
                         req["headers"] = {**(req.get("headers") or {}), **refreshed_headers}
@@ -1084,6 +1380,7 @@ async def run(state: AgentState) -> AgentState:
                         start = time.perf_counter()
                         resp, attempts, request_error = await _request_with_retry(client, req, retry_count)
                         elapsed = round((time.perf_counter() - start) * 1000, 2)
+                        http_executed_count += attempts
                         if request_error is not None or resp is None:
                             raise request_error or RuntimeError("HTTP request failed after auth refresh")
                         _record_http_request_call(
@@ -1094,10 +1391,8 @@ async def run(state: AgentState) -> AgentState:
                             elapsed,
                             auth_refresh_retry=True,
                         )
-                        try:
-                            payload = resp.json()
-                        except Exception:
-                            payload = resp.text[:500]
+                        payload = _response_payload(resp)
+                        stored_body = _stored_response_body(payload)
 
                 expected_status = req.get("expected_status", 200)
                 category = req.get("category", "SMOKE")
@@ -1109,17 +1404,23 @@ async def run(state: AgentState) -> AgentState:
                     passed = _status_matches(expected_status, resp.status_code, payload)
 
                 assertion_results = _evaluate_assertions(req, resp.status_code, payload)
+                auth_advisory_reason = _auth_negative_success_advisory(req, resp.status_code, payload)
+                if auth_advisory_reason:
+                    _mark_assertions_advisory(assertion_results, auth_advisory_reason)
                 for assertion_result in assertion_results:
                     assertion_tool = {
                         "status_code": "api.status_assert",
                         "json_path": "api.json_path_assert",
                         "schema": "api.schema_assert",
                     }.get(assertion_result.get("type"), "api.json_path_assert")
+                    assertion_status = "success" if assertion_result.get("passed") in {True, None} else "failed"
+                    if assertion_result.get("skipped"):
+                        assertion_status = "skipped"
                     record_tool_call(
                         state,
                         tool_name=assertion_tool,
                         layer="api",
-                        status="success" if assertion_result.get("passed") in {True, None} else "failed",
+                        status=assertion_status,
                         input_summary={
                             "label": req.get("label"),
                             "type": assertion_result.get("type"),
@@ -1133,13 +1434,17 @@ async def run(state: AgentState) -> AgentState:
                         },
                     )
 
-                passed = _assertions_pass(assertion_results, passed)
-                failure_classification = None if passed else _classify_api_failure(
-                    req,
-                    resp.status_code,
-                    payload,
-                    assertion_results,
-                )
+                if auth_advisory_reason:
+                    passed = None
+                    failure_classification = None
+                else:
+                    passed = _assertions_pass(assertion_results, passed)
+                    failure_classification = None if passed else _classify_api_failure(
+                        req,
+                        resp.status_code,
+                        payload,
+                        assertion_results,
+                    )
 
                 extractions = []
                 for spec in _extract_specs(req.get("extract")):
@@ -1169,7 +1474,7 @@ async def run(state: AgentState) -> AgentState:
                     "status_code": resp.status_code,
                     "envelope_status_code": _payload_status_code(payload),
                     "elapsed_ms": elapsed,
-                    "body": payload if isinstance(payload, (dict, list)) else str(payload)[:500],
+                    "body": stored_body,
                     "request_headers": redact_sensitive_headers(req.get("headers", {})),
                     "request_body": redact_sensitive_data(req.get("body")),
                     "request_body_source": req.get("request_body_source"),
@@ -1178,7 +1483,19 @@ async def run(state: AgentState) -> AgentState:
                     "assertion_results": assertion_results,
                     "extractions": extractions,
                     "auth_refreshed": auth_refreshed,
+                    "http_executed": True,
                 }
+                if auth_advisory_reason:
+                    result_entry.update(
+                        {
+                            "skipped": True,
+                            "skip_type": "auth_advisory",
+                            "skip_reason": auth_advisory_reason,
+                            "advisory": True,
+                            "advisory_type": "auth_negative_unexpected_success",
+                            "warning": auth_advisory_reason,
+                        }
+                    )
                 if failure_classification:
                     result_entry.update(failure_classification)
                 results.append(result_entry)
@@ -1203,9 +1520,17 @@ async def run(state: AgentState) -> AgentState:
                     "request_body_source": req.get("request_body_source"),
                     "passed": False,
                     "category": req.get("category", "SMOKE"),
-                    "error": str(e),
+                    "error": sanitize_persisted_text(str(e)),
+                    "http_executed": True,
                 })
-            _update_api_execution_state(state, results, total_requests, complete=False)
+            _update_api_execution_state(
+                state,
+                results,
+                total_requests,
+                complete=False,
+                http_executed_count=http_executed_count,
+                execution_budget=execution_budget,
+            )
             await persist_progress(
                 state,
                 "api_runner",
@@ -1223,7 +1548,14 @@ async def run(state: AgentState) -> AgentState:
     failed_count = max(executed_count - passed_count, 0)
     all_passed = total > 0 and failed_count == 0
 
-    _update_api_execution_state(state, results, total, complete=True)
+    _update_api_execution_state(
+        state,
+        results,
+        total_requests,
+        complete=True,
+        http_executed_count=http_executed_count,
+        execution_budget=execution_budget,
+    )
     state["tool_summary"] = summarize_tool_calls(state.get("tool_calls"))
     artifacts = state.get("artifacts") or {}
     artifacts["tool_calls"] = state.get("tool_calls", [])
