@@ -883,7 +883,13 @@ watch(visibleTabs, (tabs) => {
   <div class="space-y-4 pb-10" v-else-if="run">
     <!-- Header -->
     <div class="flex items-center gap-4 border-b border-gray-200 pb-4">
-      <button @click="router.push('/history')" class="p-2 hover:bg-gray-100 rounded-lg text-gray-400 hover:text-gray-600 transition-all">
+      <button
+        type="button"
+        aria-label="返回运行历史"
+        title="返回运行历史"
+        @click="router.push('/history')"
+        class="p-2 hover:bg-gray-100 rounded-lg text-gray-400 hover:text-gray-600 transition-all"
+      >
         <ArrowLeft :size="20" />
       </button>
       <div class="flex-1 min-w-0">
@@ -2039,7 +2045,13 @@ watch(visibleTabs, (tabs) => {
   <Teleport to="body">
     <div v-if="lightboxUrl" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm" @click.self="closeLightbox">
       <div class="relative max-w-[90vw] max-h-[90vh]">
-        <button @click="closeLightbox" class="absolute -top-10 right-0 text-white hover:text-gray-300 transition-colors">
+        <button
+          type="button"
+          aria-label="关闭截图预览"
+          title="关闭截图预览"
+          @click="closeLightbox"
+          class="absolute -top-10 right-0 text-white hover:text-gray-300 transition-colors"
+        >
           <XCircle :size="28" />
         </button>
         <img :src="lightboxUrl" class="max-w-full max-h-[85vh] rounded-lg shadow-2xl object-contain" @error="(e: any) => { e.target.alt = '截图加载失败' }" />

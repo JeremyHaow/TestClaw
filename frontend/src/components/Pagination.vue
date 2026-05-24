@@ -27,7 +27,12 @@ const visiblePages = computed(() => {
   <div v-if="totalPages > 1" class="flex items-center justify-between px-2 py-3">
     <span class="text-xs text-gray-400">共 {{ total }} 条，第 {{ page }}/{{ totalPages }} 页</span>
     <div class="flex items-center gap-1">
-      <button @click="emit('update:page', page - 1)" :disabled="!canPrev"
+      <button
+        type="button"
+        aria-label="上一页"
+        title="上一页"
+        @click="emit('update:page', page - 1)"
+        :disabled="!canPrev"
         class="p-1.5 rounded-lg hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-all">
         <ChevronLeft :size="16" />
       </button>
@@ -36,7 +41,12 @@ const visiblePages = computed(() => {
         :class="p === page ? 'bg-blue-600 text-white' : 'hover:bg-gray-100 text-gray-600'">
         {{ p }}
       </button>
-      <button @click="emit('update:page', page + 1)" :disabled="!canNext"
+      <button
+        type="button"
+        aria-label="下一页"
+        title="下一页"
+        @click="emit('update:page', page + 1)"
+        :disabled="!canNext"
         class="p-1.5 rounded-lg hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-all">
         <ChevronRight :size="16" />
       </button>

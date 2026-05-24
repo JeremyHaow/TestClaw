@@ -148,6 +148,32 @@ async def test_embedding_service_redacts_text_before_provider() -> None:
     assert "[REDACTED]" in client.embedded_texts[0]
 
 
+@pytest.mark.asyncio
+async def test_embedding_service_uses_local_vector_fallback_when_provider_errors() -> None:
+    class FailingClient:
+        async def aembed_documents(self, _texts):
+            raise RuntimeError("404 page not found")
+
+        async def aembed_query(self, _text):
+            raise RuntimeError("404 page not found")
+
+    service = EmbeddingService()
+
+    document_vectors = await service.embed_documents_with_client(
+        FailingClient(),
+        ["Checkout regression with 500 error"],
+    )
+    query_vector = await service.embed_query_with_client(
+        FailingClient(),
+        "Checkout regression",
+    )
+
+    assert len(document_vectors) == 1
+    assert len(document_vectors[0]) == len(query_vector)
+    assert any(value != 0 for value in document_vectors[0])
+    assert any(value != 0 for value in query_vector)
+
+
 def test_llm_gateway_builds_openai_embeddings_client(monkeypatch) -> None:
     monkeypatch.setattr("app.core.llm_gateway.decrypt_value", lambda _value: "sk-test")
     provider = LLMProvider(

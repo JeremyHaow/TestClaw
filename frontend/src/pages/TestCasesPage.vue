@@ -53,6 +53,7 @@ const suiteRunning = ref(false)
 
 const allSelected = computed(() => items.value.length > 0 && items.value.every((item) => selectedIds.value.has(item.id)))
 const someSelected = computed(() => items.value.some((item) => selectedIds.value.has(item.id)) && !allSelected.value)
+const selectAllLabel = computed(() => allSelected.value ? '取消选择当前页全部用例' : '选择当前页全部用例')
 const suiteMap = computed<Record<string, string[]>>(() => {
   const mapped: Record<string, string[]> = {}
   for (const suite of suites.value) {
@@ -163,6 +164,10 @@ function toggleSelect(id: string) {
 
 function toggleSelectAll() {
   selectedIds.value = allSelected.value ? new Set() : new Set(items.value.map((item) => item.id))
+}
+
+function rowSelectLabel(item: any) {
+  return selectedIds.value.has(item.id) ? `取消选择用例：${item.title}` : `选择用例：${item.title}`
 }
 
 function arrayText(value: any): string {
@@ -381,7 +386,13 @@ onMounted(async () => {
             <thead>
               <tr class="border-b border-gray-100 bg-gray-50 text-gray-500">
                 <th class="w-10 px-4 py-3">
-                  <button @click="toggleSelectAll" class="text-gray-400 transition-colors hover:text-blue-600">
+                  <button
+                    type="button"
+                    :aria-label="selectAllLabel"
+                    :title="selectAllLabel"
+                    @click="toggleSelectAll"
+                    class="text-gray-400 transition-colors hover:text-blue-600"
+                  >
                     <CheckSquare v-if="allSelected" :size="16" />
                     <MinusSquare v-else-if="someSelected" :size="16" />
                     <Square v-else :size="16" />
@@ -397,7 +408,13 @@ onMounted(async () => {
             <tbody class="divide-y divide-gray-100">
               <tr v-for="item in items" :key="item.id" class="transition-colors hover:bg-gray-50" :class="{ 'bg-blue-50/40': selectedIds.has(item.id) }">
                 <td class="px-4 py-3">
-                  <button @click="toggleSelect(item.id)" class="text-gray-400 transition-colors hover:text-blue-600">
+                  <button
+                    type="button"
+                    :aria-label="rowSelectLabel(item)"
+                    :title="rowSelectLabel(item)"
+                    @click="toggleSelect(item.id)"
+                    class="text-gray-400 transition-colors hover:text-blue-600"
+                  >
                     <CheckSquare v-if="selectedIds.has(item.id)" :size="16" class="text-blue-600" />
                     <Square v-else :size="16" />
                   </button>
@@ -467,7 +484,13 @@ onMounted(async () => {
             <h3 class="truncate text-lg font-bold text-gray-900">{{ editingId === detailItem.id ? '编辑用例' : detailItem.title }}</h3>
             <p class="mt-1 text-xs text-gray-500">{{ sourceKind(detailItem) }} / {{ detailItem.category }} / {{ detailItem.priority }}</p>
           </div>
-          <button @click="detailItem = null; editingId = null" class="rounded-lg p-2 text-gray-400 transition-all hover:bg-gray-100 hover:text-gray-700">
+          <button
+            type="button"
+            aria-label="关闭用例详情"
+            title="关闭用例详情"
+            @click="detailItem = null; editingId = null"
+            class="rounded-lg p-2 text-gray-400 transition-all hover:bg-gray-100 hover:text-gray-700"
+          >
             <X :size="18" />
           </button>
         </div>
@@ -591,7 +614,15 @@ onMounted(async () => {
         <div class="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-lg bg-white shadow-2xl">
           <div class="sticky top-0 flex items-center justify-between border-b border-gray-100 bg-white px-6 py-4">
             <h3 class="text-lg font-bold text-gray-900">创建测试用例</h3>
-            <button @click="showCreate = false" class="p-1 text-gray-400 transition-colors hover:text-gray-600"><X :size="20" /></button>
+            <button
+              type="button"
+              aria-label="关闭创建用例弹窗"
+              title="关闭创建用例弹窗"
+              @click="showCreate = false"
+              class="p-1 text-gray-400 transition-colors hover:text-gray-600"
+            >
+              <X :size="20" />
+            </button>
           </div>
           <div class="space-y-4 p-6">
             <div>
@@ -627,7 +658,16 @@ onMounted(async () => {
                   <span class="w-5 font-mono text-xs text-gray-400">{{ index + 1 }}</span>
                   <input v-model="createForm.steps[index]" :placeholder="`步骤 ${index + 1}`"
                     class="flex-1 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm outline-none transition-all focus:border-blue-500 focus:bg-white" />
-                  <button v-if="createForm.steps.length > 1" @click="removeStep(index)" class="p-1 text-gray-400 transition-colors hover:text-red-500"><X :size="14" /></button>
+                  <button
+                    v-if="createForm.steps.length > 1"
+                    type="button"
+                    :aria-label="`删除步骤 ${index + 1}`"
+                    :title="`删除步骤 ${index + 1}`"
+                    @click="removeStep(index)"
+                    class="p-1 text-gray-400 transition-colors hover:text-red-500"
+                  >
+                    <X :size="14" />
+                  </button>
                 </div>
                 <button @click="addStep" class="text-xs font-bold text-blue-600 transition-colors hover:text-blue-800">+ 添加步骤</button>
               </div>
@@ -639,7 +679,16 @@ onMounted(async () => {
                   <span class="w-5 font-mono text-xs text-gray-400">{{ index + 1 }}</span>
                   <input v-model="createForm.expected[index]" :placeholder="`预期结果 ${index + 1}`"
                     class="flex-1 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm outline-none transition-all focus:border-blue-500 focus:bg-white" />
-                  <button v-if="createForm.expected.length > 1" @click="removeExpected(index)" class="p-1 text-gray-400 transition-colors hover:text-red-500"><X :size="14" /></button>
+                  <button
+                    v-if="createForm.expected.length > 1"
+                    type="button"
+                    :aria-label="`删除预期结果 ${index + 1}`"
+                    :title="`删除预期结果 ${index + 1}`"
+                    @click="removeExpected(index)"
+                    class="p-1 text-gray-400 transition-colors hover:text-red-500"
+                  >
+                    <X :size="14" />
+                  </button>
                 </div>
                 <button @click="addExpected" class="text-xs font-bold text-blue-600 transition-colors hover:text-blue-800">+ 添加预期结果</button>
               </div>

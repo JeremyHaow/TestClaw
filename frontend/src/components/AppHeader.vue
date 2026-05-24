@@ -13,7 +13,8 @@ const { isMobile, toggleMobile } = useSidebar()
 const sectionLabel = computed(() => {
   if (route.path.startsWith('/runs/')) return '运行监督'
   if (route.path === '/run') return '任务委派'
-  if (route.path === '/history' || route.path === '/quality-memory') return '质量记忆'
+  if (route.path === '/history') return '运行历史'
+  if (route.path === '/quality-memory') return '质量记忆'
   if (['/providers', '/documents', '/environments', '/test-cases', '/knowledge'].some((path) => route.path.startsWith(path))) return '资产与配置'
   return '工作区'
 })

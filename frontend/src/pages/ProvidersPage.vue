@@ -456,7 +456,13 @@ onMounted(fetchItems)
               {{ modelFormMode === 'edit' ? '留空 API Key 会保留当前密钥。' : '当前后端以一行模型配置保存 Provider 信息，因此新增时需要同时填写第一个模型。' }}
             </p>
           </div>
-          <button @click="closeModelForm" class="rounded-lg p-2 text-gray-400 transition-all hover:bg-gray-100 hover:text-gray-700">
+          <button
+            type="button"
+            aria-label="关闭 Provider 配置"
+            title="关闭 Provider 配置"
+            @click="closeModelForm"
+            class="rounded-lg p-2 text-gray-400 transition-all hover:bg-gray-100 hover:text-gray-700"
+          >
             <X :size="18" />
           </button>
         </div>

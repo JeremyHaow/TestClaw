@@ -46,6 +46,68 @@
 - UI may describe Multi-Agent only as role-based agent orchestration: Planner/Coder/Vision model defaults plus LangGraph nodes for planning, case generation, execution, reporting, and memory.
 - Do not imply autonomous peer-to-peer agent collaboration unless the backend implements that behavior.
 
+## Scenario: Vector RAG Embedding Fallback
+
+### 1. Scope / Trigger
+
+- Trigger: runtime RAG retrieval or knowledge CRUD needs embeddings, but the configured OpenAI-compatible provider is missing or its embeddings endpoint fails.
+- Applies to `app/services/embedding_service.py`, `app/services/knowledge_service.py`, and `app/agent/nodes/knowledge_retriever.py`.
+- Purpose: keep RAG as vector retrieval even when an external embedding provider returns errors such as `404 page not found`.
+
+### 2. Signatures
+
+- `EmbeddingService.get_client(db) -> Embeddings` must return an embeddings client. It may return a deterministic local fallback client.
+- `EmbeddingService.embed_query_with_client(client, text) -> list[float]` returns a non-empty vector or raises `EmbeddingUnavailableError` only when no text/vector can be produced.
+- `EmbeddingService.embed_documents_with_client(client, texts) -> list[list[float] | None]` preserves input order and returns one slot per input text.
+
+### 3. Contracts
+
+- External embeddings are preferred when available.
+- If provider discovery or provider calls fail, use deterministic local hash embeddings instead of downgrading runtime RAG to keyword search.
+- Knowledge create/update should store an embedding whenever either external or local embedding can produce one.
+- Runtime retriever should report `mode="vector"` when vectors were used, including local fallback vectors.
+- Logs may mention provider failure class/message, but must not include raw knowledge content or secrets.
+
+### 4. Validation & Error Matrix
+
+- No active embedding provider -> local vector fallback, not request failure.
+- Provider endpoint returns 4xx/5xx -> local vector fallback, not lexical-only fallback.
+- Empty query text -> `EmbeddingUnavailableError` and runtime may continue without RAG.
+- Provider returns wrong vector count -> `EmbeddingUnavailableError` unless fallback was already used.
+
+### 5. Good/Base/Bad Cases
+
+- Good: existing knowledge entries without embeddings are backfilled with local vectors during retrieval, then cosine similarity runs over those vectors.
+- Base: no similar knowledge is found; retriever returns `status="empty"`, `mode="vector"`, and a positive `vector_source_count`.
+- Bad: provider `404 page not found` causes `mode="unavailable"` while knowledge entries exist.
+- Bad: fallback stores raw secret-bearing text in logs or response payloads.
+
+### 6. Tests Required
+
+- Unit: provider embedding call failure returns stable local vectors with matching query/document dimensions.
+- Unit: runtime retriever uses stored vectors and redacts sensitive context.
+- Regression: unavailable provider does not break knowledge create/update flows.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+try:
+    client = await llm_gateway.get_embeddings(db)
+except Exception:
+    raise EmbeddingUnavailableError("No embeddings")
+```
+
+#### Correct
+
+```python
+try:
+    return await llm_gateway.get_embeddings(db)
+except Exception:
+    return self.get_local_client()
+```
+
 ## Scenario: Run Auth Preflight and Captcha Modes
 
 ### 1. Scope / Trigger

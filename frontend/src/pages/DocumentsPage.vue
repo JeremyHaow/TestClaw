@@ -108,6 +108,7 @@ const endpointRangeLabel = computed(() => {
   return `${start}-${end} / ${filteredEndpoints.value.length}`
 })
 const selectedRawContent = computed(() => formatRawContent(selectedDoc.value?.raw_content))
+const selectedRawLineCount = computed(() => selectedRawContent.value ? selectedRawContent.value.split('\n').length : 0)
 
 watch([selectedId, endpointSearch, methodFilter], () => {
   endpointPage.value = 1
@@ -139,6 +140,36 @@ function prettyJson(value: any) {
   }
 }
 
+function looksLikeJsonContainer(value: string) {
+  const trimmed = value.trim()
+  return (
+    (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+    (trimmed.startsWith('[') && trimmed.endsWith(']'))
+  )
+}
+
+function decodeEscapedJsonCandidate(value: string) {
+  return value
+    .replace(/\\"/g, '"')
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t')
+}
+
+function unwrapJsonPayload(value: any) {
+  let current = value
+  for (let depth = 0; depth < 3 && typeof current === 'string'; depth += 1) {
+    const candidate = current.trim()
+    if (!looksLikeJsonContainer(candidate)) break
+    try {
+      current = JSON.parse(candidate)
+    } catch {
+      break
+    }
+  }
+  return current
+}
+
 function formatJsonText(raw: string) {
   const text = raw || ''
   const trimmed = text.trim()
@@ -147,9 +178,18 @@ function formatJsonText(raw: string) {
   }
 
   try {
-    const parsed = JSON.parse(trimmed)
+    const parsed = unwrapJsonPayload(JSON.parse(trimmed))
     return { ok: true, value: JSON.stringify(parsed, null, 2) || text, message: '' }
   } catch {
+    const decoded = decodeEscapedJsonCandidate(trimmed)
+    if (decoded !== trimmed && looksLikeJsonContainer(decoded)) {
+      try {
+        const parsed = unwrapJsonPayload(JSON.parse(decoded))
+        return { ok: true, value: JSON.stringify(parsed, null, 2) || text, message: '' }
+      } catch {
+        return { ok: false, value: text, message: '当前原文不是合法 JSON，已保留原文不变；YAML 可直接保存或导入。' }
+      }
+    }
     return { ok: false, value: text, message: '当前原文不是合法 JSON，已保留原文不变；YAML 可直接保存或导入。' }
   }
 }
@@ -398,7 +438,7 @@ onMounted(fetchItems)
                 class="rounded-md px-3 py-1.5 text-xs font-bold transition-all"
                 :class="importMode === 'raw' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-800'"
               >
-                原文
+                粘贴原文
               </button>
             </div>
           </div>
@@ -566,6 +606,7 @@ onMounted(fetchItems)
                   type="button"
                   @click="confirmDelete(selectedDoc)"
                   class="rounded-lg p-2 text-gray-400 transition-all hover:bg-red-50 hover:text-red-600"
+                  aria-label="删除当前文档"
                   title="删除文档"
                 >
                   <Trash2 :size="15" />
@@ -591,7 +632,7 @@ onMounted(fetchItems)
                   class="rounded-md px-3 py-1.5 text-xs font-bold transition-all"
                   :class="viewMode === 'raw' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-800'"
                 >
-                  原文
+                  查看原文
                 </button>
               </div>
 
@@ -606,6 +647,8 @@ onMounted(fetchItems)
                   <button
                     v-if="endpointSearch"
                     type="button"
+                    aria-label="清空端点搜索"
+                    title="清空端点搜索"
                     @click="endpointSearch = ''"
                     class="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-gray-400 hover:bg-gray-200"
                   >
@@ -624,7 +667,13 @@ onMounted(fetchItems)
           </div>
 
           <div v-if="viewMode === 'raw'" class="min-h-0 p-5 lg:flex-1">
-            <pre class="max-h-[640px] min-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-gray-200 bg-gray-950 p-4 font-mono text-xs leading-5 text-gray-100">{{ selectedRawContent }}</pre>
+            <div class="overflow-hidden rounded-lg border border-gray-200 bg-gray-950">
+              <div class="flex items-center justify-between border-b border-white/10 px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-gray-400">
+                <span>格式化 JSON</span>
+                <span>{{ selectedRawLineCount }} 行</span>
+              </div>
+              <pre class="max-h-[640px] min-h-[320px] overflow-auto whitespace-pre p-4 font-mono text-xs leading-5 text-gray-100">{{ selectedRawContent }}</pre>
+            </div>
           </div>
 
           <div v-else class="grid min-h-[520px] gap-0 lg:min-h-0 lg:flex-1 xl:grid-cols-[minmax(0,1fr)_340px]">
@@ -754,7 +803,13 @@ onMounted(fetchItems)
             <h3 class="text-sm font-bold text-gray-900">在线编辑接口文档</h3>
             <p class="mt-1 text-xs text-gray-500">保存后后端会重新解析端点；运行页会直接选择这个已保存文档。</p>
           </div>
-          <button @click="editing = false" class="rounded-lg p-2 text-gray-400 transition-all hover:bg-gray-100 hover:text-gray-700">
+          <button
+            type="button"
+            aria-label="关闭文档编辑"
+            title="关闭文档编辑"
+            @click="editing = false"
+            class="rounded-lg p-2 text-gray-400 transition-all hover:bg-gray-100 hover:text-gray-700"
+          >
             <X :size="18" />
           </button>
         </div>

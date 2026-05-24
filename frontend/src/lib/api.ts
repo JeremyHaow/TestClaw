@@ -1,4 +1,4 @@
-import axios from 'axios'
+import axios, { AxiosHeaders } from 'axios'
 
 export const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 
@@ -23,6 +23,18 @@ const api = axios.create({
 })
 
 api.interceptors.request.use((config) => {
+  const headers = AxiosHeaders.from(config.headers)
+  headers.set('Cache-Control', 'no-cache')
+  headers.set('Pragma', 'no-cache')
+  headers.set('Expires', '0')
+  config.headers = headers
+  if ((config.method || 'get').toLowerCase() === 'get') {
+    if (config.params instanceof URLSearchParams) {
+      config.params.set('_tc', String(Date.now()))
+    } else {
+      config.params = { ...(config.params || {}), _tc: Date.now() }
+    }
+  }
   const token = localStorage.getItem('testclaw_token')
   if (token) {
     config.headers.Authorization = `Bearer ${token}`

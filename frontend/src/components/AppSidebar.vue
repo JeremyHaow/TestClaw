@@ -64,6 +64,9 @@ function navigate(path: string) {
       </div>
       <button
         v-if="!collapsed && !isMobile"
+        type="button"
+        aria-label="收起导航栏"
+        title="收起导航栏"
         @click="collapsed = true"
         class="p-1.5 hover:bg-gray-100 rounded-md transition-colors text-gray-400 hover:text-gray-600"
       >
@@ -102,6 +105,9 @@ function navigate(path: string) {
     <!-- Collapse toggle (desktop only) -->
     <button
       v-if="collapsed && !isMobile"
+      type="button"
+      aria-label="展开导航栏"
+      title="展开导航栏"
       @click="collapsed = false"
       class="mx-auto mb-4 p-2 hover:bg-gray-100 rounded-md transition-colors text-gray-400"
     >
