@@ -169,14 +169,29 @@ type PreflightResponse = {
   auth_required_fields?: string[]
 }
 
+type ApiDocument = {
+  id: string
+  name?: string | null
+  source_url?: string | null
+  raw_content?: string | null
+  format?: string | null
+  parsed_endpoints?: Record<string, any>[] | null
+}
+
 const router = useRouter()
 const route = useRoute()
 const toast = useToast()
 const submitting = ref(false)
 const preflightLoading = ref(false)
 const showAdvanced = ref(false)
+const showTargetSettings = ref(false)
 const showAuthChoices = ref(false)
 const preflight = ref<PreflightResponse | null>(null)
+const documents = ref<ApiDocument[]>([])
+const documentsLoading = ref(false)
+const selectedDocumentId = ref('manual')
+const routeSourceForDocumentMatch = ref('')
+const credentialFieldsEdited = ref(false)
 
 const form = reactive({
   source: '',
@@ -295,7 +310,10 @@ const readinessLabel = computed(() => {
 })
 const hasBlockingPreflight = computed(() => preflight.value?.readiness === 'blocked')
 const canRun = computed(() => Boolean(form.source.trim()) && !submitting.value && !hasBlockingPreflight.value)
-const inferredTarget = computed(() => preflight.value?.target_url || form.base_url || form.source.trim() || '等待输入目标')
+const selectedDocument = computed(() => documents.value.find((doc) => doc.id === selectedDocumentId.value) || null)
+const baseUrlRootWarning = computed(() => shouldOmitRootBaseUrlOverride(form.source, form.base_url))
+const baseUrlForPayload = computed(() => normalizedBaseUrlOverrideForPayload(form.source, form.base_url))
+const inferredTarget = computed(() => preflight.value?.target_url || baseUrlForPayload.value || form.source.trim() || '等待输入目标')
 const endpointCountLabel = computed(() => {
   const count = preflight.value?.endpoint_count
   if (count === null || count === undefined) return '运行时解析'
@@ -383,10 +401,17 @@ function applyRoutePrefill() {
   const setupInstructions = queryString(route.query.setup_instructions)
   const apiPolicy = queryString(route.query.api_execution_policy)
 
-  if (source) form.source = source
+  if (source) {
+    form.source = source
+    selectedDocumentId.value = 'manual'
+    routeSourceForDocumentMatch.value = source
+  }
   if (objective) form.objective = objective
   if (['api', 'ui'].includes(testType)) form.test_type = testType
-  if (baseUrl) form.base_url = baseUrl
+  if (baseUrl) {
+    form.base_url = baseUrl
+    showTargetSettings.value = true
+  }
   if (setupInstructions) form.setup_instructions = setupInstructions
   if (apiPolicies.some((policy) => policy.value === apiPolicy)) form.api_execution_policy = apiPolicy
   if (source || objective || testType || baseUrl || setupInstructions || apiPolicy) resetPreflight()
@@ -396,7 +421,88 @@ function resetPreflight() {
   preflight.value = null
 }
 
+function documentSource(doc: ApiDocument) {
+  return String(doc.source_url || doc.raw_content || '').trim()
+}
+
+function documentEndpointCount(doc: ApiDocument) {
+  return Array.isArray(doc.parsed_endpoints) ? doc.parsed_endpoints.length : 0
+}
+
+function documentDisplayName(doc: ApiDocument) {
+  return doc.name || `Document-${doc.format || 'openapi'}`
+}
+
+function documentSourceLabel(doc: ApiDocument) {
+  if (doc.source_url?.trim()) return doc.source_url.trim()
+  if (doc.raw_content?.trim()) return 'manual content'
+  return 'source not available'
+}
+
+function normalizeSourceMatch(value: string | null | undefined) {
+  return String(value || '').trim()
+}
+
+function findMatchingDocument(source: string) {
+  const normalized = normalizeSourceMatch(source)
+  if (!normalized) return null
+  return documents.value.find((doc) => (
+    normalizeSourceMatch(doc.source_url) === normalized
+    || normalizeSourceMatch(doc.raw_content) === normalized
+  )) || null
+}
+
+function applySavedDocument(doc: ApiDocument) {
+  const source = documentSource(doc)
+  if (!source) {
+    selectedDocumentId.value = 'manual'
+    toast.warning('文档没有可用于运行的 source')
+    return
+  }
+  selectedDocumentId.value = doc.id
+  form.source = source
+  form.base_url = ''
+  resetPreflight()
+}
+
+function handleDocumentSelection() {
+  routeSourceForDocumentMatch.value = ''
+  if (selectedDocumentId.value === 'manual') {
+    resetPreflight()
+    return
+  }
+  const doc = selectedDocument.value
+  if (doc) applySavedDocument(doc)
+}
+
+function handleSourceInput() {
+  selectedDocumentId.value = 'manual'
+  routeSourceForDocumentMatch.value = ''
+  resetPreflight()
+}
+
+async function fetchDocuments() {
+  documentsLoading.value = true
+  try {
+    const { data } = await api.get('/documents')
+    documents.value = Array.isArray(data) ? data : []
+    const routeSource = routeSourceForDocumentMatch.value
+    if (routeSource && isApiMode.value) {
+      const match = findMatchingDocument(routeSource)
+      if (match) applySavedDocument(match)
+      else selectedDocumentId.value = 'manual'
+      routeSourceForDocumentMatch.value = ''
+    }
+  } catch {
+    toast.error('加载已保存接口文档失败')
+  } finally {
+    documentsLoading.value = false
+  }
+}
+
 function setExample(source: string, objective: string, mode = 'api') {
+  selectedDocumentId.value = 'manual'
+  routeSourceForDocumentMatch.value = ''
   form.source = source
   form.objective = objective
   form.test_type = mode
@@ -415,6 +521,12 @@ function selectAuthMode(mode: string) {
   showAuthChoices.value = mode !== 'auto'
   showAdvanced.value = false
   resetPreflight()
+  scheduleCredentialAutofillClear()
+}
+
+function handleManualRefreshToggle() {
+  resetPreflight()
+  scheduleCredentialAutofillClear()
 }
 
 function authInputNeeds(key: string) {
@@ -477,6 +589,70 @@ function runStatusLabel(status?: string | null) {
   if (status === 'running') return '运行中'
   if (status === 'queued') return '排队中'
   return status || '未知'
+}
+
+function parseHttpUrl(value: string) {
+  try {
+    const parsed = new URL(value)
+    return ['http:', 'https:'].includes(parsed.protocol) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function looksLikeOpenApiDocumentUrl(source: string) {
+  const parsed = parseHttpUrl(source.trim())
+  if (!parsed) return false
+  return /swagger|openapi|api-docs/i.test(`${parsed.pathname}${parsed.search}`)
+}
+
+function isRootPathUrl(url: URL) {
+  return url.pathname.replace(/\/+$/, '') === ''
+}
+
+function shouldOmitRootBaseUrlOverride(source: string, baseUrl: string) {
+  const sourceUrl = parseHttpUrl(source.trim())
+  const overrideUrl = parseHttpUrl(baseUrl.trim())
+  if (!sourceUrl || !overrideUrl || !looksLikeOpenApiDocumentUrl(source)) return false
+  return sourceUrl.origin === overrideUrl.origin && isRootPathUrl(overrideUrl)
+}
+
+function normalizedBaseUrlOverrideForPayload(source: string, baseUrl: string) {
+  const trimmed = baseUrl.trim()
+  if (!trimmed) return ''
+  if (shouldOmitRootBaseUrlOverride(source, trimmed)) return ''
+  return trimmed
+}
+
+function markCredentialUserEdit() {
+  credentialFieldsEdited.value = true
+}
+
+function handleCredentialInput() {
+  resetPreflight()
+}
+
+function clearCredentialFieldsIfAutofilled() {
+  if (credentialFieldsEdited.value) return
+  const hadCredentials = Boolean(
+    form.auth_username
+    || form.auth_password
+    || form.auth_captcha
+    || form.token,
+  )
+  form.auth_username = ''
+  form.auth_password = ''
+  form.auth_captcha = ''
+  form.token = ''
+  if (hadCredentials) resetPreflight()
+}
+
+function scheduleCredentialAutofillClear() {
+  clearCredentialFieldsIfAutofilled()
+  const clearDelays = [50, 250, 1000]
+  clearDelays.forEach((delay) => {
+    window.setTimeout(clearCredentialFieldsIfAutofilled, delay)
+  })
 }
 
 function buildHeaders() {
@@ -553,7 +729,7 @@ function buildRunPayload() {
     captcha_mode: form.captcha_mode,
   }
   if (form.objective.trim()) payload.objective = form.objective.trim()
-  if (form.base_url.trim()) payload.base_url = form.base_url.trim()
+  if (baseUrlForPayload.value) payload.base_url = baseUrlForPayload.value
   const authCredentials = buildAuthCredentials()
   if (authCredentials) payload.auth_credentials = authCredentials
   if (isManualAuthMode.value && form.token.trim()) payload.token = form.token.trim()
@@ -623,7 +799,11 @@ async function submit() {
   }
 }
 
-onMounted(applyRoutePrefill)
+onMounted(() => {
+  applyRoutePrefill()
+  scheduleCredentialAutofillClear()
+  void fetchDocuments()
+})
 </script>
 
 <template>
@@ -688,13 +868,47 @@ onMounted(applyRoutePrefill)
             </div>
 
             <div>
-              <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">目标入口 / API 文档</label>
+              <div v-if="isApiMode" class="mb-3 rounded-lg border border-blue-100 bg-blue-50/70 p-3">
+                <div class="mb-2 flex items-center justify-between gap-3">
+                  <label class="text-xs font-bold uppercase tracking-widest text-blue-600">API 文档来源</label>
+                  <span v-if="documentsLoading" class="text-[11px] font-bold text-blue-500">加载中...</span>
+                </div>
+                <select
+                  v-model="selectedDocumentId"
+                  class="w-full rounded-lg border border-blue-200 bg-white px-3 py-2.5 text-sm font-bold text-blue-950 outline-none transition-all focus:border-blue-500"
+                  @change="handleDocumentSelection"
+                >
+                  <option value="manual">手动输入 URL / 原文</option>
+                  <option
+                    v-for="doc in documents"
+                    :key="doc.id"
+                    :value="doc.id"
+                  >
+                    {{ documentDisplayName(doc) }} · {{ documentEndpointCount(doc) }} endpoints
+                  </option>
+                </select>
+                <div v-if="selectedDocument" class="mt-3 rounded-lg border border-blue-100 bg-white px-3 py-2 text-xs">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <span class="font-bold text-blue-950">{{ documentDisplayName(selectedDocument) }}</span>
+                    <span class="font-bold text-blue-600">{{ documentEndpointCount(selectedDocument) }} endpoints</span>
+                  </div>
+                  <div class="mt-1 break-all font-mono text-[11px] leading-5 text-blue-700">
+                    {{ documentSourceLabel(selectedDocument) }}
+                  </div>
+                </div>
+                <p v-else class="mt-2 text-xs leading-5 text-blue-700">
+                  可选择“接口文档”中已导入的文档；临时 URL 或粘贴原文请保持手动输入。
+                </p>
+              </div>
+              <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">
+                {{ isApiMode ? '运行 Source / 手动输入' : '目标入口 / 页面 URL' }}
+              </label>
               <textarea
                 v-model="form.source"
                 rows="5"
-                placeholder="粘贴网页 URL、Swagger/OpenAPI URL，或直接粘贴 Swagger JSON/YAML..."
+                :placeholder="isApiMode ? '选择已导入文档，或手动粘贴 Swagger/OpenAPI URL、JSON/YAML...' : '粘贴要巡检的网页 URL...'"
                 class="w-full resize-none rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 font-mono text-sm outline-none transition-all focus:border-blue-500 focus:bg-white"
-                @input="resetPreflight"
+                @input="handleSourceInput"
               />
               <div class="mt-3 flex flex-wrap gap-2">
                 <button
@@ -759,21 +973,37 @@ onMounted(applyRoutePrefill)
               <h3 class="text-sm font-bold text-gray-900">目标上下文</h3>
             </div>
             <div class="space-y-4">
-              <div>
-                <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">Base URL 覆盖</label>
-                <input
-                  v-model="form.base_url"
-                  placeholder="例如：https://api.example.com"
-                  class="w-full rounded-lg border px-4 py-2.5 font-mono text-sm outline-none transition-all focus:bg-white"
-                  :class="authInputNeeds('base_url') ? 'border-amber-400 bg-amber-50 focus:border-amber-500' : 'border-gray-200 bg-gray-50 focus:border-blue-500'"
-                  @input="resetPreflight"
-                />
-              </div>
               <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
                 <div class="mb-1 flex items-center gap-2 text-xs font-bold text-gray-700">
                   <Route :size="14" /> 推断目标
                 </div>
                 <p class="break-words font-mono text-xs leading-5 text-gray-500">{{ inferredTarget }}</p>
+              </div>
+              <button
+                type="button"
+                class="flex w-full items-center justify-between rounded-lg border border-gray-200 bg-white px-3 py-2 text-left text-xs font-bold text-gray-700 transition-all hover:border-blue-200 hover:text-blue-700"
+                @click="showTargetSettings = !showTargetSettings"
+              >
+                <span class="flex items-center gap-2"><SlidersHorizontal :size="15" /> 高级/可选目标设置</span>
+                <span class="text-gray-500">{{ showTargetSettings ? '收起' : '展开' }}</span>
+              </button>
+              <div v-if="showTargetSettings || form.base_url || authInputNeeds('base_url')" class="space-y-2">
+                <label class="block text-xs font-bold uppercase tracking-widest text-gray-400">Base URL 覆盖</label>
+                <input
+                  v-model="form.base_url"
+                  name="tc-run-target-base"
+                  autocomplete="off"
+                  placeholder="例如：https://api.example.com/api"
+                  class="w-full rounded-lg border px-4 py-2.5 font-mono text-sm outline-none transition-all focus:bg-white"
+                  :class="authInputNeeds('base_url') ? 'border-amber-400 bg-amber-50 focus:border-amber-500' : 'border-gray-200 bg-gray-50 focus:border-blue-500'"
+                  @input="resetPreflight"
+                />
+                <p class="text-xs leading-5 text-gray-500">
+                  OpenAPI/Swagger 文档通常留空，系统会使用文档 servers 推断。仅在刻意切换环境时填写，并包含完整 API 基础路径，例如 /api。
+                </p>
+                <div v-if="baseUrlRootWarning" class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
+                  已忽略这个 Base URL 覆盖：它只是文档同源根地址，可能丢失 servers 中的 /api 路径。留空使用文档 servers；切换环境时请填写完整基础路径。
+                </div>
               </div>
             </div>
           </div>
@@ -855,22 +1085,32 @@ onMounted(applyRoutePrefill)
             <div class="grid gap-4 lg:grid-cols-2">
               <div>
                 <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">认证 Token</label>
-                <input
-                  v-model="form.token"
-                  type="password"
-                  placeholder="Bearer Token 或 API Key"
-                  class="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 font-mono text-sm outline-none transition-all focus:border-blue-500 focus:bg-white"
-                  @input="resetPreflight"
-                />
+                  <input
+                    v-model="form.token"
+                    type="password"
+                    name="tc-run-manual-token"
+                    autocomplete="new-password"
+                    data-lpignore="true"
+                    data-1p-ignore="true"
+                    spellcheck="false"
+                    placeholder="粘贴 Token 或 API Key"
+                    class="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 font-mono text-sm outline-none transition-all focus:border-blue-500 focus:bg-white"
+                    @beforeinput="markCredentialUserEdit"
+                    @keydown="markCredentialUserEdit"
+                    @paste="markCredentialUserEdit"
+                    @input="handleCredentialInput"
+                  />
               </div>
               <div>
                 <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">自定义请求头</label>
-                <textarea
-                  v-model="form.custom_headers"
-                  rows="3"
-                  placeholder="每行一个，格式：Header-Name: value"
-                  class="w-full resize-none rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 font-mono text-sm outline-none transition-all focus:border-blue-500 focus:bg-white"
-                  @input="resetPreflight"
+                  <textarea
+                    v-model="form.custom_headers"
+                    rows="3"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="每行一个，格式：Header-Name: value"
+                    class="w-full resize-none rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 font-mono text-sm outline-none transition-all focus:border-blue-500 focus:bg-white"
+                    @input="resetPreflight"
                 />
               </div>
             </div>
@@ -880,7 +1120,7 @@ onMounted(applyRoutePrefill)
                 v-model="form.auth_refresh_enabled"
                 type="checkbox"
                 class="mt-0.5 h-4 w-4 rounded border-gray-300 text-blue-600"
-                @change="resetPreflight"
+                @change="handleManualRefreshToggle"
               />
               <span>
                 <span class="block text-gray-900">过期时自动重新获取</span>
@@ -914,34 +1154,55 @@ onMounted(applyRoutePrefill)
             <div class="grid gap-4 md:grid-cols-3">
               <div>
                 <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-emerald-700">用户名</label>
-                <input
-                  v-model="form.auth_username"
-                  placeholder="admin"
-                  class="w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition-all"
-                  :class="authInputNeeds('username') ? 'border-amber-400 bg-amber-50 focus:border-amber-500' : 'border-emerald-200 bg-white focus:border-emerald-500'"
-                  @input="resetPreflight"
-                />
+                  <input
+                    v-model="form.auth_username"
+                    name="tc-run-login-identity"
+                    autocomplete="off"
+                    autocapitalize="none"
+                    spellcheck="false"
+                    placeholder="请输入账号"
+                    class="w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition-all"
+                    :class="authInputNeeds('username') ? 'border-amber-400 bg-amber-50 focus:border-amber-500' : 'border-emerald-200 bg-white focus:border-emerald-500'"
+                    @beforeinput="markCredentialUserEdit"
+                    @keydown="markCredentialUserEdit"
+                    @paste="markCredentialUserEdit"
+                    @input="handleCredentialInput"
+                  />
               </div>
               <div>
                 <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-emerald-700">密码</label>
-                <input
-                  v-model="form.auth_password"
-                  type="password"
-                  placeholder="password"
-                  class="w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition-all"
-                  :class="authInputNeeds('password') ? 'border-amber-400 bg-amber-50 focus:border-amber-500' : 'border-emerald-200 bg-white focus:border-emerald-500'"
-                  @input="resetPreflight"
-                />
+                  <input
+                    v-model="form.auth_password"
+                    type="password"
+                    name="tc-run-login-secret"
+                    autocomplete="new-password"
+                    data-lpignore="true"
+                    data-1p-ignore="true"
+                    spellcheck="false"
+                    placeholder="请输入密码"
+                    class="w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition-all"
+                    :class="authInputNeeds('password') ? 'border-amber-400 bg-amber-50 focus:border-amber-500' : 'border-emerald-200 bg-white focus:border-emerald-500'"
+                    @beforeinput="markCredentialUserEdit"
+                    @keydown="markCredentialUserEdit"
+                    @paste="markCredentialUserEdit"
+                    @input="handleCredentialInput"
+                  />
               </div>
               <div v-if="form.captcha_mode === 'static'">
                 <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-emerald-700">验证码</label>
-                <input
-                  v-model="form.auth_captcha"
-                  placeholder="固定验证码"
-                  class="w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition-all"
-                  :class="authInputNeeds('captcha') ? 'border-amber-400 bg-amber-50 focus:border-amber-500' : 'border-emerald-200 bg-white focus:border-emerald-500'"
-                  @input="resetPreflight"
-                />
+                  <input
+                    v-model="form.auth_captcha"
+                    name="tc-run-login-code"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="请输入验证码"
+                    class="w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition-all"
+                    :class="authInputNeeds('captcha') ? 'border-amber-400 bg-amber-50 focus:border-amber-500' : 'border-emerald-200 bg-white focus:border-emerald-500'"
+                    @beforeinput="markCredentialUserEdit"
+                    @keydown="markCredentialUserEdit"
+                    @paste="markCredentialUserEdit"
+                    @input="handleCredentialInput"
+                  />
               </div>
             </div>
 
@@ -974,10 +1235,13 @@ onMounted(applyRoutePrefill)
               <div v-if="showLoginRequestSettings" class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_130px_130px]">
                 <div v-if="shouldShowAdvancedField('login_url')">
                   <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">登录 URL</label>
-                  <input
-                    v-model="form.auth_login_url"
-                    placeholder="留空时从 OpenAPI login/token 接口推断"
-                    class="w-full rounded-lg border px-4 py-2.5 font-mono text-sm outline-none transition-all"
+                    <input
+                      v-model="form.auth_login_url"
+                      name="tc-run-login-endpoint"
+                      autocomplete="off"
+                      spellcheck="false"
+                      placeholder="留空时从 OpenAPI login/token 接口推断"
+                      class="w-full rounded-lg border px-4 py-2.5 font-mono text-sm outline-none transition-all"
                     :class="authInputNeeds('login_url') ? 'border-amber-400 bg-amber-50 focus:border-amber-500' : 'border-gray-200 bg-white focus:border-blue-500'"
                     @input="resetPreflight"
                   />
@@ -1009,10 +1273,13 @@ onMounted(applyRoutePrefill)
 
               <div v-if="isApiMode && shouldShowAdvancedField('captcha_url')">
                 <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">验证码 URL</label>
-                <input
-                  v-model="form.auth_captcha_url"
-                  placeholder="留空时从 OpenAPI captcha/verifyCode 接口推断"
-                  class="w-full rounded-lg border px-4 py-2.5 font-mono text-sm outline-none transition-all"
+                  <input
+                    v-model="form.auth_captcha_url"
+                    name="tc-run-captcha-endpoint"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="留空时从 OpenAPI captcha/verifyCode 接口推断"
+                    class="w-full rounded-lg border px-4 py-2.5 font-mono text-sm outline-none transition-all"
                   :class="authInputNeeds('captcha_url') ? 'border-amber-400 bg-amber-50 focus:border-amber-500' : 'border-gray-200 bg-white focus:border-blue-500'"
                   @input="resetPreflight"
                 />
@@ -1021,10 +1288,13 @@ onMounted(applyRoutePrefill)
               <div v-if="showTokenSettings" class="grid gap-4 lg:grid-cols-3">
                 <div v-if="shouldShowAdvancedField('token_path')">
                   <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">Token 路径</label>
-                  <input
-                    v-model="form.auth_token_path"
-                    placeholder="留空时自动识别 access_token/data.token"
-                    class="w-full rounded-lg border px-4 py-2.5 font-mono text-sm outline-none transition-all"
+                    <input
+                      v-model="form.auth_token_path"
+                      name="tc-run-token-json-path"
+                      autocomplete="off"
+                      spellcheck="false"
+                      placeholder="留空时自动识别 access_token/data.token"
+                      class="w-full rounded-lg border px-4 py-2.5 font-mono text-sm outline-none transition-all"
                     :class="authInputNeeds('token_path') ? 'border-amber-400 bg-amber-50 focus:border-amber-500' : 'border-gray-200 bg-white focus:border-blue-500'"
                     @input="resetPreflight"
                   />
@@ -1052,22 +1322,26 @@ onMounted(applyRoutePrefill)
               <div v-if="showLoginPayloadSettings" class="grid gap-4 lg:grid-cols-2">
                 <div v-if="shouldShowAdvancedField('login_body')">
                   <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">登录请求体 JSON</label>
-                  <textarea
-                    v-model="form.auth_login_body"
-                    rows="6"
-                    placeholder="{ &quot;username&quot;: &quot;admin&quot;, &quot;password&quot;: &quot;123456&quot; }"
-                    class="w-full resize-none rounded-lg border px-4 py-3 font-mono text-sm outline-none transition-all"
+                    <textarea
+                      v-model="form.auth_login_body"
+                      rows="6"
+                      autocomplete="off"
+                      spellcheck="false"
+                      placeholder="{ &quot;username&quot;: &quot;请输入账号&quot;, &quot;password&quot;: &quot;请输入密码&quot; }"
+                      class="w-full resize-none rounded-lg border px-4 py-3 font-mono text-sm outline-none transition-all"
                     :class="authInputNeeds('login_body') ? 'border-amber-400 bg-amber-50 focus:border-amber-500' : 'border-gray-200 bg-white focus:border-blue-500'"
                     @input="resetPreflight"
                   />
                 </div>
                 <div v-if="shouldShowAdvancedField('login_headers')">
                   <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">登录请求头 JSON</label>
-                  <textarea
-                    v-model="form.auth_login_headers"
-                    rows="6"
-                    placeholder="{ &quot;X-App&quot;: &quot;test&quot; }"
-                    class="w-full resize-none rounded-lg border px-4 py-3 font-mono text-sm outline-none transition-all"
+                    <textarea
+                      v-model="form.auth_login_headers"
+                      rows="6"
+                      autocomplete="off"
+                      spellcheck="false"
+                      placeholder="{ &quot;X-Example&quot;: &quot;value&quot; }"
+                      class="w-full resize-none rounded-lg border px-4 py-3 font-mono text-sm outline-none transition-all"
                     :class="authInputNeeds('login_headers') ? 'border-amber-400 bg-amber-50 focus:border-amber-500' : 'border-gray-200 bg-white focus:border-blue-500'"
                     @input="resetPreflight"
                   />
