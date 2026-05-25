@@ -610,13 +610,18 @@ def _evaluate_status_assertion(assertion: dict, resp_status: int, payload) -> di
     passed = _status_matches(expected, resp_status, payload)
     payload_status = _payload_status_code(payload)
     actual = [resp_status] if payload_status is None else [resp_status, payload_status]
-    return {
+    result = {
         "type": "status_code",
         "expected": expected,
         "actual": actual,
         "passed": passed,
-        "blocking": True,
+        "blocking": assertion.get("blocking", True),
     }
+    if assertion.get("advisory"):
+        result["advisory"] = True
+    if assertion.get("source"):
+        result["source"] = assertion.get("source")
+    return result
 
 
 def _evaluate_json_path_assertion(assertion: dict, payload) -> dict:

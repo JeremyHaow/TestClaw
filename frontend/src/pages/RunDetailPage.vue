@@ -94,6 +94,7 @@ const snapshotKeys = [
   'agent_attempt_history',
   'agent_replan_counts',
   'agent_replan_feedback',
+  'agent_case_diagnostics',
   'input_type',
   'source_input',
   'current_step',
@@ -112,6 +113,7 @@ const snapshotKeys = [
   'login_playwright_commands',
   'ui_reproducible_script',
   'api_execution_policy',
+  'allow_out_of_schema_api_cases',
   'api_path_prefix_rewrite',
 ]
 

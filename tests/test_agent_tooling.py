@@ -142,11 +142,13 @@ def test_llm_json_parser_handles_fenced_extra_text_and_near_json() -> None:
     fenced = "Here is the result:\n```json\n{\"api_cases\": [], \"ui_cases\": []}\n```\nDone"
     extra = "prefix {\"next_action\": \"report\", \"diagnostics\": []} suffix"
     near_json = "{\"api_cases\": [] \"ui_cases\": []}"
+    non_json_fence = "```text\nnot json\n```\nThen {\"next_action\": \"report\"}"
     partial = "{\"api_cases\": ["
 
     assert parse_llm_json(fenced, expected="object") == {"api_cases": [], "ui_cases": []}
     assert parse_llm_json(extra, expected="object") == {"next_action": "report", "diagnostics": []}
     assert parse_llm_json(near_json, expected="object") == {"api_cases": [], "ui_cases": []}
+    assert parse_llm_json(non_json_fence, expected="object") == {"next_action": "report"}
     assert parse_llm_json(partial, expected="object") is None
 
 

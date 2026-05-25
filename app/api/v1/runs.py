@@ -5128,6 +5128,7 @@ async def get_run_detail(run_id: str, db: DbSession, _: CurrentUser):
     detail["agent_attempt_history"] = parsed.get("agent_attempt_history")
     detail["agent_replan_counts"] = parsed.get("agent_replan_counts")
     detail["agent_replan_feedback"] = parsed.get("agent_replan_feedback")
+    detail["agent_case_diagnostics"] = parsed.get("agent_case_diagnostics")
     detail["input_type"] = parsed.get("input_type")
     detail["source_input"] = parsed.get("source_input")
     detail["current_step"] = parsed.get("current_step")
@@ -5148,6 +5149,7 @@ async def get_run_detail(run_id: str, db: DbSession, _: CurrentUser):
     detail["rag_context"] = parsed.get("rag_context")
     detail["rag_retrieval"] = parsed.get("rag_retrieval")
     detail["api_execution_policy"] = parsed.get("api_execution_policy")
+    detail["allow_out_of_schema_api_cases"] = parsed.get("allow_out_of_schema_api_cases")
     detail["api_path_prefix_rewrite"] = parsed.get("api_path_prefix_rewrite")
     detail["triage_summary"] = _build_run_triage_summary(str(detail.get("status") or ""), parsed)
     detail["intervention_summary"] = _build_run_intervention_summary(

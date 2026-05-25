@@ -307,6 +307,33 @@ def test_run_detail_exposes_agent_evidence_evaluation_surface() -> None:
     assert payload["agent_replan_counts"]["ui"] == 1
 
 
+def test_run_detail_exposes_api_scope_guard_diagnostics() -> None:
+    execution_log = {
+        "api_execution_policy": "safe_read_only",
+        "allow_out_of_schema_api_cases": False,
+        "agent_case_diagnostics": [
+            {
+                "kind": "out_of_scope_api_case",
+                "action": "dropped",
+                "method": "GET",
+                "path": "/non_existent_endpoint",
+                "severity": "advisory",
+            }
+        ],
+    }
+
+    with TestClient(app) as client:
+        token = _token(client)
+        task_id = asyncio.run(_insert_task(status=TaskStatus.SUCCEEDED, execution_log=execution_log))
+        response = client.get(f"/api/v1/runs/{task_id}", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["api_execution_policy"] == "safe_read_only"
+    assert payload["allow_out_of_schema_api_cases"] is False
+    assert payload["agent_case_diagnostics"][0]["kind"] == "out_of_scope_api_case"
+
+
 def test_run_triage_export_json_shape_and_reusable_assets_without_secrets() -> None:
     with TestClient(app) as client:
         token = _token(client)

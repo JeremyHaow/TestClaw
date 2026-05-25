@@ -258,6 +258,24 @@ def _sanitize_assertions(
                 )
             )
             next_assertions.append(assertion)
+            continue
+
+        assertion["blocking"] = False
+        assertion["advisory"] = True
+        assertion["source"] = "agent_scope_guard"
+        diagnostics.append(
+            _diagnostic(
+                kind="unsupported_api_assertion",
+                action="downgraded",
+                case=sanitized,
+                reason=(
+                    "Generated assertion type was not supported by the API runner; "
+                    "it was kept as advisory evidence only."
+                ),
+                assertion=assertion,
+            )
+        )
+        next_assertions.append(assertion)
 
     if next_assertions:
         sanitized["assertions"] = next_assertions

@@ -19,7 +19,11 @@ Added bounded model-backed evidence evaluation and replanning between API/UI exe
 
 ### Main Changes
 
-(Add details)
+- Added `app/agent/api_scope.py` to validate generated API cases against loaded OpenAPI method/path scope before execution.
+- Added LLM JSON extraction hardening for fenced/prose/near-JSON model responses.
+- Bounded API replan feedback so hallucinated paths are removed before `tc_generator` sees them.
+- Downgraded unsupported generated assertions into advisory diagnostics and surfaced those diagnostics in final reports.
+- Updated backend quality specs with the schema-scoped API replan contract.
 
 ### Git Commits
 
@@ -29,7 +33,11 @@ Added bounded model-backed evidence evaluation and replanning between API/UI exe
 
 ### Testing
 
-- [OK] (Add test results)
+- [OK] `uv run pytest tests/test_agent_tooling.py tests/test_runs_detail_triage.py -q`
+- [OK] scoped Ruff check for touched backend implementation and regression tests
+- [OK] `uv run pytest -q`
+- [OK] `npm --prefix frontend run build`
+- [OK] `npx tsc --noEmit` from `frontend/`
 
 ### Status
 

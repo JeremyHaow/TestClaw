@@ -8,7 +8,8 @@ from typing import Any, Literal
 JsonKind = Literal["object", "array", "any"]
 
 
-_FENCE_RE = re.compile(r"```(?:json|JSON)?\s*(.*?)```", re.S)
+_JSON_FENCE_RE = re.compile(r"```json\s*(.*?)```", re.S | re.I)
+_FENCE_RE = re.compile(r"```(?:[A-Za-z0-9_-]+)?\s*(.*?)```", re.S)
 _TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
 _MISSING_COMMA_BEFORE_KEY_RE = re.compile(
     r'([}\]"0-9]|true|false|null)\s+(?="[^"]+"\s*:)',
@@ -94,9 +95,14 @@ def parse_llm_json(content: str, *, expected: JsonKind = "any") -> Any | None:
         return None
 
     candidates = []
+    for match in _JSON_FENCE_RE.finditer(raw):
+        candidate = match.group(1).strip()
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
     fenced = _strip_markdown_fence(raw)
     balanced = _balanced_json_fragment(fenced)
-    for candidate in (fenced, balanced, raw):
+    balanced_raw = _balanced_json_fragment(raw)
+    for candidate in (fenced, balanced, balanced_raw, raw):
         candidate = candidate.strip()
         if candidate and candidate not in candidates:
             candidates.append(candidate)
