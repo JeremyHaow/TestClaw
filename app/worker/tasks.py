@@ -1,9 +1,18 @@
 import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.pool import NullPool
 
 from app.agent.graph import agent_graph
 from app.agent.progress import (
@@ -12,14 +21,39 @@ from app.agent.progress import (
     persist_progress,
     persist_task_state,
 )
+from app.config import settings
 from app.core.redaction import redact_sensitive_data
-from app.database import AsyncSessionLocal
 from app.models.bug_report import BugReport
 from app.models.task import TaskStatus
 from app.services.task_service import normalize_agent_test_type, task_service
 from app.worker.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
+
+
+def _create_worker_engine() -> AsyncEngine:
+    return create_async_engine(
+        settings.DATABASE_URL,
+        echo=False,
+        pool_pre_ping=True,
+        poolclass=NullPool,
+    )
+
+
+def _create_worker_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(engine, expire_on_commit=False)
+
+
+@asynccontextmanager
+async def _worker_session_scope() -> AsyncIterator[AsyncSession]:
+    # Celery calls asyncio.run per task, so pooled asyncpg connections cannot be shared across runs.
+    engine = _create_worker_engine()
+    session_factory = _create_worker_sessionmaker(engine)
+    try:
+        async with session_factory() as db:
+            yield db
+    finally:
+        await engine.dispose()
 
 
 def _coerce_text(value: Any, fallback: str = "") -> str:
@@ -85,18 +119,16 @@ async def run_graph_with_progress(state: dict[str, Any]) -> dict[str, Any]:
         final_state.setdefault("workflow_steps", []).append(
             {"node": "agent", "status": "failed", "detail": str(exc)}
         )
-        await persist_progress(final_state, "agent", "failed", str(exc), task_status=TaskStatus.FAILED)
+        await persist_progress(
+            final_state, "agent", "failed", str(exc), task_status=TaskStatus.FAILED
+        )
         raise
 
     return final_state
 
 
 async def _run(task_id: str, objective: str, target_url: str, **kwargs: Any):
-    # Dispose engine to clear connections from previous event loops (Celery + asyncio.run issue)
-    from app.database import engine
-    await engine.dispose()
-
-    async with AsyncSessionLocal() as db:
+    async with _worker_session_scope() as db:
         task = await task_service.get(db, task_id)
         if task:
             current_status = task.status if isinstance(task.status, str) else task.status.value

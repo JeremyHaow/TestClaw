@@ -17,6 +17,85 @@
 - Dependency injection: `DbSession = Annotated[AsyncSession, Depends(get_db)]`
 - Always use `async with AsyncSessionLocal() as session:` or the FastAPI dependency
 
+## Scenario: Celery Worker Async DB Session Loop Ownership
+
+### 1. Scope / Trigger
+
+- Trigger: Celery worker tasks call `asyncio.run(...)` per task, creating a fresh event loop for every agent run.
+- Applies to `app/worker/tasks.py` and any future Celery task that opens async SQLAlchemy sessions.
+- Purpose: prevent asyncpg pooled connections created in one event loop from being reused or disposed in another event loop.
+
+### 2. Signatures
+
+- Worker engine factory:
+  ```python
+  def _create_worker_engine() -> AsyncEngine
+  ```
+- Worker session factory:
+  ```python
+  def _create_worker_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]
+  ```
+- Worker session scope:
+  ```python
+  async with _worker_session_scope() as db:
+      ...
+  ```
+
+### 3. Contracts
+
+- FastAPI routes continue to use `app.database.engine` and `app.database.AsyncSessionLocal`.
+- Celery worker tasks must not import or use the global API `AsyncSessionLocal` for task execution.
+- Celery worker tasks must create a worker-task-local async engine with `poolclass=NullPool`.
+- The worker engine must be disposed inside the same coroutine/event loop that used it.
+- Agent state must still receive `state["db_session"] = db` so progress persistence, model/provider lookup, memory, and report persistence keep using the active task session.
+- Do not call `app.database.engine.dispose()` from worker tasks; that engine belongs to the API process/session factory.
+
+### 4. Validation & Error Matrix
+
+- Consecutive Celery tasks in one worker process -> no asyncpg "Future attached to a different loop" connection close errors.
+- Worker task starts after a previous task completed -> it creates a fresh worker engine/session and does not reuse prior asyncpg connections.
+- Progress persistence during a task -> uses the task-local `db_session` and preserves the existing `Task.execution_log` merge contract.
+- FastAPI API request handling -> still uses the global API session factory without worker `NullPool` changes.
+
+### 5. Good/Base/Bad Cases
+
+- Good: `_run()` opens `async with _worker_session_scope() as db`, injects `db` into agent state, and disposes the worker engine in `finally`.
+- Base: local SQLite tests use the same factory contract and can run sequential `asyncio.run()` loops without connection reuse.
+- Bad: worker imports `AsyncSessionLocal` from `app.database` and then calls `await engine.dispose()` before or after the task.
+
+### 6. Tests Required
+
+- Unit: worker engine uses `NullPool` and is distinct from `app.database.engine`.
+- Unit: worker sessionmaker binds sessions to the worker engine and keeps `expire_on_commit=False`.
+- Regression: worker session scope can open real sessions across consecutive `asyncio.run()` loops.
+- Integration/smoke: PostgreSQL/asyncpg Celery worker can run consecutive tasks without cross-loop connection close errors.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+from app.database import AsyncSessionLocal, engine
+
+async def _run(...):
+    await engine.dispose()
+    async with AsyncSessionLocal() as db:
+        ...
+```
+
+#### Correct
+
+```python
+engine = create_async_engine(settings.DATABASE_URL, poolclass=NullPool)
+session_factory = async_sessionmaker(engine, expire_on_commit=False)
+try:
+    async with session_factory() as db:
+        state["db_session"] = db
+        ...
+finally:
+    await engine.dispose()
+```
+
 ## Query Patterns
 
 ```python
