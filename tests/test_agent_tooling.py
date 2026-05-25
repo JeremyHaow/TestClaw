@@ -826,6 +826,142 @@ async def test_generated_grounded_json_path_assertion_still_blocks_when_false(mo
 
 
 @pytest.mark.asyncio
+async def test_generated_objective_grounded_session_assertion_still_blocks(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        text = '{"session": {"status": "inactive"}}'
+        content = text.encode()
+
+        def json(self) -> dict:
+            return {"session": {"status": "inactive"}}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    executed = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "objective": "Verify login session status is active.",
+            "api_cases_generated": True,
+            "api_execution_policy": "safe_read_only",
+            "parsed_api_schema": [
+                {"method": "GET", "path": "/session", "response_status": "200"},
+            ],
+            "api_cases": [
+                {
+                    "title": "session status contract",
+                    "request_template": {"method": "GET", "path": "/session"},
+                    "assertions": [
+                        {"type": "status_code", "expected": 200},
+                        {"type": "json_path", "path": "$.session.status", "expected": "active"},
+                    ],
+                }
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = executed["api_execution_result"]
+    assertion_results = api_result["results"][0]["assertion_results"]
+
+    assert api_result["passed"] == 0
+    assert api_result["failed"] == 1
+    assert any(
+        item["type"] == "json_path"
+        and item["path"] == "$.session.status"
+        and item["blocking"] is True
+        and item["passed"] is False
+        and not item.get("advisory")
+        for item in assertion_results
+    )
+    assert executed.get("agent_case_diagnostics") in (None, [])
+
+
+@pytest.mark.asyncio
+async def test_generated_objective_grounded_camel_case_assertion_still_blocks(
+    monkeypatch,
+) -> None:
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        text = '{"userName": "Grace"}'
+        content = text.encode()
+
+        def json(self) -> dict:
+            return {"userName": "Grace"}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    executed = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "objective": "Verify user name is Ada.",
+            "api_cases_generated": True,
+            "api_execution_policy": "safe_read_only",
+            "parsed_api_schema": [
+                {"method": "GET", "path": "/profile", "response_status": "200"},
+            ],
+            "api_cases": [
+                {
+                    "title": "profile user name contract",
+                    "request_template": {"method": "GET", "path": "/profile"},
+                    "assertions": [
+                        {"type": "status_code", "expected": 200},
+                        {"type": "json_path", "path": "$.userName", "expected": "Ada"},
+                    ],
+                }
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = executed["api_execution_result"]
+    assertion_results = api_result["results"][0]["assertion_results"]
+
+    assert api_result["passed"] == 0
+    assert api_result["failed"] == 1
+    assert any(
+        item["type"] == "json_path"
+        and item["path"] == "$.userName"
+        and item["blocking"] is True
+        and item["passed"] is False
+        and not item.get("advisory")
+        for item in assertion_results
+    )
+    assert executed.get("agent_case_diagnostics") in (None, [])
+
+
+@pytest.mark.asyncio
 async def test_embedding_service_redacts_text_before_provider() -> None:
     class FakeClient:
         embedded_texts: list[str]

@@ -7,7 +7,8 @@ from urllib.parse import urlsplit
 
 SAFE_API_METHODS = {"GET", "HEAD", "OPTIONS"}
 WRITE_API_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-_JSON_PATH_TOKEN_RE = re.compile(r"([A-Za-z0-9_\-]+)|\[(\d+)\]")
+_JSON_PATH_BRACKET_RE = re.compile(r"\[\s*(?:(\d+)|[\"']([^\"']+)[\"'])\s*\]")
+_JSON_PATH_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]+")
 _JSON_TYPE_ALIASES = {
     "is_object": "object",
     "object": "object",
@@ -33,15 +34,9 @@ _JSON_TYPE_ALIASES = {
     "none": "null",
 }
 _TYPE_ASSERTION_OPERATORS = {"", "equals", "==", "is", "type", "json_type"}
-_MISSION_CONTROL_ASSERTION_TERMS = {
-    "agent",
+_MISSION_CONTROL_STRONG_TERMS = {
     "worker",
-    "session",
-    "planning",
-    "planner",
-    "mission",
     "orchestration",
-    "react",
     "delegation",
     "subgoal",
     "tool_call",
@@ -52,6 +47,8 @@ _MISSION_CONTROL_ASSERTION_TERMS = {
     "asyncpg",
     "celery",
     "langgraph",
+    "react trace",
+    "react traces",
 }
 
 
@@ -135,26 +132,23 @@ def _response_schema_property(schema: dict[str, Any], name: str) -> dict[str, An
 def _schema_for_json_path(path_expr: str, schema: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(schema, dict):
         return None
-    path = str(path_expr or "").strip()
-    if path in {"", "$"}:
-        return schema
-    if path.startswith("$"):
-        path = path[1:]
-    path = path.lstrip(".")
-    if not path:
+    tokens = _json_path_tokens(path_expr)
+    if not tokens:
         return schema
 
     current = schema
-    for raw_part in path.split("."):
-        part = raw_part.split("[", 1)[0]
-        if not part:
-            continue
-        if current.get("type") == "array" and isinstance(current.get("items"), dict):
+    for token in tokens:
+        if isinstance(token, int):
+            if current.get("type") != "array" or not isinstance(current.get("items"), dict):
+                return None
             current = current["items"]
-        child = _response_schema_property(current, part)
-        if child is None:
-            return None
-        current = child
+        else:
+            if current.get("type") == "array" and isinstance(current.get("items"), dict):
+                current = current["items"]
+            child = _response_schema_property(current, token)
+            if child is None:
+                return None
+            current = child
     return current
 
 
@@ -167,34 +161,46 @@ def _json_path_is_root(path_expr: str) -> bool:
     return path in {"", "$"}
 
 
-def _json_path_get(payload: Any, path_expr: str, missing: object) -> Any:
+def _json_path_tokens(path_expr: str) -> list[str | int]:
     path = str(path_expr or "").strip()
     if path.startswith("$"):
         path = path[1:]
     path = path.lstrip(".")
     if not path:
-        return payload
+        return []
 
-    current = payload
+    tokens: list[str | int] = []
     for raw_part in path.split("."):
         if not raw_part:
             continue
-        matches = list(_JSON_PATH_TOKEN_RE.finditer(raw_part))
-        if not matches:
-            return missing
-        for match in matches:
-            key, index = match.groups()
-            if key is not None:
-                if not isinstance(current, dict) or key not in current:
-                    return missing
-                current = current[key]
-            else:
-                if not isinstance(current, list):
-                    return missing
-                idx = int(index)
-                if idx >= len(current):
-                    return missing
-                current = current[idx]
+        name_match = _JSON_PATH_NAME_RE.match(raw_part)
+        if name_match:
+            tokens.append(name_match.group(0))
+        for match in _JSON_PATH_BRACKET_RE.finditer(raw_part):
+            index, quoted_key = match.groups()
+            tokens.append(int(index) if index is not None else quoted_key)
+        if not name_match and "[" not in raw_part:
+            return []
+    return tokens
+
+
+def _json_path_get(payload: Any, path_expr: str, missing: object) -> Any:
+    tokens = _json_path_tokens(path_expr)
+    if not tokens:
+        return payload
+
+    current = payload
+    for token in tokens:
+        if isinstance(token, str):
+            if not isinstance(current, dict) or token not in current:
+                return missing
+            current = current[token]
+        else:
+            if not isinstance(current, list):
+                return missing
+            if token >= len(current):
+                return missing
+            current = current[token]
     return current
 
 
@@ -206,26 +212,34 @@ def _json_path_grounded_in_example(path_expr: str, example: Any) -> bool:
 
 
 def _json_path_field_names(path_expr: str) -> list[str]:
-    path = str(path_expr or "").strip()
-    if path.startswith("$"):
-        path = path[1:]
-    path = path.lstrip(".")
-    if not path:
-        return []
-
-    fields: list[str] = []
-    for raw_part in path.split("."):
-        for match in _JSON_PATH_TOKEN_RE.finditer(raw_part):
-            key, index = match.groups()
-            if key is not None:
-                fields.append(key)
-            elif index is None:
-                continue
-    return fields
+    return [token for token in _json_path_tokens(path_expr) if isinstance(token, str)]
 
 
-def _normalized_text(value: Any) -> str:
-    return re.sub(r"\s+", " ", str(value or "").lower()).strip()
+def _searchable_text(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _contains_search_term(text: str, term: str) -> bool:
+    normalized = _searchable_text(term)
+    if not normalized:
+        return False
+    return f" {normalized} " in f" {text} "
+
+
+def _identifier_tokens(value: str) -> list[str]:
+    camel_spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(value or ""))
+    parts = [
+        token.lower()
+        for token in re.split(r"[^A-Za-z0-9]+", camel_spaced)
+        if len(token) >= 2
+    ]
+    compact = re.sub(r"[^A-Za-z0-9]+", "", str(value or "")).lower()
+    tokens = [compact, *parts]
+    deduped: list[str] = []
+    for token in tokens:
+        if token and token not in deduped:
+            deduped.append(token)
+    return deduped
 
 
 def _expected_json_type(expected: Any) -> str | None:
@@ -268,8 +282,38 @@ def _looks_like_mission_control_assertion(
     expected: Any,
     objective: str | None,
 ) -> bool:
-    text = _normalized_text(f"{path_expr} {expected} {objective or ''}")
-    return any(term in text for term in _MISSION_CONTROL_ASSERTION_TERMS)
+    text = _searchable_text(f"{path_expr} {expected} {objective or ''}")
+    if any(_contains_search_term(text, term) for term in _MISSION_CONTROL_STRONG_TERMS):
+        return True
+
+    has_agent = _contains_search_term(text, "agent")
+    has_session = _contains_search_term(text, "session")
+    has_planning = any(
+        _contains_search_term(text, term) for term in ("planning", "planner", "mission")
+    )
+    has_react = _contains_search_term(text, "react")
+
+    if has_agent and any(
+        _contains_search_term(text, term)
+        for term in ("planning", "planner", "mission", "session", "trace", "stability")
+    ):
+        return True
+    if has_session and any(
+        _contains_search_term(text, term)
+        for term in ("agent", "worker", "db", "database", "event loop", "asyncpg", "celery")
+    ):
+        return True
+    if has_planning and any(
+        _contains_search_term(text, term)
+        for term in ("agent", "worker", "orchestration", "delegation", "subgoal", "trace")
+    ):
+        return True
+    if has_react and any(
+        _contains_search_term(text, term)
+        for term in ("agent", "trace", "traces", "reason", "action", "observation")
+    ):
+        return True
+    return False
 
 
 def _json_path_grounded_in_objective(
@@ -290,10 +334,9 @@ def _json_path_grounded_in_objective(
     if not fields:
         return False
 
-    objective_text = _normalized_text(objective)
-    field = fields[-1].lower()
-    field_tokens = [field, *[token for token in re.split(r"[_\-.]+", field) if len(token) >= 2]]
-    if not any(token and token in objective_text for token in field_tokens):
+    objective_text = _searchable_text(objective)
+    field_tokens = _identifier_tokens(fields[-1])
+    if not any(_contains_search_term(objective_text, token) for token in field_tokens):
         return False
 
     operator = str(assertion.get("operator") or assertion.get("op") or "").strip().lower()
@@ -303,7 +346,7 @@ def _json_path_grounded_in_objective(
     if _expected_json_type(expected):
         return False
     if isinstance(expected, (str, int, float, bool)):
-        return str(expected).strip().lower() in objective_text
+        return _contains_search_term(objective_text, str(expected))
     return False
 
 
