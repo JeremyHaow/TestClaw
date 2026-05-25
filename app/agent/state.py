@@ -55,6 +55,7 @@ class AgentState(TypedDict, total=False):
     agent_next_node: str | None
     agent_replan_counts: dict[str, int] | None
     agent_replan_feedback: str | None
+    agent_case_diagnostics: list[dict] | None
 
     # --- UI Login ---
     setup_instructions: str | None  # natural language pre-test setup/context from user
@@ -95,5 +96,6 @@ class AgentState(TypedDict, total=False):
     custom_headers: dict[str, str] | None
     base_url_override: str | None
     api_execution_policy: Literal["safe_read_only", "safe_with_auth", "write_allowed"] | None
+    allow_out_of_schema_api_cases: bool | None
     api_request_selection: dict[str, Any] | None
     api_path_prefix_rewrite: dict[str, str] | None

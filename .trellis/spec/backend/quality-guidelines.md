@@ -712,6 +712,7 @@ assert _after_ui_login({"login_instructions": "demo", "login_verified": False}) 
 - Request policy field:
   ```python
   api_execution_policy: Literal["safe_read_only", "safe_with_auth", "write_allowed"] = "safe_read_only"
+  allow_out_of_schema_api_cases: bool = False
   ```
 - Preflight metrics:
   ```python
@@ -768,6 +769,9 @@ assert _after_ui_login({"login_instructions": "demo", "login_verified": False}) 
 - API result entries may include `envelope_status_code`, `failure_type`, and `failure_reason` so reporter output can distinguish backend validation/contract failures from generic runner assertions.
 - When `api_cases` are present, the API runner must build execution requests from those curated/generated cases before considering `parsed_api_schema`; do not fan out the full schema while ignoring the curated case set.
 - If curated cases produce no executable request under `safe_read_only` or `safe_with_auth`, the runner may fall back to a bounded safe-method schema subset so read-only runs can still produce useful `GET`/`HEAD`/`OPTIONS` evidence.
+- Evidence-evaluator API replan feedback must be bounded before it reaches `tc_generator`: list the documented method/path scope, remove out-of-schema path mentions, and forbid auth-bypass probes or mutation methods blocked by `api_execution_policy`.
+- Model-generated API cases must be validated against `parsed_api_schema` before execution. Drop generated method/path pairs absent from the loaded OpenAPI schema unless `allow_out_of_schema_api_cases=true` was explicitly supplied. User-curated/suite cases may remain curated, but generated replans default to schema-only.
+- Unsupported generated assertions are agent diagnostics, not product defects. Keep status assertions aligned with documented success responses for positive cases; keep JSON-path/schema/body assertions blocking only when grounded in the response schema, otherwise downgrade them to advisory/non-blocking and record `agent_case_diagnostics`.
 - `API_MAX_EXECUTED_REQUESTS` bounds real outbound HTTP attempts for an API run. Policy/dependency/environment skips do not consume this budget. Bound request selection before execution and report omitted candidates through summary metadata (`candidate_total`, `selected_total`, `omitted`, `budget_skipped`, `request_selection`); do not append one `execution_budget_exhausted` result row for every omitted request.
 - If a write method (`POST`, `PUT`, `PATCH`, `DELETE`) returns HTTP 405, treat it as `skip_type="environment_not_executable"` instead of a product failure. Record the 405 evidence, then skip later requests for the same origin + method without sending more traffic.
 - AUTH negative probes that expect `401/403` still pass when HTTP status or JSON envelope status is unauthorized. If such a probe returns HTTP 2xx instead, record an advisory finding (`advisory=True`, `skip_type="auth_advisory"`) and exclude it from the main pass-rate failure count.
@@ -782,6 +786,9 @@ assert _after_ui_login({"login_instructions": "demo", "login_verified": False}) 
 - Auth-required endpoint + no credentials + positive assertion -> skip the positive assertion, do not report it as failed.
 - Auth-required endpoint + no credentials + expected unauthorized response -> execute and pass when HTTP status or JSON envelope status matches 401/403.
 - Swagger path prefix differs from reachable public prefix -> apply and record `api_path_prefix_rewrite`; do not send requests to the internal-only prefix.
+- Evidence evaluator suggests `/non_existent_endpoint` after documented endpoints pass -> replan feedback replaces that path with an out-of-scope marker and `tc_generator` may only regenerate documented cases.
+- Generated case targets `GET /missing` while the loaded OpenAPI has only `GET /get` and `GET /headers` -> drop the case, append `agent_case_diagnostics[].kind="out_of_scope_api_case"`, and do not execute an HTTP request.
+- Generated JSON-path assertion is not present in the response schema -> set `blocking=false`, mark it advisory, and do not allow it to set `failed` or `bug_found`.
 - JSON envelope returns `{"code": 401}` with HTTP 200 -> treat as unauthorized for matching and reporting.
 - Invalid-input negative case returns HTTP 200 with body `{"code": 500, "msg": "不能为空"}` -> pass the `PARAM_VALIDATION` rejection with `accepted_error_envelope=true` and warning metadata; do not create a blocking finding solely for the 5xx business code.
 - Large OpenAPI schema with more executable requests than `API_MAX_EXECUTED_REQUESTS` -> select up to the budget, execute selected requests, keep omitted requests out of `results`, and report `budget_exhausted=true`, `budget_skipped=<omitted count>`, `omitted=<omitted count>`, and `request_selection`.
@@ -797,7 +804,9 @@ assert _after_ui_login({"login_instructions": "demo", "login_verified": False}) 
 - Base: no credentials are provided; the report explains skipped auth-positive checks and recommends adding token/header or configuring login.
 - Base: a real environment blocks writes at the gateway with 405; the report explains the environment limitation and does not turn hundreds of write probes into business failures.
 - Base: an auth negative probe returns 200; the report keeps a warning/advisory finding without lowering the main pass rate.
+- Base: a passing two-endpoint public API smoke may trigger an LLM replan for deeper assertions, but the second pass still executes only documented endpoints and records invalid generated requests as agent diagnostics.
 - Bad: skipped write requests or auth-positive checks are counted as failed, producing a false `BUG_FOUND` run.
+- Bad: LLM replan text asks for `/non_existent_endpoint` or an auth-bypass probe, the generator creates it, the runner executes it, and the reporter marks the invented failure as a product bug.
 - Bad: a run has 10 curated `api_cases` but the runner ignores them and fans out 850 schema-derived requests.
 - Bad: budget exhaustion persists hundreds of `execution_budget_exhausted` result rows instead of focused result rows plus omitted metadata.
 - Bad: an AUTH negative "no token" case inherits `Authorization` from `auth_headers` or a generated template and tests the authenticated path.
@@ -812,6 +821,10 @@ assert _after_ui_login({"login_instructions": "demo", "login_verified": False}) 
 - Regression: reporter summaries include executed/skipped counts and keep skipped requests out of failed totals.
 - Regression: reporter turns `backend_validation_contract` API result failures into backend validation contract findings.
 - Regression: API runner prefers curated `api_cases` over `parsed_api_schema` when both are present.
+- Regression: evidence-evaluator API replan instructions remove out-of-schema path mentions and name only documented method/path scope.
+- Regression: generated API cases targeting undocumented paths are filtered before execution; no HTTP request is sent for the hallucinated path.
+- Regression: unsupported generated assertions are downgraded to advisory/non-blocking and appear in `agent_case_diagnostics`, not `bugs_found`.
+- Unit: LLM case/evaluator JSON parser handles fenced JSON, extra prose around JSON, near-JSON missing a comma between fields, and malformed partial output without crashing the node.
 - Regression: safe policies fall back to bounded safe schema-derived requests when curated cases are all write-only or otherwise not executable.
 - Regression: execution budget omits unselected or runtime-budget-exhausted requests from `results` and records `budget_exhausted=true`, `budget_skipped`, and `request_selection` metadata.
 - Regression: `PARAM_VALIDATION` accepts HTTP 2xx business error envelopes with `code/status >=400` or `success=false` plus a message, including warning metadata for `code >=500`.
@@ -857,6 +870,21 @@ if http_executed_count >= max_executed_requests:
 else:
     response = await client.request(...)
 api_execution_result["request_selection"] = selection
+```
+
+#### Wrong
+
+```python
+state["agent_replan_feedback"] = model_decision["replan_instructions"]
+state["api_cases"] = parsed_llm_cases
+```
+
+#### Correct
+
+```python
+state["agent_replan_feedback"] = sanitize_api_replan_instructions(model_decision, parsed_api_schema, policy)
+api_cases, diagnostics = validate_generated_api_cases(parsed_llm_cases, parsed_api_schema, policy)
+state["agent_case_diagnostics"] = diagnostics
 ```
 
 ## Scenario: Run Detail Triage Summary

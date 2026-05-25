@@ -129,9 +129,11 @@ RAG 上下文：{rag_context}
 2. UI 用例必须包含 playwright_commands，每行一个 playwright-cli 命令
 3. 如果输入类型是 swagger_url/swagger_json/swagger_yaml，只生成 API 用例，ui_cases 设为空数组
 4. 如果输入类型是 url，只生成 UI 用例，api_cases 设为空数组
-5. UI 用例应覆盖：页面加载、导航、表单交互、错误提示、响应式布局等场景
-6. 每种类型至少生成 5 个用例
-7. 输出纯 JSON，不要包含 Markdown 标记
+5. API 用例只能使用 API Schema 中已列出的 method + path；不要发明不存在的路径、路径探测、鉴权绕过或未在 schema 中出现的 endpoint
+6. 默认安全策略下不要生成 POST/PUT/PATCH/DELETE 执行用例；如需要更深断言，只能基于已记录的响应 schema，无法确认的断言应设为非阻塞 advisory
+7. UI 用例应覆盖：页面加载、导航、表单交互、错误提示、响应式布局等场景
+8. 每种类型至少生成 5 个用例
+9. 输出纯 JSON，不要包含 Markdown 标记
 """
 
 PLAYWRIGHT_CLI_AGENT_PROMPT = """你是 UI 自动化测试专家。根据以下测试用例，生成 playwright-cli 命令序列。
@@ -240,7 +242,8 @@ EVIDENCE_EVALUATOR_PROMPT = """你是 TestClaw 的测试执行质量评估智能
 3. 如果 UI 命令因为元素未找到、页面状态不匹配、快照证据不足而失败，并且仍有可用快照/页面上下文，应建议 replan_ui。
 4. 如果 API 用例没有产生可执行请求，但存在 schema、base URL 或可读端点线索，应建议 replan_api。
 5. 不要假设固定网站、固定接口、固定截图或固定业务菜单；只依据证据摘要和工具调用。
-6. 输出纯 JSON，不要包含 Markdown。
+6. API 重规划只能在已加载 OpenAPI schema 和执行策略范围内加深已记录 endpoint 的证据；不要建议不存在路径、schema 外路径、鉴权绕过测试或安全策略禁止的方法。
+7. 输出纯 JSON，不要包含 Markdown。
 """
 
 LOGIN_DETAILS_PROMPT = """你是测试前置说明理解器。用户提供的信息不一定是登录信息，也可能是测试范围、账号、环境说明、禁止操作、验证码、租户选择、语言选择或其他准备事项。

@@ -5,7 +5,8 @@ from types import SimpleNamespace
 import pytest
 from langchain_openai import OpenAIEmbeddings
 
-from app.agent.nodes import api_runner, execution_evaluator, knowledge_retriever, reporter
+from app.agent.json_utils import parse_llm_json
+from app.agent.nodes import api_runner, execution_evaluator, knowledge_retriever, reporter, tc_generator
 from app.agent.nodes.ui_runner import _build_ui_case_batches
 from app.agent.tool_registry import build_tool_registry, select_skills_for_state
 from app.core.llm_gateway import LLMGateway
@@ -135,6 +136,18 @@ def test_tool_registry_exposes_evidence_evaluation_tool() -> None:
 
     assert "planner.evaluate_execution_evidence" in tool_names
     assert "planner.evaluate_execution_evidence" in planning["tools"]
+
+
+def test_llm_json_parser_handles_fenced_extra_text_and_near_json() -> None:
+    fenced = "Here is the result:\n```json\n{\"api_cases\": [], \"ui_cases\": []}\n```\nDone"
+    extra = "prefix {\"next_action\": \"report\", \"diagnostics\": []} suffix"
+    near_json = "{\"api_cases\": [] \"ui_cases\": []}"
+    partial = "{\"api_cases\": ["
+
+    assert parse_llm_json(fenced, expected="object") == {"api_cases": [], "ui_cases": []}
+    assert parse_llm_json(extra, expected="object") == {"next_action": "report", "diagnostics": []}
+    assert parse_llm_json(near_json, expected="object") == {"api_cases": [], "ui_cases": []}
+    assert parse_llm_json(partial, expected="object") is None
 
 
 @pytest.mark.asyncio
@@ -369,6 +382,199 @@ async def test_execution_evaluator_uses_planner_model_when_available(monkeypatch
     assert state["agent_replan_feedback"] == "Generate commands from the latest snapshot refs."
     call = next(call for call in state["tool_calls"] if call["tool"] == "planner.evaluate_execution_evidence")
     assert call["output"]["source"] == "llm+guardrail"
+
+
+@pytest.mark.asyncio
+async def test_execution_evaluator_sanitizes_api_replan_scope(monkeypatch) -> None:
+    class FakeMessage:
+        content = json.dumps(
+            {
+                "sufficient_evidence": False,
+                "confidence": "high",
+                "next_action": "replan_api",
+                "reason": "Add body assertions and call /non_existent_endpoint.",
+                "diagnostics": ["Try /non_existent_endpoint"],
+                "missing_evidence": [],
+                "replan_instructions": "Add assertions on /get and negative probe /non_existent_endpoint.",
+            }
+        )
+
+    class FakePlanner:
+        async def ainvoke(self, _messages):
+            return FakeMessage()
+
+    async def fake_get_planner(_db):
+        return FakePlanner()
+
+    monkeypatch.setattr(execution_evaluator.llm_gateway, "get_planner", fake_get_planner)
+    monkeypatch.setattr(execution_evaluator.settings, "AGENT_MAX_REPLAN_ATTEMPTS", 2)
+
+    state = await execution_evaluator.run(
+        {
+            "db_session": object(),
+            "agent_execution_stage": "api",
+            "test_type": "api",
+            "input_type": "swagger_json",
+            "objective": "httpbin smoke",
+            "target_url": "https://httpbin.org",
+            "api_execution_policy": "safe_read_only",
+            "parsed_api_schema": [
+                {"method": "GET", "path": "/get", "response_status": "200"},
+                {"method": "GET", "path": "/headers", "response_status": "200"},
+            ],
+            "api_execution_result": {
+                "total": 2,
+                "executed": 2,
+                "passed": 2,
+                "failed": 0,
+                "skipped": 0,
+                "http_executed": 2,
+                "all_passed": True,
+                "complete": True,
+                "results": [
+                    {"method": "GET", "url": "https://httpbin.org/get", "passed": True},
+                    {"method": "GET", "url": "https://httpbin.org/headers", "passed": True},
+                ],
+            },
+            "workflow_steps": [],
+        }
+    )
+
+    feedback = state["agent_replan_feedback"]
+
+    assert state["agent_next_node"] == "tc_generator"
+    assert "GET /get" in feedback
+    assert "GET /headers" in feedback
+    assert "/non_existent_endpoint" not in feedback
+    assert "out-of-schema" in feedback
+
+
+@pytest.mark.asyncio
+async def test_generated_api_cases_are_bounded_to_openapi_scope_before_execution(monkeypatch) -> None:
+    class FakePlannerMessage:
+        content = """
+        ```json
+        {
+          "api_cases": [
+            {
+              "title": "documented get with unsupported assertion",
+              "endpoint": "/get",
+              "method": "GET",
+              "case_type": "api",
+              "category": "SMOKE",
+              "request_template": {"method": "GET", "path": "/get"},
+              "assertions": [
+                {"type": "status_code", "expected": 200},
+                {"type": "json_path", "path": "$.must_not_be_required", "expected": "not_null"}
+              ]
+            },
+            {
+              "title": "invented negative path",
+              "endpoint": "/non_existent_endpoint",
+              "method": "GET",
+              "case_type": "api",
+              "category": "ERROR_HANDLING",
+              "request_template": {"method": "GET", "path": "/non_existent_endpoint"},
+              "assertions": [{"type": "status_code", "expected": 404}]
+            },
+            {
+              "title": "documented headers",
+              "endpoint": "/headers",
+              "method": "GET",
+              "case_type": "api",
+              "category": "SMOKE",
+              "request_template": {"method": "GET", "path": "/headers"},
+              "assertions": [{"type": "status_code", "expected": 200}]
+            }
+          ],
+          "ui_cases": []
+        }
+        ```
+        """
+
+    class FakePlanner:
+        async def ainvoke(self, _messages):
+            return FakePlannerMessage()
+
+    class FakeDb:
+        def add(self, _obj) -> None:
+            return None
+
+        async def flush(self) -> None:
+            return None
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+            self.text = json.dumps(payload)
+            self.content = self.text.encode()
+
+        def json(self) -> dict:
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            assert "non_existent_endpoint" not in url
+            return FakeResponse({"url": url, "headers": {}})
+
+    async def fake_get_planner(_db):
+        return FakePlanner()
+
+    calls = []
+    monkeypatch.setattr(tc_generator.llm_gateway, "get_planner", fake_get_planner)
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    generated = await tc_generator.run(
+        {
+            "db_session": FakeDb(),
+            "test_type": "api",
+            "input_type": "swagger_json",
+            "objective": "httpbin smoke",
+            "target_url": "https://httpbin.org",
+            "api_execution_policy": "safe_read_only",
+            "parsed_api_schema": [
+                {"method": "GET", "path": "/get", "response_status": "200"},
+                {"method": "GET", "path": "/headers", "response_status": "200"},
+            ],
+            "api_plan": {"title": "API smoke"},
+            "workflow_steps": [],
+        }
+    )
+    executed = await api_runner.run(generated)
+    reported = await reporter.run(executed)
+
+    assert [call["url"] for call in calls] == [
+        "https://httpbin.org/get",
+        "https://httpbin.org/headers",
+    ]
+    assert len(generated["api_cases"]) == 2
+    assert generated["api_cases"][0]["assertions"][1]["blocking"] is False
+    assert any(
+        item["kind"] == "out_of_scope_api_case"
+        for item in generated["agent_case_diagnostics"]
+    )
+    assert any(
+        item["kind"] == "unsupported_api_assertion"
+        for item in generated["agent_case_diagnostics"]
+    )
+    assert executed["api_execution_result"]["failed"] == 0
+    assert reported["final_report"]["overall_verdict"] == "PASS"
+    assert reported["final_report"]["bugs_found"] == []
+    assert reported["final_report"]["agent_diagnostics"]["case_diagnostics"]
 
 
 @pytest.mark.asyncio

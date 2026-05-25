@@ -504,6 +504,7 @@ async def run(state: AgentState) -> AgentState:
             "evaluations": state.get("agent_evaluations", []),
             "attempt_history": state.get("agent_attempt_history", []),
             "replan_counts": state.get("agent_replan_counts", {}),
+            "case_diagnostics": state.get("agent_case_diagnostics", []),
         },
         "tool_summary": tool_summary,
         "skill_plan": state.get("skill_plan", []),

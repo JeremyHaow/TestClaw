@@ -7,6 +7,8 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
+from app.agent.api_scope import documented_api_scope_text
+from app.agent.json_utils import parse_llm_json_object
 from app.agent.progress import persist_progress
 from app.agent.prompts import EVIDENCE_EVALUATOR_PROMPT
 from app.agent.state import AgentState
@@ -47,18 +49,7 @@ def _compact_text(value: Any, limit: int = 600) -> str:
 
 
 def _parse_json_object(content: str) -> dict[str, Any]:
-    text = (content or "").strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    if not text.startswith("{"):
-        match = re.search(r"\{.*\}", text, flags=re.S)
-        if match:
-            text = match.group(0)
-    try:
-        parsed = json.loads(text)
-    except Exception:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    return parse_llm_json_object(content)
 
 
 def _stage_from_state(state: AgentState) -> str:
@@ -451,6 +442,52 @@ def _normalize_model_decision(
     }
 
 
+def _sanitize_api_replan_instructions(state: AgentState, value: Any) -> str:
+    raw = _compact_text(value, 500)
+    allowed_paths = {
+        str(endpoint.get("path") or "").strip().rstrip("/") or "/"
+        for endpoint in _safe_list(state.get("parsed_api_schema"))
+        if isinstance(endpoint, dict) and endpoint.get("path")
+    }
+    for path in set(re.findall(r"/[A-Za-z0-9_./{}:-]+", raw)):
+        normalized = path.rstrip("/") or "/"
+        if normalized not in allowed_paths:
+            raw = raw.replace(path, "[out-of-scope-path-removed]")
+    policy = str(state.get("api_execution_policy") or "safe_read_only").strip().lower()
+    scope = documented_api_scope_text(
+        _safe_list(state.get("parsed_api_schema")),
+        execution_policy=policy,
+    )
+    parts = [
+        scope,
+        (
+            "Regenerate only documented API cases. Do not add non-existent paths, "
+            "out-of-schema negative probes, auth-bypass tests, or mutation methods "
+            "blocked by the execution policy. Deeper assertions must be grounded in "
+            "the documented response schema or kept advisory/non-blocking."
+        ),
+    ]
+    if raw:
+        parts.append(f"Evaluator intent, bounded by this scope: {raw}")
+    return " ".join(parts)[:900]
+
+
+def _sanitize_replan_instructions(
+    state: AgentState,
+    stage: str,
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    action = decision.get("next_action")
+    if stage == "api" and action == _REPLAN_API:
+        sanitized = dict(decision)
+        sanitized["replan_instructions"] = _sanitize_api_replan_instructions(
+            state,
+            sanitized.get("replan_instructions") or sanitized.get("reason"),
+        )
+        return sanitized
+    return decision
+
+
 def _merge_decisions(
     *,
     guardrail: dict[str, Any],
@@ -469,7 +506,7 @@ def _merge_decisions(
                     *decision.get("diagnostics", []),
                     *model_decision["diagnostics"],
                 ]))
-        return decision
+        return _sanitize_replan_instructions(state, stage, decision)
 
     if guardrail.get("sufficient_evidence") is False:
         return guardrail
@@ -477,7 +514,7 @@ def _merge_decisions(
     if model_decision and model_decision["next_action"] in {_REPLAN_API, _REPLAN_UI}:
         target_stage = "api" if model_decision["next_action"] == _REPLAN_API else "ui"
         if target_stage == stage and _can_replan(state, stage):
-            return model_decision
+            return _sanitize_replan_instructions(state, stage, model_decision)
 
     if model_decision and model_decision["next_action"] == _CONTINUE_TO_UI and stage == "api":
         return model_decision

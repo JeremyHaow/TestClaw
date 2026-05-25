@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -61,3 +62,13 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+
+def _configure_optional_langchain_tracing() -> None:
+    if settings.LANGCHAIN_TRACING_V2 and not settings.LANGCHAIN_API_KEY.strip():
+        settings.LANGCHAIN_TRACING_V2 = False
+        os.environ["LANGCHAIN_TRACING_V2"] = "false"
+        os.environ["LANGSMITH_TRACING"] = "false"
+
+
+_configure_optional_langchain_tracing()

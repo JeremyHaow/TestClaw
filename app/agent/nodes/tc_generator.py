@@ -3,10 +3,13 @@ import logging
 
 from langchain_core.messages import HumanMessage
 
+from app.agent.api_scope import validate_generated_api_cases
 from app.agent.analysis.token_budget import apply_schema_budget
+from app.agent.json_utils import parse_llm_json
 from app.agent.progress import persist_progress
 from app.agent.prompts import CASE_GENERATOR_PROMPT
 from app.agent.state import AgentState
+from app.agent.tool_registry import record_tool_call
 from app.core.llm_gateway import llm_gateway
 
 logger = logging.getLogger(__name__)
@@ -292,9 +295,12 @@ async def run(state: AgentState) -> AgentState:
     replan_feedback = (state.get("agent_replan_feedback") or "").strip()
     base_url = (state.get("base_url_override") or state.get("target_url") or "").rstrip("/")
     db = state.get("db_session")
+    execution_policy = str(state.get("api_execution_policy") or "safe_read_only").strip().lower()
+    allow_out_of_schema = bool(state.get("allow_out_of_schema_api_cases"))
 
     api_cases = list(state.get("api_cases") or [])
     ui_cases = list(state.get("ui_cases") or [])
+    generated_api_cases = False
 
     if db and not (api_cases or ui_cases):
         try:
@@ -340,10 +346,9 @@ async def run(state: AgentState) -> AgentState:
             )
             resp = await llm.ainvoke([HumanMessage(content=prompt)])
             content = resp.content if hasattr(resp, "content") else str(resp)
-            text = content.strip()
-            if text.startswith("```"):
-                text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            parsed = json.loads(text)
+            parsed = parse_llm_json(str(content), expected="any")
+            if parsed is None:
+                raise ValueError("case generator response did not contain parseable JSON")
 
             if isinstance(parsed, dict):
                 api_cases = parsed.get("api_cases", parsed.get("api", []))
@@ -355,6 +360,7 @@ async def run(state: AgentState) -> AgentState:
                         ui_cases.append(item)
                     else:
                         api_cases.append(item)
+            generated_api_cases = True
         except Exception as e:
             logger.warning("Case generator LLM call failed: %s, using fallback", e)
 
@@ -362,8 +368,10 @@ async def run(state: AgentState) -> AgentState:
     if test_type != "ui":
         if not api_cases and parsed_api_schema:
             api_cases = _build_fallback_api_cases(parsed_api_schema, scene_hints, auth_info)
+            generated_api_cases = True
         elif not api_cases and (state.get("base_url_override") or test_type in {"api", "full"}):
             api_cases = _build_base_url_api_case(base_url)
+            generated_api_cases = True
 
     # Only generate UI fallback cases for URL input (not Swagger)
     if test_type != "api" and not ui_cases and input_type == "url":
@@ -374,6 +382,43 @@ async def run(state: AgentState) -> AgentState:
         api_cases = []
     elif test_type == "api":
         ui_cases = []
+
+    if generated_api_cases and api_cases:
+        validated_api_cases, diagnostics = validate_generated_api_cases(
+            api_cases,
+            parsed_api_schema,
+            execution_policy=execution_policy,
+            allow_out_of_schema=allow_out_of_schema,
+        )
+        if diagnostics:
+            state.setdefault("agent_case_diagnostics", []).extend(diagnostics)
+            record_tool_call(
+                state,
+                tool_name="planner.validate_api_cases",
+                layer="planner",
+                status="skipped" if not validated_api_cases else "success",
+                input_summary={
+                    "generated_api_cases": len(api_cases),
+                    "schema_endpoint_count": len(parsed_api_schema or []),
+                    "api_execution_policy": execution_policy,
+                },
+                output_summary={
+                    "accepted": len(validated_api_cases),
+                    "diagnostics": diagnostics[:8],
+                },
+            )
+        api_cases = validated_api_cases
+
+        if not api_cases and parsed_api_schema and test_type != "ui":
+            fallback_cases = _build_fallback_api_cases(parsed_api_schema, scene_hints, auth_info)
+            api_cases, fallback_diagnostics = validate_generated_api_cases(
+                fallback_cases,
+                parsed_api_schema,
+                execution_policy=execution_policy,
+                allow_out_of_schema=allow_out_of_schema,
+            )
+            if fallback_diagnostics:
+                state.setdefault("agent_case_diagnostics", []).extend(fallback_diagnostics)
 
     state["api_cases"] = api_cases
     state["ui_cases"] = ui_cases

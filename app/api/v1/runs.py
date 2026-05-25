@@ -113,6 +113,7 @@ class RunCreate(BaseModel):
     auth_config: AuthAcquireConfig | None = None  # optional login-to-token config
     auth_preflight_id: str | None = None
     api_execution_policy: str = "safe_read_only"  # safe_read_only, safe_with_auth, write_allowed
+    allow_out_of_schema_api_cases: bool = False
     setup_instructions: str = ""  # optional pre-test setup/context instructions
     login_instructions: str = ""  # deprecated alias kept for compatibility
 
@@ -129,6 +130,7 @@ class RunPreflightRequest(BaseModel):
     auth_credentials: AuthCredentials | None = None
     auth_config: AuthAcquireConfig | None = None
     api_execution_policy: str = "safe_read_only"
+    allow_out_of_schema_api_cases: bool = False
     setup_instructions: str = ""
 
 
@@ -4508,6 +4510,7 @@ def _rerun_context_from_task(task) -> dict[str, Any]:
         "login_instructions",
         "base_url_override",
         "api_execution_policy",
+        "allow_out_of_schema_api_cases",
         "api_path_prefix_rewrite",
         "ui_seed_url",
         "input_type",
@@ -4575,6 +4578,7 @@ async def _seed_intervention_execution_log(
         "ui_seed_url",
         "base_url_override",
         "api_execution_policy",
+        "allow_out_of_schema_api_cases",
         "api_path_prefix_rewrite",
         "setup_instructions",
         "login_instructions",
@@ -4720,6 +4724,7 @@ async def create_run(payload: RunCreate, db: DbSession, _: CurrentUser):
             auth_preflight=auth_preflight.model_dump(mode="json"),
             base_url_override=payload.base_url,
             api_execution_policy=api_execution_policy,
+            allow_out_of_schema_api_cases=payload.allow_out_of_schema_api_cases,
             setup_instructions=setup_instructions,
             login_instructions=setup_instructions,
         )
@@ -4742,6 +4747,7 @@ async def create_run(payload: RunCreate, db: DbSession, _: CurrentUser):
                 "auth_preflight": auth_preflight.model_dump(mode="json"),
                 "base_url_override": payload.base_url,
                 "api_execution_policy": api_execution_policy,
+                "allow_out_of_schema_api_cases": payload.allow_out_of_schema_api_cases,
                 "setup_instructions": setup_instructions,
                 "login_instructions": setup_instructions,
                 "retry_count": 0,
