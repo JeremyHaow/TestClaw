@@ -6,6 +6,7 @@ from langchain_core.messages import HumanMessage
 from app.agent.analysis.auth_chain import extract_auth_chain, get_auth_test_hints
 from app.agent.analysis.scene_detector import detect_scenes, summarize_scenes
 from app.agent.analysis.token_budget import apply_schema_budget
+from app.agent.api_scope import safe_schema_method_endpoints
 from app.agent.action_runtime import validate_and_record_agent_action_plan
 from app.agent.json_utils import parse_llm_json_object
 from app.agent.progress import persist_progress
@@ -20,6 +21,47 @@ from app.agent.tool_registry import install_tool_context, record_tool_call
 from app.core.llm_gateway import llm_gateway
 
 logger = logging.getLogger(__name__)
+
+
+def _schema_endpoint_summary(endpoint: dict) -> dict:
+    return {
+        "path": endpoint.get("path"),
+        "method": endpoint.get("method"),
+        "summary": endpoint.get("summary"),
+        "auth_required": endpoint.get("auth_required"),
+        "required_fields": endpoint.get("required_fields", []),
+    }
+
+
+def _api_schema_prompt_summary(
+    parsed_api_schema: list[dict] | None,
+    schema_for_prompt: list[dict] | None,
+) -> str:
+    if not parsed_api_schema:
+        return "No API schema available"
+
+    safe_endpoints = safe_schema_method_endpoints(parsed_api_schema)
+    write_endpoints = [
+        endpoint
+        for endpoint in parsed_api_schema
+        if str(endpoint.get("method") or "GET").upper() in {"POST", "PUT", "PATCH", "DELETE"}
+    ]
+    budgeted_examples = [
+        _schema_endpoint_summary(endpoint)
+        for endpoint in (schema_for_prompt or [])[:30]
+        if isinstance(endpoint, dict)
+    ]
+    payload = {
+        "endpoint_count": len(parsed_api_schema),
+        "safe_method_endpoint_count": len(safe_endpoints),
+        "write_method_endpoint_count": len(write_endpoints),
+        "safe_methods": ["GET", "HEAD", "OPTIONS"],
+        "safe_endpoint_examples": [
+            _schema_endpoint_summary(endpoint) for endpoint in safe_endpoints[:80]
+        ],
+        "budgeted_endpoint_examples": budgeted_examples,
+    }
+    return json.dumps(payload, ensure_ascii=False, default=str)
 
 
 def _auth_preflight_summary(value: object) -> dict:
@@ -66,23 +108,8 @@ async def run(state: AgentState) -> AgentState:
         # Apply token budget to schema
         schema_for_prompt = apply_schema_budget(parsed_api_schema)
 
-    # Build schema summary for prompt (with budget applied)
-    schema_summary = "No API schema available"
-    if schema_for_prompt:
-        schema_summary = json.dumps(
-            [
-                {
-                    "path": ep.get("path"),
-                    "method": ep.get("method"),
-                    "summary": ep.get("summary"),
-                    "auth_required": ep.get("auth_required"),
-                    "required_fields": ep.get("required_fields", []),
-                }
-                for ep in schema_for_prompt[:30]
-            ],
-            ensure_ascii=False,
-            default=str,
-        )
+    # Build schema summary for prompt (with budget applied plus explicit safe endpoint context)
+    schema_summary = _api_schema_prompt_summary(parsed_api_schema, schema_for_prompt)
 
     # Enrich schema summary with scene and auth info
     enrichment = ""

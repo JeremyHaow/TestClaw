@@ -2200,6 +2200,135 @@ def test_strategy_normalizer_blocks_write_and_out_of_schema_under_safe_policies(
     assert any(item["kind"] == "unknown_tool_name" for item in diagnostics)
 
 
+def test_strategy_normalizer_uses_schema_tool_scope_when_focused_scope_has_no_include() -> None:
+    decision = normalize_agent_strategy_decision(
+        {
+            "intent": "api_focused_endpoints",
+            "coverage_scope": "focused_documented_endpoints",
+            "method_policy": {"allowed_methods": ["GET"], "write_allowed": False},
+            "endpoint_selection": {
+                "source": "schema",
+                "include": [],
+                "budget_behavior": "cover_all_within_budget",
+            },
+            "tool_plan": [
+                {
+                    "tool_name": "api.derive_schema_requests",
+                    "inputs": {"scope": "all_documented_safe_methods"},
+                }
+            ],
+            "reason": "Derive documented safe methods.",
+        },
+        parsed_api_schema=[
+            {"method": "GET", "path": "/warehouse/list", "response_status": "200"},
+            {"method": "POST", "path": "/warehouse", "response_status": "200"},
+        ],
+        execution_policy="safe_read_only",
+        test_type="api",
+        source="llm",
+    )
+
+    assert decision["intent"] == "api_read_only_coverage"
+    assert decision["coverage_scope"] == "all_documented_safe_methods"
+    assert decision["endpoint_selection"]["include"] == [
+        {"method": "GET", "path": "/warehouse/list"}
+    ]
+    assert any(item["kind"] == "coverage_scope_tool_mismatch" for item in decision["diagnostics"])
+
+
+def test_strategy_normalizer_requires_live_observation_before_ui_blocked_report() -> None:
+    decision = normalize_agent_strategy_decision(
+        {
+            "intent": "blocked",
+            "coverage_scope": "none",
+            "tool_plan": [{"tool_name": "memory.retrieve_rag_context", "inputs": {}}],
+            "reason": "Historical memory suggests the page once failed.",
+        },
+        parsed_api_schema=None,
+        execution_policy="safe_read_only",
+        test_type="ui",
+        source="llm",
+    )
+
+    assert decision["intent"] == "ui_exploration"
+    assert decision["coverage_scope"] == "ui_paths"
+    assert any(item["kind"] == "ui_live_observation_required" for item in decision["diagnostics"])
+
+
+def test_planner_schema_summary_includes_safe_endpoint_examples() -> None:
+    summary = json.loads(
+        planner._api_schema_prompt_summary(
+            [
+                {"method": "POST", "path": "/warehouse", "summary": "新增仓库"},
+                {"method": "GET", "path": "/warehouse/list", "summary": "查询仓库列表"},
+            ],
+            [{"method": "POST", "path": "/warehouse", "summary": "新增仓库"}],
+        )
+    )
+
+    assert summary["endpoint_count"] == 2
+    assert summary["safe_method_endpoint_count"] == 1
+    assert summary["safe_endpoint_examples"] == [
+        {
+            "path": "/warehouse/list",
+            "method": "GET",
+            "summary": "查询仓库列表",
+            "auth_required": None,
+            "required_fields": [],
+        }
+    ]
+
+
+def test_execution_evaluator_suppresses_model_replan_after_reportable_schema_evidence() -> None:
+    state = {
+        "test_type": "api",
+        "parsed_api_schema": [{"method": "GET", "path": f"/items/{index}"} for index in range(12)],
+        "api_execution_result": {
+            "total": 12,
+            "executed": 12,
+            "http_executed": 12,
+            "passed": 10,
+            "failed": 2,
+            "complete": True,
+            "request_selection": {
+                "source": "parsed_api_schema",
+                "selected_total": 12,
+            },
+        },
+    }
+    guardrail = {
+        "sufficient_evidence": True,
+        "confidence": "medium",
+        "next_action": "report",
+        "reason": "API evidence is sufficient for this bounded pass.",
+        "diagnostics": [],
+        "missing_evidence": [],
+        "replan_instructions": "",
+        "source": "guardrail",
+    }
+    model_decision = {
+        "sufficient_evidence": False,
+        "confidence": "medium",
+        "next_action": "replan_api",
+        "reason": "Try more domain endpoints.",
+        "diagnostics": ["needs more domain endpoints"],
+        "missing_evidence": ["domain endpoints"],
+        "replan_instructions": "Regenerate domain cases.",
+        "source": "llm",
+    }
+
+    decision = execution_evaluator._merge_decisions(
+        guardrail=guardrail,
+        model_decision=model_decision,
+        state=state,
+        stage="api",
+    )
+
+    assert decision["next_action"] == "report"
+    assert "suppressed" in decision["reason"]
+    assert any("已停止继续重规划" in item for item in decision["diagnostics"])
+
+
 @pytest.mark.asyncio
 async def test_api_runner_uses_schema_safe_budget_for_all_get_objective(monkeypatch) -> None:
     calls = []

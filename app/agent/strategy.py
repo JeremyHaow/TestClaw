@@ -471,6 +471,21 @@ def _normalize_tool_plan(
     return steps
 
 
+def _requested_schema_tool_scope(raw: Any) -> str:
+    for item in _as_list(raw):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("tool_name") or "").strip() != "api.derive_schema_requests":
+            continue
+        inputs = item.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        scope = str(inputs.get("scope") or "").strip().lower()
+        if scope in KNOWN_COVERAGE_SCOPES:
+            return scope
+    return ""
+
+
 def normalize_agent_strategy_decision(
     raw: Any,
     *,
@@ -508,11 +523,43 @@ def normalize_agent_strategy_decision(
         diagnostics,
         "unknown_coverage_scope",
     )
+    requested_tool_scope = _requested_schema_tool_scope(raw.get("tool_plan"))
+    if (
+        coverage_scope in {"focused_documented_endpoints", "sampled_contract"}
+        and requested_tool_scope == "all_documented_safe_methods"
+    ):
+        diagnostics.append(
+            _diagnostic(
+                kind="coverage_scope_tool_mismatch",
+                detail=(
+                    "Model selected a focused/sample coverage scope but requested "
+                    "api.derive_schema_requests with all_documented_safe_methods; "
+                    "the executable tool scope is used."
+                ),
+                action="normalized",
+            )
+        )
+        coverage_scope = "all_documented_safe_methods"
+        if intent in {"api_focused_endpoints", "api_contract"}:
+            intent = "api_read_only_coverage"
     if test_mode == "ui" and coverage_scope not in {"ui_paths", "none"}:
         diagnostics.append(
             _diagnostic(
                 kind="strategy_mode_mismatch",
                 detail="API coverage scope was removed because this is a UI-only run.",
+                action="normalized",
+            )
+        )
+        coverage_scope = "ui_paths"
+        intent = "ui_exploration"
+    elif test_mode == "ui" and intent == "blocked" and coverage_scope == "none":
+        diagnostics.append(
+            _diagnostic(
+                kind="ui_live_observation_required",
+                detail=(
+                    "UI run was marked blocked from planning context only; live browser "
+                    "observation is still required before reporting a blocker."
+                ),
                 action="normalized",
             )
         )

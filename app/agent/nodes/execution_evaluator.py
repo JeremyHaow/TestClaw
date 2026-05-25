@@ -291,6 +291,22 @@ def _api_has_completed_strategy_coverage(state: AgentState, summary: dict[str, A
     return api["total"] > 0 and bool(selection.get("strategy_coverage_completed", True))
 
 
+def _api_has_reportable_schema_evidence(state: AgentState, summary: dict[str, Any]) -> bool:
+    api = summary["api"]
+    selection = api.get("request_selection") or {}
+    source = selection.get("source")
+    if source not in {
+        ALL_SAFE_GET_COVERAGE_SOURCE,
+        STRATEGY_SCHEMA_SOURCE,
+        "parsed_api_schema",
+        "safe_schema_fallback",
+    }:
+        return False
+    safe_count = max(api.get("safe_schema_endpoint_count") or 0, 1)
+    minimum = min(10, safe_count)
+    return api["total"] > 0 and api["http_executed"] >= minimum
+
+
 def _ui_needs_replan(state: AgentState, summary: dict[str, Any]) -> tuple[bool, str, list[str]]:
     ui = summary["ui"]
     if not ui["requested"]:
@@ -556,11 +572,22 @@ def _merge_decisions(
         return guardrail
 
     if model_decision and model_decision["next_action"] in {_REPLAN_API, _REPLAN_UI}:
-        if stage == "api" and _api_has_completed_strategy_coverage(
-            state,
-            _evidence_summary(state, stage),
+        summary = _evidence_summary(state, stage)
+        if stage == "api" and (
+            _api_has_completed_strategy_coverage(state, summary)
+            or _api_has_reportable_schema_evidence(state, summary)
         ):
-            return guardrail
+            decision = dict(guardrail)
+            decision["source"] = "guardrail"
+            decision["reason"] = (
+                "API stage already has reportable schema execution evidence; "
+                "model-requested replan was suppressed to avoid repeated shallow replanning."
+            )
+            decision["diagnostics"] = list(dict.fromkeys([
+                *decision.get("diagnostics", []),
+                "模型建议重规划，但本轮已经有可报告的 schema 执行证据，已停止继续重规划。",
+            ]))
+            return decision
         target_stage = "api" if model_decision["next_action"] == _REPLAN_API else "ui"
         if target_stage == stage and _can_replan(state, stage):
             return _sanitize_replan_instructions(state, stage, model_decision)
