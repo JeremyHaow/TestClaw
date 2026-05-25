@@ -262,6 +262,7 @@ AUTOMATION_SKILLS: tuple[AutomationSkill, ...] = (
         tools=[
             "planner.parse_requirement",
             "planner.generate_execution_plan",
+            "planner.select_agent_strategy",
             "planner.generate_test_cases",
             "planner.analyze_ui_execution_context",
             "planner.evaluate_execution_evidence",
@@ -279,7 +280,14 @@ AUTOMATION_SKILLS: tuple[AutomationSkill, ...] = (
         layer="api",
         description="Run traditional API automation: request construction, response assertions, schema checks, and safe write gating.",
         triggers=["api", "full", "auto with OpenAPI", "selected API cases"],
-        tools=["api.safe_write_gate", "api.http_request", "api.status_assert", "api.json_path_assert", "api.schema_assert"],
+        tools=[
+            "api.safe_write_gate",
+            "api.derive_schema_requests",
+            "api.http_request",
+            "api.status_assert",
+            "api.json_path_assert",
+            "api.schema_assert",
+        ],
     ),
     AutomationSkill(
         name="api-mock-data-generation",

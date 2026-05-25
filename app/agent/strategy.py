@@ -394,6 +394,7 @@ def _normalize_tool_plan(
     diagnostics: list[StrategyDiagnostic],
 ) -> list[ToolPlanStep]:
     steps: list[ToolPlanStep] = []
+    has_schema_request_step = False
     for item in _as_list(raw):
         if not isinstance(item, dict):
             diagnostics.append(
@@ -409,12 +410,15 @@ def _normalize_tool_plan(
             diagnostics.append(
                 _diagnostic(
                     kind="unknown_tool_name",
-                    detail=f"Unknown tool '{tool_name}' was removed from the tool plan.",
-                    action="dropped",
+                    detail=f"Unknown tool '{tool_name}' will be blocked by the action runtime.",
+                    action="blocked",
                     tool_name=tool_name or None,
                 )
             )
-            continue
+            if not tool_name:
+                continue
+        elif tool_name == "api.derive_schema_requests":
+            has_schema_request_step = True
         inputs = item.get("inputs")
         constraints = [
             _text(value, limit=120)
@@ -431,12 +435,12 @@ def _normalize_tool_plan(
             )
         )
 
-    if not steps:
-        if coverage_scope in {
-            "all_documented_safe_methods",
-            "focused_documented_endpoints",
-            "sampled_contract",
-        }:
+    if coverage_scope in {
+        "all_documented_safe_methods",
+        "focused_documented_endpoints",
+        "sampled_contract",
+    }:
+        if not has_schema_request_step:
             steps.append(
                 ToolPlanStep(
                     tool_name="api.derive_schema_requests",
@@ -445,7 +449,8 @@ def _normalize_tool_plan(
                     expected_observation="selected request count, skipped count, and guardrail diagnostics",
                 )
             )
-        elif coverage_scope == "ui_paths":
+    elif not steps:
+        if coverage_scope == "ui_paths":
             steps.append(
                 ToolPlanStep(
                     tool_name="ui.playwright_cli",

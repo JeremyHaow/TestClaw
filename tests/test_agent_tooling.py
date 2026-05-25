@@ -59,6 +59,7 @@ def test_tool_registry_selects_api_ui_and_reporting_skills() -> None:
 
     skill_names = {skill["name"] for skill in skills}
     tool_names = {tool["name"] for tool in registry["tools"]}
+    tools_by_skill = {skill["name"]: set(skill["tools"]) for skill in registry["skills"]}
 
     assert {
         "agent-supervision",
@@ -75,6 +76,8 @@ def test_tool_registry_selects_api_ui_and_reporting_skills() -> None:
         "ui.playwright_cli",
         "ui.smart_wait",
     } <= tool_names
+    assert "planner.select_agent_strategy" in tools_by_skill["test-planning"]
+    assert "api.derive_schema_requests" in tools_by_skill["api-contract-testing"]
 
 
 def test_mock_json_body_generation_uses_schema_and_faker_values() -> None:
@@ -2083,6 +2086,13 @@ async def test_model_strategy_guardrail_drops_write_and_out_of_schema_endpoints(
     assert any(item["kind"] == "method_blocked_by_policy" for item in diagnostics)
     assert any(item["kind"] == "out_of_schema_endpoint" for item in diagnostics)
     assert any(item["kind"] == "unknown_tool_name" for item in diagnostics)
+    action_by_tool = {action["tool_name"]: action for action in result["agent_actions"]}
+    assert action_by_tool["api.unknown_tool"]["allowed"] is False
+    assert any(
+        item["kind"] == "unknown_tool_name"
+        for item in action_by_tool["api.unknown_tool"]["diagnostics"]
+    )
+    assert action_by_tool["api.derive_schema_requests"]["allowed"] is True
     assert all(call["method"] == "GET" for call in calls)
 
 
@@ -2128,7 +2138,11 @@ def test_strategy_normalizer_blocks_write_and_out_of_schema_under_safe_policies(
     assert decision["method_policy"]["write_allowed"] is False
     assert decision["method_policy"]["allowed_methods"] == ["GET"]
     assert decision["endpoint_selection"]["include"] == [{"method": "GET", "path": "/health"}]
-    assert [step["tool_name"] for step in decision["tool_plan"]] == ["api.http_request"]
+    assert [step["tool_name"] for step in decision["tool_plan"]] == [
+        "api.http_request",
+        "api.missing_tool",
+        "api.derive_schema_requests",
+    ]
     diagnostics = decision["diagnostics"]
     assert any(item["kind"] == "write_policy_overridden" for item in diagnostics)
     assert any(item["kind"] == "method_blocked_by_policy" and item["method"] == "POST" for item in diagnostics)
