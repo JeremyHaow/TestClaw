@@ -69,6 +69,8 @@ TOOL_CAPABILITIES: tuple[ToolCapability, ...] = (
         output_schema={
             "agent_strategy_decision": "object",
             "agent_tool_plan": "array",
+            "agent_actions": "array",
+            "agent_action_observations": "array",
             "agent_strategy_diagnostics": "array",
         },
     ),
@@ -312,10 +314,18 @@ AUTOMATION_SKILLS: tuple[AutomationSkill, ...] = (
 
 def build_tool_registry() -> dict[str, Any]:
     return {
-        "version": "2026-05-20",
+        "version": "2026-05-25",
         "tools": [asdict(tool) for tool in TOOL_CAPABILITIES],
         "skills": [asdict(skill) for skill in AUTOMATION_SKILLS],
     }
+
+
+def tool_capabilities_by_name() -> dict[str, dict[str, Any]]:
+    return {tool.name: asdict(tool) for tool in TOOL_CAPABILITIES}
+
+
+def allowed_tool_names() -> set[str]:
+    return set(tool_capabilities_by_name())
 
 
 def select_skills_for_state(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -445,6 +455,8 @@ def _observation_from_call(call: dict[str, Any]) -> str:
             "source_count",
             "subgoal_count",
             "accepted",
+            "selected_total",
+            "candidate_total",
         ):
             if key in output and output.get(key) not in (None, ""):
                 return f"{status}; {key}={output.get(key)}"

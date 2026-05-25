@@ -53,6 +53,9 @@ class AgentState(TypedDict, total=False):
     agent_roster: list[dict] | None  # active multi-agent roles for this mission
     agent_delegation_trace: list[dict] | None  # supervisor-to-role task delegation records
     agent_react_trace: list[dict] | None  # visible reason/action/observation trace
+    agent_actions: list[dict] | None  # validated model-selected AgentAction records
+    agent_action_observations: list[dict] | None  # validator/runtime observations for actions
+    agent_action_diagnostics: list[dict] | None  # guardrail diagnostics from action validation
     evidence_evaluation: dict | None  # latest agent quality gate decision
     agent_evaluations: list[dict] | None  # bounded evaluation/replan history
     agent_attempt_history: list[dict] | None  # compact summaries of replaced attempts

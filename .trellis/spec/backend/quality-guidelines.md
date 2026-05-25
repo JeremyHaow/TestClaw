@@ -220,6 +220,14 @@ except Exception:
   state["agent_strategy_decision"]: dict
   state["agent_tool_plan"]: list[dict]
   state["agent_strategy_diagnostics"]: list[dict]
+  state["agent_actions"]: list[dict]
+  state["agent_action_observations"]: list[dict]
+  state["agent_action_diagnostics"]: list[dict]
+  ```
+- Action runtime:
+  ```python
+  validate_agent_action_plan(tool_plan, parsed_api_schema, execution_policy) -> list[dict]
+  validate_and_record_agent_action_plan(state, stage, strategy, parsed_api_schema, execution_policy) -> list[dict]
   ```
 - Normalizer:
   ```python
@@ -244,7 +252,7 @@ except Exception:
 
 - Planner prompts must require strict JSON only; no Markdown, hidden chain-of-thought, invented paths, or prose tool instructions.
 - The model may choose strategy, coverage scope, endpoint include/exclude lists, and tool plan. It may not grant itself write permission, invent schema paths, or introduce unknown tools.
-- Local normalizers must convert invalid model output into `agent_strategy_diagnostics`; invalid paths/methods/tools are dropped, not executed.
+- Local normalizers must convert invalid model output into `agent_strategy_diagnostics`; the action runtime must then convert `tool_plan` steps into validated `agent_actions`, enrich them with registry risk/policy metadata, record `agent_action_observations`, and block invalid paths/methods/tools before execution.
 - Under `safe_read_only` and `safe_with_auth`, POST/PUT/PATCH/DELETE remain blocked even if the model sets `write_allowed=true`.
 - Schema-backed API execution must execute only documented method+path pairs selected by the validated strategy or derived from documented safe methods.
 - `objective_requests_all_safe_get_coverage(...)` is a fallback only when the planner strategy is missing/unavailable, not the primary strategy mechanism.
@@ -256,12 +264,14 @@ except Exception:
 - LLM requests unknown `intent`, `coverage_scope`, `tool_name`, endpoint source, or budget behavior -> normalize to a safe default and record a diagnostic.
 - LLM includes POST/PUT/PATCH/DELETE under read-only policy -> drop endpoint, force `write_allowed=false`, record `method_blocked_by_policy`.
 - LLM includes schema-missing method/path -> drop endpoint, record `out_of_schema_endpoint`.
+- LLM emits an unknown tool action -> action is `allowed=false`, records `unknown_tool_name`, and is not executed.
 - Valid focused/sample strategy with no surviving include endpoints -> no schema-wide fallback execution; record missing selection and let evaluator/report surface the blocker.
 
 ### 5. Good/Base/Bad Cases
 
 - Good: model selects `all_documented_safe_methods`; runner derives GET/HEAD/OPTIONS from OpenAPI and records budget omissions.
 - Good: model selects `focused_documented_endpoints`; runner executes only validated include paths and does not force full schema coverage.
+- Good: `agent_react_trace` shows concise action reason, selected tool, validated inputs, and observation/diagnostic without storing hidden chain-of-thought.
 - Base: model unavailable and objective explicitly asks for all GET requests; fallback derives documented safe method coverage.
 - Bad: adding a UI option or keyword branch for "all GET coverage" instead of relying on the strategy contract.
 - Bad: treating model-selected POST as safe because it appeared in `method_policy.allowed_methods`.
@@ -272,6 +282,7 @@ except Exception:
 - Unit/integration: focused/sample strategy executes only validated included endpoints.
 - Regression: unavailable LLM still handles explicit "test all GET requests" fallback.
 - Regression: read-only policy drops model-selected write methods and out-of-schema paths.
+- Regression: generic `AgentAction` validation blocks unknown tools, unsafe methods, and out-of-schema paths while preserving redacted observations.
 - Regression: evaluator reports completed model strategy scope instead of repeated replanning.
 
 ### 7. Wrong vs Correct

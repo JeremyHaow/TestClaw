@@ -15,6 +15,7 @@ from app.agent.api_scope import (
     objective_requests_all_safe_get_coverage,
     safe_schema_method_endpoints,
 )
+from app.agent.tool_registry import allowed_tool_names
 
 AGENT_STRATEGY_SCHEMA_VERSION = "2026-05-25"
 STRATEGY_SCHEMA_SOURCE = "agent_strategy_schema"
@@ -48,23 +49,7 @@ KNOWN_BUDGET_BEHAVIORS = {
     "focused_only",
 }
 KNOWN_CONFIDENCE = {"low", "medium", "high"}
-KNOWN_TOOL_NAMES = {
-    "memory.retrieve_rag_context",
-    "planner.generate_execution_plan",
-    "planner.select_agent_strategy",
-    "planner.generate_test_cases",
-    "planner.evaluate_execution_evidence",
-    "api.derive_schema_requests",
-    "api.safe_write_gate",
-    "api.http_request",
-    "api.status_assert",
-    "api.json_path_assert",
-    "api.schema_assert",
-    "ui.playwright_cli",
-    "ui.smart_wait",
-    "ui.snapshot_assert",
-    "reporter.failure_analysis",
-}
+KNOWN_TOOL_NAMES = allowed_tool_names()
 
 
 class StrategyDiagnostic(BaseModel):
@@ -110,6 +95,7 @@ class ToolPlanStep(BaseModel):
     inputs: dict[str, Any] = Field(default_factory=dict)
     safety_constraints: list[str] = Field(default_factory=list)
     expected_observation: str = ""
+    reason: str = ""
 
 
 class AgentStrategyDecision(BaseModel):
@@ -441,6 +427,7 @@ def _normalize_tool_plan(
                 inputs=inputs if isinstance(inputs, dict) else {},
                 safety_constraints=constraints,
                 expected_observation=_text(item.get("expected_observation"), limit=240),
+                reason=_text(item.get("reason"), limit=360),
             )
         )
 

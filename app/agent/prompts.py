@@ -156,7 +156,8 @@ RAG/记忆摘要：{rag_context}
       "tool_name": "api.derive_schema_requests",
       "inputs": {{"scope": "all_documented_safe_methods"}},
       "safety_constraints": ["schema_only", "safe_methods_only"],
-      "expected_observation": "selected request count and skipped count"
+      "expected_observation": "selected request count and skipped count",
+      "reason": "Short observable reason for selecting this tool action."
     }}
   ],
   "case_generation_guidance": "Generate assertions only from documented response schemas; keep uncertain checks advisory.",

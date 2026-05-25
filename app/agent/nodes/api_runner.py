@@ -15,6 +15,11 @@ from app.agent.api_scope import (
     sanitize_api_case_assertions,
     validate_generated_api_cases,
 )
+from app.agent.action_runtime import (
+    find_agent_action,
+    record_agent_action_observation,
+    validate_and_record_agent_action_plan,
+)
 from app.agent.progress import persist_progress
 from app.agent.state import AgentState
 from app.agent.strategy import (
@@ -1510,6 +1515,16 @@ async def run(state: AgentState) -> AgentState:
     state["agent_strategy_decision"] = strategy
     state["agent_tool_plan"] = strategy.get("tool_plan", [])
     state["agent_strategy_diagnostics"] = strategy.get("diagnostics", [])
+    if state.get("agent_actions"):
+        agent_actions = state.get("agent_actions") or []
+    else:
+        agent_actions = validate_and_record_agent_action_plan(
+            state,
+            stage="api_runner",
+            strategy=strategy,
+            parsed_api_schema=api_schema,
+            execution_policy=execution_policy,
+        )
     safe_schema_endpoints = safe_schema_method_endpoints(api_schema)
     selected_strategy_endpoints = strategy_selected_schema_endpoints(strategy, api_schema)
     all_safe_get_coverage_requested = strategy_requests_all_safe_coverage(strategy)
@@ -1661,6 +1676,25 @@ async def run(state: AgentState) -> AgentState:
         )
         request_selection.update(coverage_metadata)
     state["api_request_selection"] = request_selection
+    derive_action = find_agent_action(agent_actions, "api.derive_schema_requests")
+    if derive_action and selection_source in {ALL_SAFE_GET_COVERAGE_SOURCE, STRATEGY_SCHEMA_SOURCE}:
+        record_agent_action_observation(
+            state,
+            derive_action,
+            stage="api_runner",
+            status="success" if derive_action.get("allowed") else "blocked",
+            output_summary={
+                "source": selection_source,
+                "candidate_total": request_selection.get("candidate_total"),
+                "selected_total": request_selection.get("selected_total"),
+                "omitted": request_selection.get("omitted"),
+                "coverage_scope": request_selection.get("coverage_scope")
+                or strategy.get("coverage_scope"),
+                "strategy_coverage_completed": request_selection.get(
+                    "strategy_coverage_completed"
+                ),
+            },
+        )
     total_requests = len(test_requests)
     state["tool_summary"] = None
     artifacts = state.get("artifacts") or {}

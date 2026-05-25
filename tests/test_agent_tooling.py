@@ -16,6 +16,10 @@ from app.agent.nodes import (
     tc_generator,
 )
 from app.agent.nodes.ui_runner import _build_ui_case_batches
+from app.agent.action_runtime import (
+    validate_agent_action_plan,
+    validate_and_record_agent_action_plan,
+)
 from app.agent.progress import build_execution_log_payload, determine_final_status
 from app.agent.strategy import normalize_agent_strategy_decision
 from app.agent.tool_registry import build_tool_registry, select_skills_for_state
@@ -160,6 +164,77 @@ def test_tool_registry_exposes_evidence_evaluation_tool() -> None:
 
     assert "planner.evaluate_execution_evidence" in tool_names
     assert "planner.evaluate_execution_evidence" in planning["tools"]
+
+
+def test_agent_action_runtime_validates_and_records_model_tool_action() -> None:
+    state = {}
+    strategy = {
+        "intent": "api_focused_endpoints",
+        "coverage_scope": "focused_documented_endpoints",
+        "method_policy": {"allowed_methods": ["GET"], "write_allowed": False},
+        "endpoint_selection": {
+            "source": "model_focus",
+            "include": [{"method": "get", "path": "health"}],
+            "budget_behavior": "focused_only",
+        },
+        "tool_plan": [
+            {
+                "tool_name": "api.derive_schema_requests",
+                "inputs": {},
+                "safety_constraints": ["schema_only"],
+                "expected_observation": "request selection",
+                "reason": "The objective targets the documented health read.",
+            }
+        ],
+        "reason": "The objective targets one documented read-only endpoint.",
+        "source": "llm",
+    }
+
+    actions = validate_and_record_agent_action_plan(
+        state,
+        stage="planner",
+        strategy=strategy,
+        parsed_api_schema=[{"method": "GET", "path": "/health"}],
+        execution_policy="safe_read_only",
+    )
+
+    assert actions[0]["allowed"] is True
+    assert actions[0]["risk"] == "safety_gate"
+    assert actions[0]["inputs"]["scope"] == "focused_documented_endpoints"
+    assert actions[0]["inputs"]["include"] == [{"method": "GET", "path": "/health"}]
+    assert state["agent_action_observations"][0]["status"] == "validated"
+    assert state["agent_react_trace"][-1]["tool"] == "api.derive_schema_requests"
+    assert state["agent_react_trace"][-1]["reason"]
+
+
+def test_agent_action_runtime_blocks_invalid_tool_method_and_path() -> None:
+    actions = validate_agent_action_plan(
+        [
+            {"tool_name": "api.missing_tool", "inputs": {}},
+            {
+                "tool_name": "api.http_request",
+                "inputs": {"method": "POST", "path": "/items"},
+            },
+            {
+                "tool_name": "api.http_request",
+                "inputs": {"method": "GET", "path": "/ghost"},
+            },
+        ],
+        parsed_api_schema=[{"method": "GET", "path": "/health"}],
+        execution_policy="safe_read_only",
+    )
+
+    assert all(action["allowed"] is False for action in actions)
+    diagnostics = [item for action in actions for item in action["diagnostics"]]
+    assert any(item["kind"] == "unknown_tool_name" for item in diagnostics)
+    assert any(
+        item["kind"] == "method_blocked_by_policy" and item["method"] == "POST"
+        for item in diagnostics
+    )
+    assert any(
+        item["kind"] == "out_of_schema_endpoint" and item["path"] == "/ghost"
+        for item in diagnostics
+    )
 
 
 @pytest.mark.asyncio
@@ -1772,6 +1847,19 @@ async def test_model_strategy_all_documented_safe_methods_drives_schema_coverage
     assert selection["coverage_scope"] == "all_documented_safe_methods"
     assert selection["strategy_source"] == "llm"
     assert selection["safe_endpoint_total"] == 2
+    observations = result["agent_action_observations"]
+    assert any(
+        observation["tool_name"] == "api.derive_schema_requests"
+        and observation["stage"] == "api_runner"
+        and observation["status"] == "success"
+        and observation["output"]["selected_total"] == 2
+        for observation in observations
+    )
+    assert any(
+        trace["tool"] == "api.derive_schema_requests"
+        and trace["observation"].startswith("success; selected_total=2")
+        for trace in result["agent_react_trace"]
+    )
 
 
 @pytest.mark.asyncio

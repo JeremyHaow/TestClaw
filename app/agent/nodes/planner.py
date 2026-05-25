@@ -6,6 +6,7 @@ from langchain_core.messages import HumanMessage
 from app.agent.analysis.auth_chain import extract_auth_chain, get_auth_test_hints
 from app.agent.analysis.scene_detector import detect_scenes, summarize_scenes
 from app.agent.analysis.token_budget import apply_schema_budget
+from app.agent.action_runtime import validate_and_record_agent_action_plan
 from app.agent.json_utils import parse_llm_json_object
 from app.agent.progress import persist_progress
 from app.agent.prompts import PLANNER_PROMPT, STRATEGY_PLANNER_PROMPT
@@ -320,6 +321,13 @@ async def run(state: AgentState) -> AgentState:
     state["agent_strategy_decision"] = strategy_decision
     state["agent_tool_plan"] = strategy_decision.get("tool_plan", [])
     state["agent_strategy_diagnostics"] = strategy_decision.get("diagnostics", [])
+    validate_and_record_agent_action_plan(
+        state,
+        stage="planner",
+        strategy=strategy_decision,
+        parsed_api_schema=parsed_api_schema,
+        execution_policy=str(state.get("api_execution_policy") or "safe_read_only"),
+    )
 
     # Legacy combined plan for backward compat
     combined_plan = []
