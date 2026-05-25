@@ -11,12 +11,12 @@ from app.agent.api_scope import (
     ALL_SAFE_GET_COVERAGE_GOAL,
     ALL_SAFE_GET_COVERAGE_SOURCE,
     documented_api_scope_text,
-    objective_requests_all_safe_get_coverage,
 )
 from app.agent.json_utils import parse_llm_json_object
 from app.agent.progress import persist_progress
 from app.agent.prompts import EVIDENCE_EVALUATOR_PROMPT
 from app.agent.state import AgentState
+from app.agent.strategy import STRATEGY_SCHEMA_SOURCE, strategy_summary
 from app.agent.tool_registry import install_tool_context, record_tool_call
 from app.config import settings
 from app.core.llm_gateway import llm_gateway
@@ -214,6 +214,7 @@ def _evidence_summary(state: AgentState, stage: str) -> dict[str, Any]:
                 "api_cases": len(_safe_list(state.get("api_cases"))),
                 "ui_cases": len(_safe_list(state.get("ui_cases"))),
             },
+            "agent_strategy": strategy_summary(state.get("agent_strategy_decision")),
             "replan_counts": state.get("agent_replan_counts") or {},
             "last_error": _compact_text(state.get("last_error"), 300),
         }
@@ -244,8 +245,8 @@ def _api_needs_replan(state: AgentState, summary: dict[str, Any]) -> tuple[bool,
     api = summary["api"]
     if not api["requested"]:
         return False, "API stage is not requested for this run.", []
-    if _api_has_schema_driven_all_safe_coverage(state, summary):
-        return False, "Schema-driven all-safe-GET coverage was selected for the requested scope.", []
+    if _api_has_completed_strategy_coverage(state, summary):
+        return False, "Validated agent strategy coverage reached a reportable stopping point.", []
     if api["total"] == 0:
         if state.get("parsed_api_schema") or state.get("api_cases") or state.get("base_url_override"):
             return True, "API stage produced no executable request candidates.", [
@@ -273,11 +274,21 @@ def _api_has_schema_driven_all_safe_coverage(state: AgentState, summary: dict[st
     selection = api.get("request_selection") or {}
     if selection.get("source") == ALL_SAFE_GET_COVERAGE_SOURCE:
         return api["total"] > 0 and selection.get("coverage_goal") == ALL_SAFE_GET_COVERAGE_GOAL
-    return (
-        objective_requests_all_safe_get_coverage(state.get("objective"))
-        and selection.get("coverage_goal") == ALL_SAFE_GET_COVERAGE_GOAL
-        and api["total"] > 0
-    )
+    return False
+
+
+def _api_has_completed_strategy_coverage(state: AgentState, summary: dict[str, Any]) -> bool:
+    api = summary["api"]
+    selection = api.get("request_selection") or {}
+    strategy = state.get("agent_strategy_decision") or {}
+    coverage_scope = selection.get("coverage_scope") or strategy.get("coverage_scope")
+    if _api_has_schema_driven_all_safe_coverage(state, summary):
+        return True
+    if selection.get("source") != STRATEGY_SCHEMA_SOURCE:
+        return False
+    if coverage_scope not in {"focused_documented_endpoints", "sampled_contract"}:
+        return False
+    return api["total"] > 0 and bool(selection.get("strategy_coverage_completed", True))
 
 
 def _ui_needs_replan(state: AgentState, summary: dict[str, Any]) -> tuple[bool, str, list[str]]:
@@ -545,7 +556,7 @@ def _merge_decisions(
         return guardrail
 
     if model_decision and model_decision["next_action"] in {_REPLAN_API, _REPLAN_UI}:
-        if stage == "api" and _api_has_schema_driven_all_safe_coverage(
+        if stage == "api" and _api_has_completed_strategy_coverage(
             state,
             _evidence_summary(state, stage),
         ):

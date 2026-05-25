@@ -6,13 +6,31 @@ from langchain_core.messages import HumanMessage
 from app.agent.analysis.auth_chain import extract_auth_chain, get_auth_test_hints
 from app.agent.analysis.scene_detector import detect_scenes, summarize_scenes
 from app.agent.analysis.token_budget import apply_schema_budget
+from app.agent.json_utils import parse_llm_json_object
 from app.agent.progress import persist_progress
-from app.agent.prompts import PLANNER_PROMPT
+from app.agent.prompts import PLANNER_PROMPT, STRATEGY_PLANNER_PROMPT
 from app.agent.state import AgentState
+from app.agent.strategy import (
+    fallback_agent_strategy_decision,
+    normalize_agent_strategy_decision,
+    strategy_summary,
+)
 from app.agent.tool_registry import install_tool_context, record_tool_call
 from app.core.llm_gateway import llm_gateway
 
 logger = logging.getLogger(__name__)
+
+
+def _auth_preflight_summary(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "status": value.get("status"),
+        "strategy": value.get("strategy"),
+        "can_start": value.get("can_start"),
+        "missing_fields": value.get("missing_fields") or [],
+        "protected_validation_count": value.get("protected_validation_count"),
+    }
 
 
 async def run(state: AgentState) -> AgentState:
@@ -81,6 +99,7 @@ async def run(state: AgentState) -> AgentState:
 
     api_plan = None
     ui_plan = None
+    llm = None
 
     if db:
         try:
@@ -115,10 +134,7 @@ async def run(state: AgentState) -> AgentState:
             )
             resp = await llm.ainvoke([HumanMessage(content=prompt)])
             content = resp.content if hasattr(resp, "content") else str(resp)
-            text = content.strip()
-            if text.startswith("```"):
-                text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            parsed = json.loads(text)
+            parsed = parse_llm_json_object(str(content))
             if isinstance(parsed, dict):
                 api_plan = parsed.get("api_plan")
                 ui_plan = parsed.get("ui_plan")
@@ -234,6 +250,77 @@ async def run(state: AgentState) -> AgentState:
         ],
     }
 
+    strategy_error = None
+    strategy_decision = None
+    if db:
+        try:
+            if llm is None:
+                llm = await llm_gateway.get_planner(db)
+            strategy_prompt = STRATEGY_PLANNER_PROMPT.format(
+                test_type=test_type,
+                input_type=input_type,
+                objective=objective,
+                target_url=target_url,
+                api_execution_policy=state.get("api_execution_policy") or "safe_read_only",
+                auth_preflight=json.dumps(
+                    _auth_preflight_summary(state.get("auth_preflight")),
+                    ensure_ascii=False,
+                    default=str,
+                ),
+                mission_plan=json.dumps(
+                    {
+                        "control_pattern": mission_plan.get("control_pattern"),
+                        "subgoals": mission_plan.get("subgoals", [])[:8],
+                        "environment_needs": mission_plan.get("environment_needs", [])[:6],
+                        "success_criteria": mission_plan.get("success_criteria", [])[:5],
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                )[:5000] if isinstance(mission_plan, dict) else "{}",
+                api_schema_summary=schema_summary[:6000],
+                rag_context=rag_context[:3000],
+                tool_context=json.dumps(
+                    {
+                        "skills": state.get("skill_plan", []),
+                        "roster": state.get("agent_roster", []),
+                        "api_plan_available": bool(api_plan),
+                        "ui_plan_available": bool(ui_plan),
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                )[:4000],
+            )
+            strategy_resp = await llm.ainvoke([HumanMessage(content=strategy_prompt)])
+            strategy_content = (
+                strategy_resp.content if hasattr(strategy_resp, "content") else str(strategy_resp)
+            )
+            strategy_raw = parse_llm_json_object(str(strategy_content))
+            if not strategy_raw:
+                strategy_error = "Planner strategy response did not contain a JSON object."
+            else:
+                strategy_decision = normalize_agent_strategy_decision(
+                    strategy_raw,
+                    parsed_api_schema=parsed_api_schema,
+                    execution_policy=str(state.get("api_execution_policy") or "safe_read_only"),
+                    test_type=str(test_type),
+                    source="llm",
+                )
+        except Exception as e:
+            strategy_error = str(e)
+            logger.warning("Strategy planner LLM call failed: %s, using fallback", e)
+
+    if strategy_decision is None:
+        strategy_decision = fallback_agent_strategy_decision(
+            objective=objective,
+            parsed_api_schema=parsed_api_schema,
+            execution_policy=str(state.get("api_execution_policy") or "safe_read_only"),
+            test_type=str(test_type),
+            reason=strategy_error or "Planner model was unavailable.",
+        )
+    state["agent_strategy_decision"] = strategy_decision
+    state["agent_tool_plan"] = strategy_decision.get("tool_plan", [])
+    state["agent_strategy_diagnostics"] = strategy_decision.get("diagnostics", [])
+
     # Legacy combined plan for backward compat
     combined_plan = []
     if api_plan:
@@ -273,6 +360,7 @@ async def run(state: AgentState) -> AgentState:
         output_summary={
             "api_plan": bool(api_plan),
             "ui_plan": bool(ui_plan),
+            "agent_strategy": strategy_summary(strategy_decision),
             "selected_skills": [skill.get("name") for skill in state.get("skill_plan", [])],
             "rag_source_count": len(rag_retrieval.get("sources") or []),
             "mission_subgoals": len(mission_plan.get("subgoals", []))
@@ -282,6 +370,24 @@ async def run(state: AgentState) -> AgentState:
         metadata={
             "reason": "Turn mission subgoals, retrieved memory, tools, and environment observations into an executable test plan.",
             "next_decision": "generate_cases_from_plan",
+        },
+    )
+
+    record_tool_call(
+        state,
+        tool_name="planner.select_agent_strategy",
+        layer="planner",
+        status="success" if strategy_decision.get("valid", True) else "skipped",
+        input_summary={
+            "test_type": test_type,
+            "input_type": input_type,
+            "endpoint_count": len(parsed_api_schema or []),
+            "api_execution_policy": state.get("api_execution_policy") or "safe_read_only",
+        },
+        output_summary=strategy_summary(strategy_decision),
+        metadata={
+            "reason": "Select a model-driven tool strategy and locally validate it against schema and safety policy.",
+            "next_decision": "generate_cases_from_validated_strategy",
         },
     )
 

@@ -11,13 +11,21 @@ from openapi_schema_validator import validate
 from app.agent.api_scope import (
     ALL_SAFE_GET_COVERAGE_GOAL,
     ALL_SAFE_GET_COVERAGE_SOURCE,
-    objective_requests_all_safe_get_coverage,
     safe_schema_method_endpoints,
     sanitize_api_case_assertions,
     validate_generated_api_cases,
 )
 from app.agent.progress import persist_progress
 from app.agent.state import AgentState
+from app.agent.strategy import (
+    STRATEGY_SCHEMA_SOURCE,
+    fallback_agent_strategy_decision,
+    normalize_agent_strategy_decision,
+    strategy_requests_all_safe_coverage,
+    strategy_requests_schema_endpoint_selection,
+    strategy_selected_schema_endpoints,
+    strategy_summary,
+)
 from app.agent.tool_registry import install_tool_context, record_tool_call, summarize_tool_calls
 from app.config import settings
 from app.core.redaction import (
@@ -1152,6 +1160,35 @@ def _all_safe_schema_coverage_metadata(
     }
 
 
+def _strategy_schema_coverage_metadata(
+    strategy: dict,
+    strategy_endpoints: list[dict],
+    selected_requests: list[dict],
+) -> dict:
+    selected_endpoint_ids = {
+        identity
+        for request in selected_requests
+        if (identity := _schema_endpoint_identity(request))
+    }
+    selected_total = len(selected_endpoint_ids)
+    endpoint_total = len(strategy_endpoints)
+    omitted_total = max(endpoint_total - selected_total, 0)
+    selection = strategy.get("endpoint_selection") or {}
+    return {
+        "coverage_goal": strategy.get("coverage_scope"),
+        "coverage_scope": strategy.get("coverage_scope"),
+        "strategy_intent": strategy.get("intent"),
+        "strategy_source": strategy.get("source"),
+        "strategy_summary": strategy_summary(strategy),
+        "budget_behavior": selection.get("budget_behavior"),
+        "strategy_endpoint_total": endpoint_total,
+        "selected_strategy_endpoint_total": selected_total,
+        "omitted_strategy_endpoint_total": omitted_total,
+        "strategy_coverage_completed": len(selected_requests) > 0,
+        "bounded": omitted_total > 0 or len(selected_requests) < endpoint_total,
+    }
+
+
 def _api_execution_progress_detail(total_requests: int, request_selection: dict) -> str:
     if request_selection.get("source") == ALL_SAFE_GET_COVERAGE_SOURCE:
         detail = (
@@ -1455,11 +1492,28 @@ async def run(state: AgentState) -> AgentState:
     execution_policy = _normalize_api_execution_policy(state.get("api_execution_policy"))
     state["api_execution_policy"] = execution_policy
     write_allowed = _policy_allows_write(execution_policy)
-    safe_schema_endpoints = safe_schema_method_endpoints(api_schema)
-    all_safe_get_coverage_requested = (
-        objective_requests_all_safe_get_coverage(state.get("objective"))
-        and bool(safe_schema_endpoints)
+    strategy = normalize_agent_strategy_decision(
+        state.get("agent_strategy_decision") or {},
+        parsed_api_schema=api_schema,
+        execution_policy=execution_policy,
+        test_type=str(state.get("test_type") or "auto"),
+        source=str((state.get("agent_strategy_decision") or {}).get("source") or "state"),
     )
+    if not state.get("agent_strategy_decision"):
+        strategy = fallback_agent_strategy_decision(
+            objective=state.get("objective"),
+            parsed_api_schema=api_schema,
+            execution_policy=execution_policy,
+            test_type=str(state.get("test_type") or "auto"),
+            reason="No planner strategy was present before API execution.",
+        )
+    state["agent_strategy_decision"] = strategy
+    state["agent_tool_plan"] = strategy.get("tool_plan", [])
+    state["agent_strategy_diagnostics"] = strategy.get("diagnostics", [])
+    safe_schema_endpoints = safe_schema_method_endpoints(api_schema)
+    selected_strategy_endpoints = strategy_selected_schema_endpoints(strategy, api_schema)
+    all_safe_get_coverage_requested = strategy_requests_all_safe_coverage(strategy)
+    focused_strategy_requested = strategy_requests_schema_endpoint_selection(strategy)
     if all_safe_get_coverage_requested:
         state["api_coverage_goal"] = ALL_SAFE_GET_COVERAGE_GOAL
     retry_count = max(0, int(getattr(settings, "API_REQUEST_RETRY_COUNT", 0) or 0))
@@ -1494,6 +1548,7 @@ async def run(state: AgentState) -> AgentState:
     request_candidates = []
     selection_source = "fallback_url"
     fallback_reason = None
+    strategy_coverage_endpoints: list[dict] = []
     if all_safe_get_coverage_requested:
         request_candidates = _build_test_requests(
             safe_schema_endpoints,
@@ -1502,7 +1557,22 @@ async def run(state: AgentState) -> AgentState:
             execution_policy,
         )
         selection_source = ALL_SAFE_GET_COVERAGE_SOURCE
-        fallback_reason = "objective_requested_all_safe_get_schema_coverage"
+        fallback_reason = "strategy_selected_all_documented_safe_methods"
+        strategy_coverage_endpoints = safe_schema_endpoints
+    elif focused_strategy_requested:
+        strategy_coverage_endpoints = selected_strategy_endpoints
+        request_candidates = _build_test_requests(
+            selected_strategy_endpoints,
+            base_url,
+            auth_headers,
+            execution_policy,
+        )
+        selection_source = STRATEGY_SCHEMA_SOURCE
+        fallback_reason = (
+            "strategy_selected_documented_endpoint_scope"
+            if selected_strategy_endpoints
+            else "strategy_selected_no_valid_documented_endpoints"
+        )
     elif api_cases:
         case_requests = _build_case_test_requests(
             api_cases,
@@ -1566,6 +1636,26 @@ async def run(state: AgentState) -> AgentState:
     )
     if selection_source == ALL_SAFE_GET_COVERAGE_SOURCE:
         coverage_metadata = _all_safe_schema_coverage_metadata(safe_schema_endpoints, test_requests)
+        coverage_metadata["bounded"] = bool(
+            request_selection.get("bounded") or coverage_metadata.get("bounded")
+        )
+        coverage_metadata.update(
+            {
+                "coverage_scope": strategy.get("coverage_scope"),
+                "strategy_intent": strategy.get("intent"),
+                "strategy_source": strategy.get("source"),
+                "strategy_summary": strategy_summary(strategy),
+                "budget_behavior": (strategy.get("endpoint_selection") or {}).get("budget_behavior"),
+                "strategy_coverage_completed": len(test_requests) > 0,
+            }
+        )
+        request_selection.update(coverage_metadata)
+    elif selection_source == STRATEGY_SCHEMA_SOURCE:
+        coverage_metadata = _strategy_schema_coverage_metadata(
+            strategy,
+            strategy_coverage_endpoints,
+            test_requests,
+        )
         coverage_metadata["bounded"] = bool(
             request_selection.get("bounded") or coverage_metadata.get("bounded")
         )

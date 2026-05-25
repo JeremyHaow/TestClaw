@@ -56,6 +56,23 @@ TOOL_CAPABILITIES: tuple[ToolCapability, ...] = (
         output_schema={"api_plan": "object", "ui_plan": "object"},
     ),
     ToolCapability(
+        name="planner.select_agent_strategy",
+        layer="planner",
+        skill="test-planning",
+        description="Select a structured model-driven testing strategy and ordered tool plan, then validate it against schema, auth readiness, and safety policy.",
+        risk="read_only",
+        input_schema={
+            "objective": "string",
+            "api_schema_summary": "array",
+            "api_execution_policy": "safe_read_only|safe_with_auth|write_allowed",
+        },
+        output_schema={
+            "agent_strategy_decision": "object",
+            "agent_tool_plan": "array",
+            "agent_strategy_diagnostics": "array",
+        },
+    ),
+    ToolCapability(
         name="planner.generate_test_cases",
         layer="planner",
         skill="test-planning",
@@ -111,6 +128,19 @@ TOOL_CAPABILITIES: tuple[ToolCapability, ...] = (
         risk="safety_gate",
         input_schema={"method": "string", "policy": "string"},
         output_schema={"allowed": "boolean", "reason": "string"},
+    ),
+    ToolCapability(
+        name="api.derive_schema_requests",
+        layer="api",
+        skill="api-contract-testing",
+        description="Derive executable API request candidates from documented OpenAPI endpoints selected by the validated strategy contract.",
+        risk="safety_gate",
+        input_schema={
+            "scope": "all_documented_safe_methods|focused_documented_endpoints|sampled_contract",
+            "include": "array",
+            "method_policy": "object",
+        },
+        output_schema={"request_candidates": "array", "request_selection": "object"},
     ),
     ToolCapability(
         name="api.generate_mock_json_body",

@@ -11,6 +11,7 @@ from app.agent.nodes import (
     execution_evaluator,
     knowledge_retriever,
     mission_planner,
+    planner,
     reporter,
     tc_generator,
 )
@@ -1660,6 +1661,343 @@ async def test_tc_generator_uses_schema_safe_cases_for_all_get_objective(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_model_strategy_all_documented_safe_methods_drives_schema_coverage(monkeypatch) -> None:
+    calls = []
+
+    class FakePlannerMessage:
+        def __init__(self, payload: dict) -> None:
+            self.content = json.dumps(payload)
+
+    class FakePlanner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def ainvoke(self, _messages):
+            self.calls += 1
+            if self.calls == 1:
+                return FakePlannerMessage(
+                    {
+                        "api_plan": {"title": "API contract"},
+                        "ui_plan": None,
+                    }
+                )
+            return FakePlannerMessage(
+                {
+                    "intent": "api_read_only_coverage",
+                    "coverage_scope": "all_documented_safe_methods",
+                    "method_policy": {
+                        "allowed_methods": ["GET", "HEAD", "OPTIONS"],
+                        "blocked_methods": ["POST", "PUT", "PATCH", "DELETE"],
+                        "write_allowed": False,
+                    },
+                    "endpoint_selection": {
+                        "source": "schema",
+                        "include": [],
+                        "exclude": [],
+                        "budget_behavior": "cover_all_within_budget",
+                    },
+                    "tool_plan": [
+                        {
+                            "tool_name": "api.derive_schema_requests",
+                            "inputs": {"scope": "all_documented_safe_methods"},
+                            "safety_constraints": ["schema_only", "safe_methods_only"],
+                            "expected_observation": "safe request count",
+                        }
+                    ],
+                    "case_generation_guidance": "Use documented response contracts only.",
+                    "success_criteria": ["Every selected safe endpoint has evidence."],
+                    "confidence": "high",
+                    "reason": "The schema contains several read-only contract surfaces.",
+                    "diagnostics": [],
+                }
+            )
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"ok": true}'
+        headers = {"content-type": "application/json"}
+        content = text.encode()
+
+        def json(self) -> dict:
+            return {"ok": True}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    fake_planner = FakePlanner()
+
+    async def fake_get_planner(_db):
+        return fake_planner
+
+    monkeypatch.setattr(planner.llm_gateway, "get_planner", fake_get_planner)
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 10)
+
+    planned = await planner.run(
+        {
+            "db_session": object(),
+            "test_type": "api",
+            "input_type": "swagger_json",
+            "objective": "请按接口文档验证库存查询和字典读取能力",
+            "target_url": "https://api.example.test",
+            "api_execution_policy": "safe_read_only",
+            "parsed_api_schema": [
+                {"method": "GET", "path": "/stock", "response_status": "200"},
+                {"method": "GET", "path": "/dict", "response_status": "200"},
+                {"method": "POST", "path": "/stock", "response_status": "200"},
+            ],
+            "workflow_steps": [],
+        }
+    )
+    result = await api_runner.run(planned)
+
+    assert [call["url"] for call in calls] == [
+        "https://api.example.test/stock",
+        "https://api.example.test/dict",
+    ]
+    selection = result["api_execution_result"]["request_selection"]
+    assert selection["source"] == "all_safe_schema"
+    assert selection["coverage_scope"] == "all_documented_safe_methods"
+    assert selection["strategy_source"] == "llm"
+    assert selection["safe_endpoint_total"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("coverage_scope", "budget_behavior"),
+    [
+        ("focused_documented_endpoints", "focused_only"),
+        ("sampled_contract", "sample_representative"),
+    ],
+)
+async def test_model_strategy_focused_or_sampled_scope_does_not_force_all_schema(
+    monkeypatch,
+    coverage_scope: str,
+    budget_behavior: str,
+) -> None:
+    calls = []
+
+    class FakePlannerMessage:
+        def __init__(self, payload: dict) -> None:
+            self.content = json.dumps(payload)
+
+    class FakePlanner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def ainvoke(self, _messages):
+            self.calls += 1
+            if self.calls == 1:
+                return FakePlannerMessage({"api_plan": {"title": "API focus"}, "ui_plan": None})
+            return FakePlannerMessage(
+                {
+                    "intent": "api_focused_endpoints",
+                    "coverage_scope": coverage_scope,
+                    "method_policy": {"allowed_methods": ["GET"], "write_allowed": False},
+                    "endpoint_selection": {
+                        "source": "model_focus",
+                        "include": [
+                            {"method": "GET", "path": "/orders"},
+                            {"method": "GET", "path": "/profile"},
+                        ],
+                        "exclude": [],
+                        "budget_behavior": budget_behavior,
+                    },
+                    "tool_plan": [
+                        {
+                            "tool_name": "api.derive_schema_requests",
+                            "inputs": {"scope": coverage_scope},
+                            "safety_constraints": ["schema_only", "local_method_policy"],
+                            "expected_observation": "focused request count",
+                        }
+                    ],
+                    "case_generation_guidance": "Only execute selected documented endpoints.",
+                    "success_criteria": ["Selected endpoints have evidence."],
+                    "confidence": "high",
+                    "reason": "The objective focuses on order and profile reads.",
+                    "diagnostics": [],
+                }
+            )
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"ok": true}'
+        headers = {"content-type": "application/json"}
+        content = text.encode()
+
+        def json(self) -> dict:
+            return {"ok": True}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    async def fake_get_planner(_db):
+        return FakePlanner()
+
+    monkeypatch.setattr(planner.llm_gateway, "get_planner", fake_get_planner)
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 10)
+
+    planned = await planner.run(
+        {
+            "db_session": object(),
+            "test_type": "api",
+            "input_type": "swagger_json",
+            "objective": "验证订单和用户资料读取契约",
+            "target_url": "https://api.example.test",
+            "api_execution_policy": "safe_read_only",
+            "parsed_api_schema": [
+                {"method": "GET", "path": "/orders", "response_status": "200"},
+                {"method": "GET", "path": "/profile", "response_status": "200"},
+                {"method": "GET", "path": "/health", "response_status": "200"},
+            ],
+            "workflow_steps": [],
+        }
+    )
+    result = await api_runner.run(planned)
+
+    assert [call["url"] for call in calls] == [
+        "https://api.example.test/orders",
+        "https://api.example.test/profile",
+    ]
+    selection = result["api_execution_result"]["request_selection"]
+    assert selection["source"] == "agent_strategy_schema"
+    assert selection["coverage_scope"] == coverage_scope
+    assert selection["strategy_endpoint_total"] == 2
+    assert selection["candidate_total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_model_strategy_guardrail_drops_write_and_out_of_schema_endpoints(monkeypatch) -> None:
+    calls = []
+
+    class FakePlannerMessage:
+        def __init__(self, payload: dict) -> None:
+            self.content = json.dumps(payload)
+
+    class FakePlanner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def ainvoke(self, _messages):
+            self.calls += 1
+            if self.calls == 1:
+                return FakePlannerMessage({"api_plan": {"title": "API guarded"}, "ui_plan": None})
+            return FakePlannerMessage(
+                {
+                    "intent": "api_focused_endpoints",
+                    "coverage_scope": "focused_documented_endpoints",
+                    "method_policy": {"allowed_methods": ["GET", "POST"], "write_allowed": True},
+                    "endpoint_selection": {
+                        "source": "model_focus",
+                        "include": [
+                            {"method": "POST", "path": "/items"},
+                            {"method": "GET", "path": "/ghost"},
+                            {"method": "GET", "path": "/health"},
+                        ],
+                        "exclude": [],
+                        "budget_behavior": "focused_only",
+                    },
+                    "tool_plan": [
+                        {
+                            "tool_name": "api.derive_schema_requests",
+                            "inputs": {"scope": "focused_documented_endpoints"},
+                            "safety_constraints": ["schema_only"],
+                            "expected_observation": "guarded request count",
+                        },
+                        {
+                            "tool_name": "api.unknown_tool",
+                            "inputs": {},
+                            "safety_constraints": [],
+                            "expected_observation": "should be dropped",
+                        },
+                    ],
+                    "case_generation_guidance": "Use selected endpoints.",
+                    "success_criteria": ["Only safe documented endpoints execute."],
+                    "confidence": "medium",
+                    "reason": "The model selected a mixed endpoint list.",
+                    "diagnostics": [],
+                }
+            )
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"ok": true}'
+        headers = {"content-type": "application/json"}
+        content = text.encode()
+
+        def json(self) -> dict:
+            return {"ok": True}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    async def fake_get_planner(_db):
+        return FakePlanner()
+
+    monkeypatch.setattr(planner.llm_gateway, "get_planner", fake_get_planner)
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 10)
+
+    planned = await planner.run(
+        {
+            "db_session": object(),
+            "test_type": "api",
+            "input_type": "swagger_json",
+            "objective": "验证健康检查",
+            "target_url": "https://api.example.test",
+            "api_execution_policy": "safe_read_only",
+            "parsed_api_schema": [
+                {"method": "GET", "path": "/health", "response_status": "200"},
+                {"method": "POST", "path": "/items", "response_status": "200"},
+            ],
+            "workflow_steps": [],
+        }
+    )
+    result = await api_runner.run(planned)
+
+    assert [call["url"] for call in calls] == ["https://api.example.test/health"]
+    diagnostics = result["agent_strategy_decision"]["diagnostics"]
+    assert any(item["kind"] == "method_blocked_by_policy" for item in diagnostics)
+    assert any(item["kind"] == "out_of_schema_endpoint" for item in diagnostics)
+    assert any(item["kind"] == "unknown_tool_name" for item in diagnostics)
+    assert all(call["method"] == "GET" for call in calls)
+
+
+@pytest.mark.asyncio
 async def test_api_runner_uses_schema_safe_budget_for_all_get_objective(monkeypatch) -> None:
     calls = []
 
@@ -1792,6 +2130,93 @@ async def test_execution_evaluator_does_not_replan_schema_driven_all_get_coverag
     assert result["evidence_evaluation"]["next_action"] == "report"
     assert result["agent_next_node"] == "reporter"
     assert result["api_cases"] == [{"title": "visible case"}]
+    assert result.get("agent_replan_counts", {}).get("api") is None
+
+
+@pytest.mark.asyncio
+async def test_execution_evaluator_does_not_replan_completed_model_strategy_scope(monkeypatch) -> None:
+    class FakePlannerMessage:
+        content = json.dumps(
+            {
+                "sufficient_evidence": False,
+                "confidence": "high",
+                "next_action": "replan_api",
+                "reason": "Only two API cases were generated.",
+                "diagnostics": ["api_cases count is small"],
+                "missing_evidence": ["more api_cases"],
+                "replan_instructions": "Generate broader API cases.",
+            }
+        )
+
+    class FakePlanner:
+        async def ainvoke(self, _messages):
+            return FakePlannerMessage()
+
+    async def fake_get_planner(_db):
+        return FakePlanner()
+
+    monkeypatch.setattr(execution_evaluator.llm_gateway, "get_planner", fake_get_planner)
+    monkeypatch.setattr(execution_evaluator.settings, "AGENT_MAX_REPLAN_ATTEMPTS", 2)
+
+    result = await execution_evaluator.run(
+        {
+            "db_session": object(),
+            "test_type": "api",
+            "input_type": "swagger_json",
+            "objective": "验证订单和用户资料读取契约",
+            "agent_execution_stage": "api",
+            "agent_strategy_decision": {
+                "intent": "api_focused_endpoints",
+                "coverage_scope": "focused_documented_endpoints",
+                "source": "llm",
+                "valid": True,
+                "endpoint_selection": {
+                    "source": "model_focus",
+                    "include": [
+                        {"method": "GET", "path": "/orders"},
+                        {"method": "GET", "path": "/profile"},
+                    ],
+                    "budget_behavior": "focused_only",
+                },
+            },
+            "parsed_api_schema": [
+                {"method": "GET", "path": "/orders", "response_status": "200"},
+                {"method": "GET", "path": "/profile", "response_status": "200"},
+                {"method": "GET", "path": "/health", "response_status": "200"},
+            ],
+            "api_cases": [{"title": "orders"}, {"title": "profile"}],
+            "api_execution_result": {
+                "total": 2,
+                "candidate_total": 2,
+                "executed": 2,
+                "passed": 2,
+                "failed": 0,
+                "skipped": 0,
+                "http_executed": 2,
+                "all_passed": True,
+                "complete": True,
+                "request_selection": {
+                    "source": "agent_strategy_schema",
+                    "coverage_scope": "focused_documented_endpoints",
+                    "coverage_goal": "focused_documented_endpoints",
+                    "strategy_intent": "api_focused_endpoints",
+                    "strategy_endpoint_total": 2,
+                    "selected_strategy_endpoint_total": 2,
+                    "omitted_strategy_endpoint_total": 0,
+                    "strategy_coverage_completed": True,
+                    "candidate_total": 2,
+                    "selected_total": 2,
+                    "bounded": False,
+                },
+                "results": [],
+            },
+            "workflow_steps": [],
+        }
+    )
+
+    assert result["evidence_evaluation"]["next_action"] == "report"
+    assert result["agent_next_node"] == "reporter"
+    assert result["api_cases"] == [{"title": "orders"}, {"title": "profile"}]
     assert result.get("agent_replan_counts", {}).get("api") is None
 
 

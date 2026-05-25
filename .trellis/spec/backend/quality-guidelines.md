@@ -205,6 +205,92 @@ except Exception:
     return self.get_local_client()
 ```
 
+## Scenario: Model-Driven Agent Strategy Contract
+
+### 1. Scope / Trigger
+
+- Trigger: API/UI agent runs need model-selected strategy and tool plans without adding user-facing special-case options or executable free text.
+- Applies to `app/agent/strategy.py`, `app/agent/prompts.py`, `app/agent/nodes/planner.py`, `app/agent/nodes/tc_generator.py`, `app/agent/nodes/api_runner.py`, `app/agent/nodes/execution_evaluator.py`, progress persistence, and run detail surfaces.
+- Purpose: let the planner model decide "how to test" while local code enforces schema, method, policy, tool-name, and evidence guardrails.
+
+### 2. Signatures
+
+- Strategy state keys:
+  ```python
+  state["agent_strategy_decision"]: dict
+  state["agent_tool_plan"]: list[dict]
+  state["agent_strategy_diagnostics"]: list[dict]
+  ```
+- Normalizer:
+  ```python
+  normalize_agent_strategy_decision(raw, parsed_api_schema, execution_policy, test_type) -> dict
+  fallback_agent_strategy_decision(objective, parsed_api_schema, execution_policy, test_type) -> dict
+  ```
+- Required JSON fields:
+  ```json
+  {
+    "intent": "api_contract|api_read_only_coverage|api_focused_endpoints|ui_exploration|full_flow|blocked",
+    "coverage_scope": "all_documented_safe_methods|focused_documented_endpoints|sampled_contract|ui_paths|none",
+    "method_policy": {"allowed_methods": ["GET"], "blocked_methods": ["POST"], "write_allowed": false},
+    "endpoint_selection": {"source": "schema|suite|memory|model_focus|fallback", "include": [], "exclude": [], "budget_behavior": "cover_all_within_budget|sample_representative|focused_only"},
+    "tool_plan": [{"tool_name": "api.derive_schema_requests", "inputs": {}, "safety_constraints": [], "expected_observation": "..."}],
+    "confidence": "low|medium|high",
+    "reason": "observable short reason",
+    "diagnostics": []
+  }
+  ```
+
+### 3. Contracts
+
+- Planner prompts must require strict JSON only; no Markdown, hidden chain-of-thought, invented paths, or prose tool instructions.
+- The model may choose strategy, coverage scope, endpoint include/exclude lists, and tool plan. It may not grant itself write permission, invent schema paths, or introduce unknown tools.
+- Local normalizers must convert invalid model output into `agent_strategy_diagnostics`; invalid paths/methods/tools are dropped, not executed.
+- Under `safe_read_only` and `safe_with_auth`, POST/PUT/PATCH/DELETE remain blocked even if the model sets `write_allowed=true`.
+- Schema-backed API execution must execute only documented method+path pairs selected by the validated strategy or derived from documented safe methods.
+- `objective_requests_all_safe_get_coverage(...)` is a fallback only when the planner strategy is missing/unavailable, not the primary strategy mechanism.
+- `execution_evaluator` must treat completed `all_documented_safe_methods`, `focused_documented_endpoints`, and `sampled_contract` coverage as reportable evidence even if generated case counts are small.
+
+### 4. Validation & Error Matrix
+
+- LLM returns non-object/invalid JSON -> fallback strategy with diagnostic; run continues within old safe fallback behavior.
+- LLM requests unknown `intent`, `coverage_scope`, `tool_name`, endpoint source, or budget behavior -> normalize to a safe default and record a diagnostic.
+- LLM includes POST/PUT/PATCH/DELETE under read-only policy -> drop endpoint, force `write_allowed=false`, record `method_blocked_by_policy`.
+- LLM includes schema-missing method/path -> drop endpoint, record `out_of_schema_endpoint`.
+- Valid focused/sample strategy with no surviving include endpoints -> no schema-wide fallback execution; record missing selection and let evaluator/report surface the blocker.
+
+### 5. Good/Base/Bad Cases
+
+- Good: model selects `all_documented_safe_methods`; runner derives GET/HEAD/OPTIONS from OpenAPI and records budget omissions.
+- Good: model selects `focused_documented_endpoints`; runner executes only validated include paths and does not force full schema coverage.
+- Base: model unavailable and objective explicitly asks for all GET requests; fallback derives documented safe method coverage.
+- Bad: adding a UI option or keyword branch for "all GET coverage" instead of relying on the strategy contract.
+- Bad: treating model-selected POST as safe because it appeared in `method_policy.allowed_methods`.
+
+### 6. Tests Required
+
+- Unit/integration: model strategy `all_documented_safe_methods` drives schema-derived safe coverage without matching objective regex text.
+- Unit/integration: focused/sample strategy executes only validated included endpoints.
+- Regression: unavailable LLM still handles explicit "test all GET requests" fallback.
+- Regression: read-only policy drops model-selected write methods and out-of-schema paths.
+- Regression: evaluator reports completed model strategy scope instead of repeated replanning.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+if objective_requests_all_safe_get_coverage(objective):
+    execute_all_get_endpoints()
+```
+
+#### Correct
+
+```python
+strategy = normalize_agent_strategy_decision(raw_model_json, parsed_api_schema, execution_policy, test_type)
+if strategy["coverage_scope"] == "all_documented_safe_methods":
+    execute_validated_schema_safe_methods(strategy)
+```
+
 ## Scenario: Run Auth Preflight and Captcha Modes
 
 ### 1. Scope / Trigger

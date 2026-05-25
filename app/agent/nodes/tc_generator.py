@@ -6,7 +6,6 @@ from langchain_core.messages import HumanMessage
 from app.agent.api_scope import (
     ALL_SAFE_GET_COVERAGE_GOAL,
     ALL_SAFE_GET_COVERAGE_SOURCE,
-    objective_requests_all_safe_get_coverage,
     safe_schema_method_endpoints,
     validate_generated_api_cases,
 )
@@ -15,6 +14,13 @@ from app.agent.json_utils import parse_llm_json
 from app.agent.progress import persist_progress
 from app.agent.prompts import CASE_GENERATOR_PROMPT
 from app.agent.state import AgentState
+from app.agent.strategy import (
+    fallback_agent_strategy_decision,
+    normalize_agent_strategy_decision,
+    strategy_requests_all_safe_coverage,
+    strategy_requests_schema_endpoint_selection,
+    strategy_selected_schema_endpoints,
+)
 from app.agent.tool_registry import record_tool_call
 from app.config import settings
 from app.core.llm_gateway import llm_gateway
@@ -378,9 +384,33 @@ async def run(state: AgentState) -> AgentState:
     ui_cases = list(state.get("ui_cases") or [])
     generated_api_cases = False
     safe_schema_endpoints = safe_schema_method_endpoints(parsed_api_schema)
-    all_safe_get_coverage_requested = (
-        objective_requests_all_safe_get_coverage(objective)
-        and bool(safe_schema_endpoints)
+    strategy = normalize_agent_strategy_decision(
+        state.get("agent_strategy_decision") or {},
+        parsed_api_schema=parsed_api_schema,
+        execution_policy=execution_policy,
+        test_type=test_type,
+        source=str((state.get("agent_strategy_decision") or {}).get("source") or "state"),
+    )
+    if not state.get("agent_strategy_decision"):
+        strategy = fallback_agent_strategy_decision(
+            objective=objective,
+            parsed_api_schema=parsed_api_schema,
+            execution_policy=execution_policy,
+            test_type=test_type,
+            reason="No planner strategy was present before case generation.",
+        )
+    state["agent_strategy_decision"] = strategy
+    state["agent_tool_plan"] = strategy.get("tool_plan", [])
+    state["agent_strategy_diagnostics"] = strategy.get("diagnostics", [])
+    selected_strategy_endpoints = strategy_selected_schema_endpoints(strategy, parsed_api_schema)
+    all_safe_get_coverage_requested = strategy_requests_all_safe_coverage(strategy) and test_type != "ui"
+    schema_strategy_requested = (
+        (all_safe_get_coverage_requested or strategy_requests_schema_endpoint_selection(strategy))
+        and test_type != "ui"
+    )
+    focused_strategy_requested = (
+        strategy_requests_schema_endpoint_selection(strategy)
+        and bool(selected_strategy_endpoints)
         and test_type != "ui"
     )
 
@@ -396,6 +426,18 @@ async def run(state: AgentState) -> AgentState:
         generated_api_cases = True
         state["api_coverage_goal"] = ALL_SAFE_GET_COVERAGE_GOAL
         state["api_case_generation_source"] = ALL_SAFE_GET_COVERAGE_SOURCE
+    elif focused_strategy_requested and not api_cases:
+        try:
+            case_limit = int(getattr(settings, "API_MAX_EXECUTED_REQUESTS", 120) or 0)
+        except (TypeError, ValueError):
+            case_limit = 120
+        api_cases = _build_schema_safe_smoke_api_cases(
+            selected_strategy_endpoints,
+            limit=case_limit if case_limit > 0 else None,
+        )
+        generated_api_cases = True
+        state["api_coverage_goal"] = str(strategy.get("coverage_scope") or "focused_documented_endpoints")
+        state["api_case_generation_source"] = "agent_strategy_schema"
 
     if db and not (api_cases or ui_cases):
         try:
@@ -476,7 +518,7 @@ async def run(state: AgentState) -> AgentState:
 
     # Scene-aware fallback cases
     if test_type != "ui":
-        if not api_cases and parsed_api_schema:
+        if not api_cases and parsed_api_schema and not schema_strategy_requested:
             api_cases = _build_fallback_api_cases(parsed_api_schema, scene_hints, auth_info)
             generated_api_cases = True
         elif not api_cases and (state.get("base_url_override") or test_type in {"api", "full"}):
@@ -520,7 +562,7 @@ async def run(state: AgentState) -> AgentState:
             )
         api_cases = validated_api_cases
 
-        if not api_cases and parsed_api_schema and test_type != "ui":
+        if not api_cases and parsed_api_schema and test_type != "ui" and not schema_strategy_requested:
             fallback_cases = _build_fallback_api_cases(parsed_api_schema, scene_hints, auth_info)
             api_cases, fallback_diagnostics = validate_generated_api_cases(
                 fallback_cases,

@@ -311,6 +311,29 @@ def test_run_detail_exposes_api_scope_guard_diagnostics() -> None:
     execution_log = {
         "api_execution_policy": "safe_read_only",
         "allow_out_of_schema_api_cases": False,
+        "agent_strategy_decision": {
+            "intent": "api_focused_endpoints",
+            "coverage_scope": "focused_documented_endpoints",
+            "source": "llm",
+            "valid": True,
+        },
+        "agent_tool_plan": [
+            {
+                "tool_name": "api.derive_schema_requests",
+                "inputs": {"scope": "focused_documented_endpoints"},
+                "safety_constraints": ["schema_only"],
+                "expected_observation": "request count",
+            }
+        ],
+        "agent_strategy_diagnostics": [
+            {
+                "kind": "method_blocked_by_policy",
+                "action": "dropped",
+                "method": "POST",
+                "path": "/items",
+                "severity": "warning",
+            }
+        ],
         "agent_case_diagnostics": [
             {
                 "kind": "out_of_scope_api_case",
@@ -331,6 +354,9 @@ def test_run_detail_exposes_api_scope_guard_diagnostics() -> None:
     payload = response.json()
     assert payload["api_execution_policy"] == "safe_read_only"
     assert payload["allow_out_of_schema_api_cases"] is False
+    assert payload["agent_strategy_decision"]["coverage_scope"] == "focused_documented_endpoints"
+    assert payload["agent_tool_plan"][0]["tool_name"] == "api.derive_schema_requests"
+    assert payload["agent_strategy_diagnostics"][0]["kind"] == "method_blocked_by_policy"
     assert payload["agent_case_diagnostics"][0]["kind"] == "out_of_scope_api_case"
 
 
