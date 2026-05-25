@@ -1,4 +1,10 @@
-from app.agent.graph import _after_api_runner, _after_tc_generator, _after_ui_login, build_graph
+from app.agent.graph import (
+    _after_api_runner,
+    _after_execution_evaluator,
+    _after_tc_generator,
+    _after_ui_login,
+    build_graph,
+)
 
 
 def test_graph_routes_source_loader_through_rag_before_planning() -> None:
@@ -8,6 +14,9 @@ def test_graph_routes_source_loader_through_rag_before_planning() -> None:
     assert ("source_loader", "knowledge_retriever") in edges
     assert ("knowledge_retriever", "planner") in edges
     assert ("source_loader", "planner") not in edges
+    assert ("api_runner", "execution_evaluator") in edges
+    assert ("ui_runner", "execution_evaluator") in edges
+    assert ("ui_runner", "reporter") not in edges
 
 
 def test_after_tc_generator_routes_ui_runs_through_login_chain() -> None:
@@ -33,6 +42,13 @@ def test_after_api_runner_routes_back_to_ui_for_auto_and_full_runs() -> None:
         }
     ) == "ui_login"
     assert _after_api_runner({"test_type": "api", "input_type": "swagger_url"}) == "reporter"
+
+
+def test_after_execution_evaluator_uses_bounded_next_node() -> None:
+    assert _after_execution_evaluator({"agent_next_node": "tc_generator"}) == "tc_generator"
+    assert _after_execution_evaluator({"agent_next_node": "ui_test_planner"}) == "ui_test_planner"
+    assert _after_execution_evaluator({"agent_next_node": "ui_login"}) == "ui_login"
+    assert _after_execution_evaluator({"agent_next_node": "unknown"}) == "reporter"
 
 
 def test_after_ui_login_routes_failed_required_setup_to_reporter() -> None:

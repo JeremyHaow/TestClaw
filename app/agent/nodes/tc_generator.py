@@ -289,6 +289,7 @@ async def run(state: AgentState) -> AgentState:
     scene_hints = state.get("scene_hints") or []
     auth_info = state.get("auth_chain")
     rag_context = state.get("rag_context") or "No relevant prior testing knowledge"
+    replan_feedback = (state.get("agent_replan_feedback") or "").strip()
     base_url = (state.get("base_url_override") or state.get("target_url") or "").rstrip("/")
     db = state.get("db_session")
 
@@ -300,7 +301,12 @@ async def run(state: AgentState) -> AgentState:
             llm = await llm_gateway.get_planner(db)
 
             plan_summary = json.dumps(
-                {"api_plan": api_plan, "ui_plan": ui_plan},
+                {
+                    "api_plan": api_plan,
+                    "ui_plan": ui_plan,
+                    "replan_feedback": replan_feedback or None,
+                    "previous_attempts": (state.get("agent_attempt_history") or [])[-3:],
+                },
                 ensure_ascii=False,
                 default=str,
             )
@@ -320,6 +326,11 @@ async def run(state: AgentState) -> AgentState:
                     context += f"\nCredentials: {', '.join(c.get('name', '') for c in creds)}"
             if context:
                 schema_str += f"\n\n## Context{context}"
+            if replan_feedback:
+                schema_str += (
+                    "\n\n## Evidence evaluation feedback for this regeneration\n"
+                    f"{replan_feedback[:1200]}"
+                )
 
             prompt = CASE_GENERATOR_PROMPT.format(
                 test_plan=plan_summary,

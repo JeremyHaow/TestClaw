@@ -1287,6 +1287,7 @@ def _update_api_execution_state(
 
 async def run(state: AgentState) -> AgentState:
     install_tool_context(state)
+    state["agent_execution_stage"] = "api"
     api_schema = state.get("parsed_api_schema") or []
     api_cases = state.get("api_cases") or []
     target_url = state.get("target_url", "")

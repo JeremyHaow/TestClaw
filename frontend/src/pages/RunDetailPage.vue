@@ -89,6 +89,11 @@ const snapshotKeys = [
   'skill_plan',
   'tool_calls',
   'tool_summary',
+  'evidence_evaluation',
+  'agent_evaluations',
+  'agent_attempt_history',
+  'agent_replan_counts',
+  'agent_replan_feedback',
   'input_type',
   'source_input',
   'current_step',
@@ -694,6 +699,10 @@ const recentToolCalls = computed(() => toolCalls.value.slice().reverse())
 const pagedToolCalls = computed(() => indexedPage(recentToolCalls.value, toolCallPage.value, toolCallPageSize))
 const skillPlan = computed(() => ensureList(run.value?.skill_plan || run.value?.final_report?.skill_plan))
 const toolSummary = computed(() => run.value?.tool_summary || run.value?.final_report?.tool_summary || run.value?.artifacts?.tool_summary || null)
+const agentEvaluations = computed(() => ensureList(run.value?.agent_evaluations || run.value?.final_report?.agent_diagnostics?.evaluations))
+const latestAgentEvaluation = computed(() => run.value?.evidence_evaluation || run.value?.final_report?.agent_diagnostics?.latest_evaluation || agentEvaluations.value.at(-1) || null)
+const agentReplanCounts = computed(() => run.value?.agent_replan_counts || run.value?.final_report?.agent_diagnostics?.replan_counts || {})
+const agentReplanTotal = computed(() => Object.values(agentReplanCounts.value).reduce((total: number, value: any) => total + Number(value || 0), 0))
 const ragRetrieval = computed(() => run.value?.rag_retrieval || null)
 const ragSources = computed(() => ensureList(ragRetrieval.value?.sources))
 const ragDisplayStatus = computed(() => ragRetrieval.value?.status || 'metadata_unavailable')
@@ -766,7 +775,8 @@ function ragScoreLabel(source: any) {
   return source?.mode === 'vector' ? `sim ${source.score}` : `score ${source?.score ?? 0}`
 }
 const hasRagSurface = computed(() => Boolean(ragRetrieval.value || run.value?.rag_context))
-const hasToolSurface = computed(() => toolCalls.value.length > 0 || skillPlan.value.length > 0 || Boolean(toolSummary.value) || hasRagSurface.value)
+const hasAgentEvaluationSurface = computed(() => Boolean(latestAgentEvaluation.value || agentEvaluations.value.length))
+const hasToolSurface = computed(() => toolCalls.value.length > 0 || skillPlan.value.length > 0 || Boolean(toolSummary.value) || hasRagSurface.value || hasAgentEvaluationSurface.value)
 const triageSummary = computed(() => run.value?.triage_summary || null)
 const triageAffectedSurfaces = computed(() => ensureList(triageSummary.value?.affected_surfaces))
 const pagedTriageAffectedSurfaces = computed(() => indexedPage(triageAffectedSurfaces.value, triageSurfacePage.value, triageSurfacePageSize))
@@ -783,6 +793,20 @@ function toolStatusClass(status: string) {
   if (value === 'skipped') return 'bg-amber-100 text-amber-700'
   if (['failed', 'error'].includes(value)) return 'bg-red-100 text-red-700'
   return 'bg-gray-100 text-gray-600'
+}
+function agentActionLabel(action: string) {
+  const value = String(action || '').toLowerCase()
+  if (value === 'continue_to_ui') return '继续 UI'
+  if (value === 'replan_api') return '重规划 API'
+  if (value === 'replan_ui') return '重规划 UI'
+  if (value === 'report') return '生成报告'
+  return value || '等待判断'
+}
+function agentEvidenceClass(evaluation: any) {
+  if (!evaluation) return 'border-gray-200 bg-gray-50 text-gray-600'
+  if (evaluation.sufficient_evidence) return 'border-emerald-100 bg-emerald-50 text-emerald-700'
+  if (String(evaluation.next_action || '').startsWith('replan')) return 'border-blue-100 bg-blue-50 text-blue-700'
+  return 'border-amber-100 bg-amber-50 text-amber-700'
 }
 function triageRiskClass(level: string) {
   const value = String(level || '').toLowerCase()
@@ -1040,6 +1064,9 @@ watch(
       <span v-if="hasRagSurface" class="px-2 py-1 rounded-lg text-[10px] font-bold border" :class="ragBadgeClass">
         {{ ragBadgeLabel }}
       </span>
+      <span v-if="hasAgentEvaluationSurface" class="px-2 py-1 rounded-lg text-[10px] font-bold border" :class="agentEvidenceClass(latestAgentEvaluation)">
+        证据评估 {{ agentActionLabel(latestAgentEvaluation?.next_action) }}
+      </span>
       <span v-if="run.created_at" class="px-2 py-1 bg-gray-50 text-gray-500 rounded-lg text-[10px] font-mono">
         {{ new Date(run.created_at).toLocaleString('zh-CN') }}
       </span>
@@ -1149,6 +1176,38 @@ watch(
               <div class="mt-2 text-xs text-gray-500">
                 失败 {{ uiSummary?.failed ?? ((run.final_report?.ui_test_summary?.total || 0) - (run.final_report?.ui_test_summary?.passed || 0)) }} ·
                 {{ uiSummary?.pass_rate || run.final_report?.ui_test_summary?.pass_rate || '等待结果' }}
+              </div>
+            </div>
+          </div>
+
+          <div
+            v-if="latestAgentEvaluation"
+            class="mt-3 rounded-lg border p-4 text-sm"
+            :class="agentEvidenceClass(latestAgentEvaluation)"
+          >
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                  <Activity :size="15" />
+                  <span class="text-[10px] font-bold uppercase tracking-widest opacity-70">证据评估</span>
+                  <span class="rounded bg-white/70 px-2 py-0.5 text-[10px] font-bold">
+                    {{ latestAgentEvaluation.stage || 'agent' }}
+                  </span>
+                </div>
+                <p class="mt-2 leading-6">{{ latestAgentEvaluation.reason || '智能体已检查本轮证据质量。' }}</p>
+                <div v-if="ensureList(latestAgentEvaluation.diagnostics).length" class="mt-2 flex flex-wrap gap-2">
+                  <span
+                    v-for="(item, index) in ensureList(latestAgentEvaluation.diagnostics).slice(0, 3)"
+                    :key="`agent-diagnostic-${index}`"
+                    class="rounded border border-current/10 bg-white/60 px-2 py-1 text-[11px]"
+                  >
+                    {{ item }}
+                  </span>
+                </div>
+              </div>
+              <div class="shrink-0 rounded-lg border border-current/10 bg-white/70 px-3 py-2 text-xs font-bold">
+                {{ agentActionLabel(latestAgentEvaluation.next_action) }}
+                <span v-if="agentReplanTotal"> · {{ agentReplanTotal }} 次重规划</span>
               </div>
             </div>
           </div>
@@ -1856,6 +1915,46 @@ watch(
         <pre v-if="run.rag_context" class="mt-4 max-h-44 overflow-auto rounded-lg border border-gray-100 bg-gray-950 p-3 text-[11px] leading-relaxed text-gray-100">{{ run.rag_context }}</pre>
       </div>
 
+      <div v-if="agentEvaluations.length" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
+        <div class="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
+            <Activity :size="14" /> 证据评估与重规划
+          </h3>
+          <span class="rounded bg-gray-100 px-2 py-1 text-[10px] font-bold text-gray-500">{{ agentEvaluations.length }} 次评估</span>
+        </div>
+        <div class="space-y-3">
+          <div
+            v-for="(evaluation, index) in agentEvaluations.slice().reverse()"
+            :key="`agent-evaluation-${index}-${evaluation.next_action}`"
+            class="rounded-lg border p-4"
+            :class="agentEvidenceClass(evaluation)"
+          >
+            <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="text-sm font-bold">{{ agentActionLabel(evaluation.next_action) }}</span>
+                  <span class="rounded bg-white/70 px-2 py-0.5 text-[10px] font-bold">{{ evaluation.stage || 'agent' }}</span>
+                  <span v-if="evaluation.source" class="rounded bg-white/70 px-2 py-0.5 text-[10px] font-bold">{{ evaluation.source }}</span>
+                </div>
+                <p class="mt-2 text-xs leading-5">{{ evaluation.reason }}</p>
+              </div>
+              <span class="shrink-0 rounded bg-white/70 px-2 py-0.5 text-[10px] font-bold">
+                {{ evaluation.sufficient_evidence ? '证据充分' : '需要补证' }}
+              </span>
+            </div>
+            <div v-if="ensureList(evaluation.missing_evidence).length" class="mt-3 flex flex-wrap gap-2">
+              <span
+                v-for="(item, missingIndex) in ensureList(evaluation.missing_evidence)"
+                :key="`missing-${index}-${missingIndex}`"
+                class="rounded border border-current/10 bg-white/60 px-2 py-1 text-[11px]"
+              >
+                {{ item }}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div v-if="skillPlan.length" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
         <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-2">
           <Activity :size="14" /> Skill 调度
@@ -1918,7 +2017,7 @@ watch(
         </div>
       </div>
 
-      <div v-if="!skillPlan.length && !toolCalls.length" class="text-center py-12 text-gray-400 text-sm">暂无工具调用记录</div>
+      <div v-if="!skillPlan.length && !toolCalls.length && !agentEvaluations.length" class="text-center py-12 text-gray-400 text-sm">暂无工具调用记录</div>
     </div>
 
     <!-- Tab: Test Cases -->

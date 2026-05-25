@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     DEFAULT_EMBEDDING_MODEL: str = "text-embedding-3-small"
     SANDBOX_TIMEOUT: int = 120
     MAX_RETRY_COUNT: int = 3
+    AGENT_MAX_REPLAN_ATTEMPTS: int = 2
     API_MAX_EXECUTED_REQUESTS: int = 120
     API_REQUEST_TIMEOUT_SECONDS: float = 30.0
     API_REQUEST_RETRY_COUNT: int = 0

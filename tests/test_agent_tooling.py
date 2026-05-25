@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from langchain_openai import OpenAIEmbeddings
 
-from app.agent.nodes import api_runner, knowledge_retriever, reporter
+from app.agent.nodes import api_runner, execution_evaluator, knowledge_retriever, reporter
 from app.agent.nodes.ui_runner import _build_ui_case_batches
 from app.agent.tool_registry import build_tool_registry, select_skills_for_state
 from app.core.llm_gateway import LLMGateway
@@ -126,6 +126,195 @@ def test_tool_registry_selects_rag_skill_after_retrieval() -> None:
     )
 
     assert "rag-knowledge-retrieval" in {skill["name"] for skill in skills}
+
+
+def test_tool_registry_exposes_evidence_evaluation_tool() -> None:
+    registry = build_tool_registry()
+    planning = next(skill for skill in registry["skills"] if skill["name"] == "test-planning")
+    tool_names = {tool["name"] for tool in registry["tools"]}
+
+    assert "planner.evaluate_execution_evidence" in tool_names
+    assert "planner.evaluate_execution_evidence" in planning["tools"]
+
+
+@pytest.mark.asyncio
+async def test_execution_evaluator_replans_api_when_no_requests_were_built(monkeypatch) -> None:
+    monkeypatch.setattr(execution_evaluator.settings, "AGENT_MAX_REPLAN_ATTEMPTS", 2)
+
+    state = await execution_evaluator.run(
+        {
+            "agent_execution_stage": "api",
+            "test_type": "api",
+            "input_type": "swagger_json",
+            "objective": "API smoke",
+            "target_url": "https://api.example.test",
+            "parsed_api_schema": [{"method": "GET", "path": "/health"}],
+            "api_cases": [{"title": "bad generated case"}],
+            "api_execution_result": {
+                "total": 0,
+                "executed": 0,
+                "passed": 0,
+                "failed": 0,
+                "skipped": 0,
+                "complete": True,
+            },
+            "workflow_steps": [],
+        }
+    )
+
+    assert state["agent_next_node"] == "tc_generator"
+    assert state["evidence_evaluation"]["next_action"] == "replan_api"
+    assert state["agent_replan_counts"]["api"] == 1
+    assert state["api_cases"] == []
+    assert state["agent_replan_feedback"]
+    assert "planner.evaluate_execution_evidence" in {call["tool"] for call in state["tool_calls"]}
+
+
+@pytest.mark.asyncio
+async def test_execution_evaluator_continues_to_ui_after_api_evidence() -> None:
+    state = await execution_evaluator.run(
+        {
+            "agent_execution_stage": "api",
+            "test_type": "full",
+            "input_type": "url",
+            "objective": "Full smoke",
+            "target_url": "https://app.example.test",
+            "ui_seed_url": "https://app.example.test",
+            "api_execution_result": {
+                "total": 1,
+                "executed": 1,
+                "passed": 1,
+                "failed": 0,
+                "skipped": 0,
+                "http_executed": 1,
+                "all_passed": True,
+                "complete": True,
+            },
+            "workflow_steps": [],
+        }
+    )
+
+    assert state["agent_next_node"] == "ui_login"
+    assert state["evidence_evaluation"]["next_action"] == "continue_to_ui"
+
+
+@pytest.mark.asyncio
+async def test_execution_evaluator_replans_ui_after_single_shallow_failure(monkeypatch) -> None:
+    monkeypatch.setattr(execution_evaluator.settings, "AGENT_MAX_REPLAN_ATTEMPTS", 2)
+
+    state = await execution_evaluator.run(
+        {
+            "agent_execution_stage": "ui",
+            "test_type": "ui",
+            "input_type": "url",
+            "objective": "UI smoke",
+            "target_url": "https://app.example.test",
+            "ui_cases": [
+                {"title": "Click missing action", "playwright_commands": ["click \"Missing\""]}
+            ],
+            "ui_execution_result": {
+                "total": 1,
+                "completed": 1,
+                "passed": 0,
+                "failed": 1,
+                "command_total": 1,
+                "command_completed": 1,
+                "command_failed": 1,
+                "screenshots": [],
+                "snapshot_texts": ["- button \"Real action\" [ref=e2]"],
+                "all_passed": False,
+                "complete": True,
+                "commands": [
+                    {
+                        "case_index": 0,
+                        "case_title": "Click missing action",
+                        "command": "click \"Missing\"",
+                        "status_code": 1,
+                        "stderr": "locator not found",
+                        "passed": False,
+                    }
+                ],
+            },
+            "workflow_steps": [],
+        }
+    )
+
+    assert state["agent_next_node"] == "ui_test_planner"
+    assert state["evidence_evaluation"]["next_action"] == "replan_ui"
+    assert state["agent_replan_counts"]["ui"] == 1
+    assert state["ui_cases"] == []
+    assert state["agent_attempt_history"][0]["stage"] == "ui"
+
+
+@pytest.mark.asyncio
+async def test_execution_evaluator_uses_planner_model_when_available(monkeypatch) -> None:
+    class FakeMessage:
+        content = json.dumps(
+            {
+                "sufficient_evidence": False,
+                "confidence": "high",
+                "next_action": "replan_ui",
+                "reason": "Need current refs from snapshot before stopping.",
+                "diagnostics": ["Use visible refs"],
+                "missing_evidence": ["No screenshot"],
+                "replan_instructions": "Generate commands from the latest snapshot refs.",
+            }
+        )
+
+    class FakePlanner:
+        calls = 0
+
+        async def ainvoke(self, _messages):
+            self.calls += 1
+            return FakeMessage()
+
+    fake_planner = FakePlanner()
+
+    async def fake_get_planner(_db):
+        return fake_planner
+
+    monkeypatch.setattr(execution_evaluator.llm_gateway, "get_planner", fake_get_planner)
+
+    state = await execution_evaluator.run(
+        {
+            "db_session": object(),
+            "agent_execution_stage": "ui",
+            "test_type": "ui",
+            "input_type": "url",
+            "objective": "UI smoke",
+            "target_url": "https://app.example.test",
+            "ui_execution_result": {
+                "total": 1,
+                "completed": 1,
+                "passed": 0,
+                "failed": 1,
+                "command_total": 1,
+                "command_completed": 1,
+                "command_failed": 1,
+                "screenshots": [],
+                "snapshot_texts": ["- button \"Continue\" [ref=e5]"],
+                "all_passed": False,
+                "complete": True,
+                "commands": [
+                    {
+                        "case_index": 0,
+                        "case_title": "bad selector",
+                        "command": "click \"Missing\"",
+                        "status_code": 1,
+                        "stderr": "not found",
+                        "passed": False,
+                    }
+                ],
+            },
+            "workflow_steps": [],
+        }
+    )
+
+    assert fake_planner.calls == 1
+    assert state["evidence_evaluation"]["source"] == "llm+guardrail"
+    assert state["agent_replan_feedback"] == "Generate commands from the latest snapshot refs."
+    call = next(call for call in state["tool_calls"] if call["tool"] == "planner.evaluate_execution_evidence")
+    assert call["output"]["source"] == "llm+guardrail"
 
 
 @pytest.mark.asyncio

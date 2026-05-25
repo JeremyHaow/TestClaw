@@ -801,6 +801,13 @@ async def run(state: AgentState) -> AgentState:
     login_commands = state.get("login_playwright_commands") or []
     task_id = state.get("task_id", "unknown")
     db = state.get("db_session")
+    replan_feedback = (state.get("agent_replan_feedback") or "").strip()
+    previous_ui_result = state.get("ui_execution_result") or {}
+    previous_snapshots = [
+        snapshot
+        for snapshot in (previous_ui_result.get("snapshot_texts") or [])[-3:]
+        if isinstance(snapshot, str) and snapshot.strip()
+    ]
 
     if setup_required and setup_result.get("required") and login_verified is False:
         detail = state.get("login_verification_reason") or "Pre-test setup verification failed; skipping UI planning"
@@ -839,6 +846,13 @@ async def run(state: AgentState) -> AgentState:
         except Exception as e:
             logger.warning("Exploration failed: %s", e)
 
+    if previous_snapshots:
+        explored_snapshot = (
+            f"{explored_snapshot}\n\n"
+            "=== Previous execution snapshot evidence for replanning ===\n"
+            f"{chr(10).join(previous_snapshots)[:6000]}"
+        )
+
     ui_cases = (
         []
         if setup_required and login_verified is True and not preserve_existing_ui_cases
@@ -851,6 +865,8 @@ async def run(state: AgentState) -> AgentState:
             login_info = "Current page is the active UI context after optional pre-test setup." if state.get("ui_login_snapshot") else "No pre-test setup was required"
             if setup_instructions:
                 login_info += f". User-provided setup/context information: {setup_instructions[:300]}"
+            if replan_feedback:
+                login_info += f". Evidence evaluator feedback for this replan: {replan_feedback[:600]}"
 
             prompt = UI_TEST_PLANNER_PROMPT.format(
                 target_url=target_url,

@@ -72,6 +72,20 @@ TOOL_CAPABILITIES: tuple[ToolCapability, ...] = (
         output_schema={"decisions": "array"},
     ),
     ToolCapability(
+        name="planner.evaluate_execution_evidence",
+        layer="planner",
+        skill="test-planning",
+        description="Evaluate API/UI execution evidence, decide whether evidence is sufficient, and choose bounded report/continue/replan actions.",
+        risk="read_only",
+        input_schema={"stage": "api|ui", "evidence_summary": "object", "tool_calls": "array"},
+        output_schema={
+            "sufficient_evidence": "boolean",
+            "next_action": "report|continue_to_ui|replan_api|replan_ui",
+            "diagnostics": "array",
+            "replan_instructions": "string",
+        },
+    ),
+    ToolCapability(
         name="api.safe_write_gate",
         layer="api",
         skill="api-contract-testing",
@@ -192,6 +206,7 @@ AUTOMATION_SKILLS: tuple[AutomationSkill, ...] = (
             "planner.parse_requirement",
             "planner.generate_execution_plan",
             "planner.analyze_ui_execution_context",
+            "planner.evaluate_execution_evidence",
         ],
     ),
     AutomationSkill(

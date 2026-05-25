@@ -377,6 +377,26 @@ def _build_summary(api_counts: dict, ui_counts: dict, verdict: str, login_failed
     return "".join(parts)
 
 
+def _agent_evaluation_recommendations(state: AgentState) -> list[str]:
+    recommendations = []
+    latest = state.get("evidence_evaluation")
+    if not isinstance(latest, dict):
+        return recommendations
+
+    next_action = str(latest.get("next_action") or "")
+    reason = _strip_terminal_punctuation(latest.get("reason"))
+    if next_action in {"replan_api", "replan_ui"}:
+        recommendations.append(f"智能体已因证据不足触发重规划：{reason}。")
+    elif latest.get("sufficient_evidence") is False and reason:
+        recommendations.append(f"本次证据仍不充分：{reason}。")
+
+    for item in latest.get("diagnostics") or []:
+        text = _strip_terminal_punctuation(item)
+        if text:
+            recommendations.append(text + "。")
+    return recommendations[:4]
+
+
 async def run(state: AgentState) -> AgentState:
     api_result = state.get("api_execution_result")
     ui_result = state.get("ui_execution_result")
@@ -453,6 +473,13 @@ async def run(state: AgentState) -> AgentState:
 
     summary = _build_summary(api_counts, ui_counts, verdict, login_failed, login_reason, failure_details)
 
+    recommendations = _build_recommendations(
+        state, failure_details, api_counts, ui_counts
+    )
+    for recommendation in _agent_evaluation_recommendations(state):
+        if recommendation not in recommendations:
+            recommendations.append(recommendation)
+
     final_report = {
         "title": "测试运行报告",
         "summary": summary,
@@ -470,10 +497,14 @@ async def run(state: AgentState) -> AgentState:
         },
         "bugs_found": _build_bug_findings(failure_details),
         "advisory_findings": advisory_findings,
-        "recommendations": _build_recommendations(
-            state, failure_details, api_counts, ui_counts
-        ),
+        "recommendations": recommendations,
         "execution_notes": execution_notes,
+        "agent_diagnostics": {
+            "latest_evaluation": state.get("evidence_evaluation"),
+            "evaluations": state.get("agent_evaluations", []),
+            "attempt_history": state.get("agent_attempt_history", []),
+            "replan_counts": state.get("agent_replan_counts", {}),
+        },
         "tool_summary": tool_summary,
         "skill_plan": state.get("skill_plan", []),
         "overall_verdict": verdict,

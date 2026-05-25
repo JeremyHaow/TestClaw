@@ -1130,6 +1130,104 @@ sources = cosine_similarity(query_vector, stored_knowledge_embeddings)
 prompt = PLANNER_PROMPT.format(..., rag_context=state.get("rag_context") or "No relevant prior testing knowledge")
 ```
 
+## Scenario: Agent Evidence Evaluation and Bounded Replanning Contract
+
+### 1. Scope / Trigger
+
+- Trigger: API/UI runners may finish after a shallow or non-executable attempt, but the testing agent must evaluate evidence quality before reporting.
+- Applies to `app/agent/graph.py`, `app/agent/nodes/execution_evaluator.py`, API/UI runners, case generation/planning nodes, progress persistence, run detail parsing, SSE snapshots, and Run Detail evidence surfaces.
+- Purpose: insert a bounded planner-model quality gate after API/UI execution so the agent can continue to UI, replan API/UI work, or report with actionable diagnostics instead of stopping after one shallow attempt.
+
+### 2. Signatures
+
+- Graph order:
+  ```text
+  api_runner -> execution_evaluator -> tc_generator|ui_login|reporter
+  ui_runner -> execution_evaluator -> ui_test_planner|reporter
+  ```
+- Agent state / execution log fields:
+  ```python
+  evidence_evaluation: dict | None
+  agent_evaluations: list[dict] | None
+  agent_attempt_history: list[dict] | None
+  agent_execution_stage: "api" | "ui" | None
+  agent_next_node: str | None
+  agent_replan_counts: dict[str, int] | None
+  agent_replan_feedback: str | None
+  ```
+- Tool capability:
+  ```text
+  planner.evaluate_execution_evidence
+  ```
+- Config:
+  ```text
+  AGENT_MAX_REPLAN_ATTEMPTS=2
+  ```
+
+### 3. Contracts
+
+- `api_runner` and `ui_runner` set `agent_execution_stage` before returning so the evaluator knows which evidence to inspect.
+- `execution_evaluator` must summarize redacted API/UI counts, failure samples, latest tool calls, and replan counts before calling the planner model.
+- The evaluator may use the planner model to choose `report`, `continue_to_ui`, `replan_api`, or `replan_ui`, but deterministic guardrails must override premature reporting when evidence is clearly insufficient.
+- Replanning is bounded per stage by `AGENT_MAX_REPLAN_ATTEMPTS`; after the limit, the evaluator reports and preserves diagnostics instead of looping.
+- `replan_api` clears generated `api_cases`, stores compact attempt history, writes `agent_replan_feedback`, and routes to `tc_generator`.
+- `replan_ui` clears generated `ui_cases`, stores compact attempt history, writes `agent_replan_feedback`, and routes to `ui_test_planner`.
+- Replanning must not alter user-selected suite semantics; suite-selected UI cases should report diagnostics unless the suite explicitly requests prepared-context behavior elsewhere.
+- `tc_generator` and `ui_test_planner` must inject `agent_replan_feedback` and recent attempt summaries into prompts for the next iteration.
+- `evidence_evaluation`, `agent_evaluations`, `agent_attempt_history`, and `agent_replan_counts` are persisted through `Task.execution_log`, exposed by run detail/SSE after redaction, and rendered in Run Detail.
+- Final reports include `agent_diagnostics` and recommendations derived from the latest evaluation.
+
+### 4. Validation & Error Matrix
+
+- API stage builds zero requests while schema/base URL/cases exist -> `next_action="replan_api"` until the API replan limit is reached.
+- API stage has sufficient evidence and a UI target exists -> `next_action="continue_to_ui"`.
+- UI stage fails after one shallow command or selector-not-found with snapshot context -> `next_action="replan_ui"` until the UI replan limit is reached.
+- UI setup/login verification fails -> report with intervention diagnostics; do not loop on UI replanning.
+- Planner model unavailable or invalid JSON -> use guardrail decision, record `model_error`, and continue the graph.
+- Replan limit reached -> `next_action="report"` with `sufficient_evidence=false` and diagnostic recommendations.
+- Legacy execution logs without evaluation fields -> run detail remains compatible and simply hides the evidence-evaluation panel.
+
+### 5. Good/Base/Bad Cases
+
+- Good: an API-only run with generated cases that produce no executable requests replans from schema, records `planner.evaluate_execution_evidence`, then reports with request evidence or a bounded blocker.
+- Good: a UI run that fails on a copied stale selector uses latest snapshot evidence to regenerate UI cases before reporting.
+- Base: a full run with passing API evidence routes from `execution_evaluator` to `ui_login`, then evaluates UI evidence after `ui_runner`.
+- Base: no model provider exists; deterministic guardrails still prevent obvious shallow stops.
+- Bad: `api_runner` or `ui_runner` routes directly to `reporter`, bypassing evidence evaluation.
+- Bad: evaluator loops indefinitely or clears suite-selected user cases.
+- Bad: raw stdout, request bodies, auth headers, cookies, or Playwright typed values appear in persisted evaluation summaries.
+
+### 6. Tests Required
+
+- Unit: graph includes `api_runner -> execution_evaluator` and `ui_runner -> execution_evaluator`, with bounded route targets.
+- Unit: evaluator replans API when zero requests were built from available target context.
+- Unit: evaluator routes API to UI when API evidence is sufficient and a UI target exists.
+- Unit: evaluator replans UI after a single shallow selector failure with snapshot context.
+- Unit: evaluator uses the planner model when available and records `planner.evaluate_execution_evidence`.
+- Detail/API regression: run detail exposes evaluation fields from execution logs.
+- Frontend build: Run Detail compiles with evidence-evaluation and replan surfaces.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+graph.add_edge("api_runner", "reporter")
+graph.add_edge("ui_runner", "reporter")
+```
+
+#### Correct
+
+```python
+graph.add_edge("api_runner", "execution_evaluator")
+graph.add_edge("ui_runner", "execution_evaluator")
+graph.add_conditional_edges(
+    "execution_evaluator",
+    route_after_evaluation,
+    {"tc_generator": "tc_generator", "ui_test_planner": "ui_test_planner", "ui_login": "ui_login", "reporter": "reporter"},
+)
+```
+
 ## Common Mistakes
 
 - Don't forget `await` on all DB operations
@@ -1143,3 +1241,4 @@ prompt = PLANNER_PROMPT.format(..., rag_context=state.get("rag_context") or "No 
 - Don't let timed-out `playwright-cli` subprocesses keep running after returning a timeout result.
 - Don't describe RAG as runtime behavior unless `knowledge_retriever` persists `rag_retrieval` and injects `rag_context` before planning.
 - Don't describe keyword overlap as vector RAG. If embeddings are unavailable, expose `mode="lexical_fallback"` or `mode="unavailable"` with `fallback_reason`.
+- Don't route execution runners directly to `reporter`; use `execution_evaluator` so shallow evidence can trigger bounded replanning first.

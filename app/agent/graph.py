@@ -5,6 +5,7 @@ from app.agent.nodes import (
     api_runner,
     coder,
     executor,
+    execution_evaluator,
     healer,
     input_classifier,
     knowledge_retriever,
@@ -67,6 +68,10 @@ def _after_api_runner(state: AgentState) -> str:
     return "reporter"
 
 
+def _after_execution_evaluator(state: AgentState) -> str:
+    return execution_evaluator.route_after_evaluation(state)
+
+
 def _after_ui_login(state: AgentState) -> str:
     setup_required = bool((state.get("setup_instructions") or state.get("login_instructions") or "").strip())
     login_verified = state.get("login_verified")
@@ -108,6 +113,7 @@ def build_graph():
     graph.add_node("planner", planner.run)
     graph.add_node("tc_generator", tc_generator.run)
     graph.add_node("api_runner", api_runner.run)
+    graph.add_node("execution_evaluator", execution_evaluator.run)
     graph.add_node("ui_login", ui_login.run)
     graph.add_node("ui_test_planner", ui_test_planner.run)
     graph.add_node("ui_runner", ui_runner.run)
@@ -137,7 +143,7 @@ def build_graph():
         },
     )
     graph.add_edge("ui_test_planner", "ui_runner")
-    graph.add_edge("ui_runner", "reporter")
+    graph.add_edge("ui_runner", "execution_evaluator")
 
     # Conditional: tc_generator → api_runner | ui_login | coder
     graph.add_conditional_edges(
@@ -150,11 +156,13 @@ def build_graph():
         },
     )
 
-    # Conditional: api_runner → ui_login (full mode) | reporter
+    graph.add_edge("api_runner", "execution_evaluator")
     graph.add_conditional_edges(
-        "api_runner",
-        _after_api_runner,
+        "execution_evaluator",
+        _after_execution_evaluator,
         {
+            "tc_generator": "tc_generator",
+            "ui_test_planner": "ui_test_planner",
             "ui_login": "ui_login",
             "reporter": "reporter",
         },

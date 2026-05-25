@@ -48,6 +48,13 @@ class AgentState(TypedDict, total=False):
     skill_plan: list[dict] | None  # selected skills for this run
     tool_calls: list[dict] | None  # auditable tool invocations
     tool_summary: dict | None  # aggregate tool-call counts
+    evidence_evaluation: dict | None  # latest agent quality gate decision
+    agent_evaluations: list[dict] | None  # bounded evaluation/replan history
+    agent_attempt_history: list[dict] | None  # compact summaries of replaced attempts
+    agent_execution_stage: Literal["api", "ui"] | None
+    agent_next_node: str | None
+    agent_replan_counts: dict[str, int] | None
+    agent_replan_feedback: str | None
 
     # --- UI Login ---
     setup_instructions: str | None  # natural language pre-test setup/context from user

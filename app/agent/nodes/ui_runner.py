@@ -1193,6 +1193,7 @@ async def _execute_ui_case_batches(
 
 async def run(state: AgentState) -> AgentState:
     install_tool_context(state)
+    state["agent_execution_stage"] = "ui"
     target_url = state.get("target_url", "")
     ui_seed_url = state.get("ui_seed_url") or target_url
     ui_cases = state.get("ui_cases") or []

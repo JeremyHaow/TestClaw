@@ -204,6 +204,45 @@ UI 执行结果：{ui_results_summary}
 输出纯 JSON，不要包含 Markdown 标记。
 """
 
+EVIDENCE_EVALUATOR_PROMPT = """你是 TestClaw 的测试执行质量评估智能体。你的职责是判断本阶段执行是否已经产生足够证据，还是需要继续探索、重规划或补充诊断。
+
+阶段：{stage}
+测试类型：{test_type}
+测试目标：{objective}
+目标 URL：{target_url}
+
+执行证据摘要：
+{evidence_summary}
+
+最近工具调用：
+{tool_call_summary}
+
+历史评估：
+{prior_evaluations}
+
+可选下一步：
+{allowed_actions}
+
+请输出 JSON：
+{{
+  "sufficient_evidence": false,
+  "confidence": "low|medium|high",
+  "next_action": "report|continue_to_ui|replan_api|replan_ui",
+  "reason": "简短说明为什么继续或停止",
+  "diagnostics": ["可执行诊断1", "可执行诊断2"],
+  "missing_evidence": ["缺少的证据或动作"],
+  "replan_instructions": "如果需要重规划，说明下一轮应该如何改变计划、用例或工具使用"
+}}
+
+规则：
+1. 如果没有实际执行请求、没有 UI 命令、没有截图/快照、或只有一次浅层失败，不要建议直接结束，除非安全策略、鉴权缺失、环境不可达或用户选择的套件语义明确阻止继续。
+2. 如果 API 阶段证据充分且本次还有 UI 目标，next_action 应为 continue_to_ui。
+3. 如果 UI 命令因为元素未找到、页面状态不匹配、快照证据不足而失败，并且仍有可用快照/页面上下文，应建议 replan_ui。
+4. 如果 API 用例没有产生可执行请求，但存在 schema、base URL 或可读端点线索，应建议 replan_api。
+5. 不要假设固定网站、固定接口、固定截图或固定业务菜单；只依据证据摘要和工具调用。
+6. 输出纯 JSON，不要包含 Markdown。
+"""
+
 LOGIN_DETAILS_PROMPT = """你是测试前置说明理解器。用户提供的信息不一定是登录信息，也可能是测试范围、账号、环境说明、禁止操作、验证码、租户选择、语言选择或其他准备事项。
 
 目标 URL：{target_url}

@@ -265,6 +265,48 @@ def test_run_detail_triage_summary_marks_passed_run_as_low_risk() -> None:
     assert triage["recommended_next_actions"]
 
 
+def test_run_detail_exposes_agent_evidence_evaluation_surface() -> None:
+    execution_log = {
+        "evidence_evaluation": {
+            "stage": "ui",
+            "next_action": "replan_ui",
+            "sufficient_evidence": False,
+            "reason": "UI stopped after one shallow selector failure.",
+        },
+        "agent_evaluations": [
+            {
+                "stage": "ui",
+                "next_action": "replan_ui",
+                "sufficient_evidence": False,
+                "reason": "UI stopped after one shallow selector failure.",
+            }
+        ],
+        "agent_replan_counts": {"ui": 1},
+        "final_report": {
+            "overall_verdict": "FAIL",
+            "summary": "UI run needs better evidence.",
+            "agent_diagnostics": {
+                "latest_evaluation": {
+                    "stage": "ui",
+                    "next_action": "replan_ui",
+                    "sufficient_evidence": False,
+                }
+            },
+        },
+    }
+
+    with TestClient(app) as client:
+        token = _token(client)
+        task_id = asyncio.run(_insert_task(status=TaskStatus.FAILED, execution_log=execution_log))
+        response = client.get(f"/api/v1/runs/{task_id}", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["evidence_evaluation"]["next_action"] == "replan_ui"
+    assert payload["agent_evaluations"][0]["sufficient_evidence"] is False
+    assert payload["agent_replan_counts"]["ui"] == 1
+
+
 def test_run_triage_export_json_shape_and_reusable_assets_without_secrets() -> None:
     with TestClient(app) as client:
         token = _token(client)
