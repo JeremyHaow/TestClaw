@@ -96,6 +96,38 @@ def test_playwright_command_normalizer_converts_snapshot_refs_for_cli_targets() 
     assert all("snapshot [ref=...]" in spec["normalization"] for spec in specs)
 
 
+def test_playwright_command_normalizer_repairs_viewport_pseudo_commands() -> None:
+    specs = normalize_playwright_commands(
+        [
+            "set_viewport_size 375 667",
+            "viewport 1280x720",
+            "resize 390x844",
+            'evaluate "await page.setViewportSize({ width: 1440, height: 900 })"',
+        ],
+        include_unsupported=True,
+    )
+
+    assert [spec["command"] for spec in specs] == [
+        "resize 375 667",
+        "resize 1280 720",
+        "resize 390 844",
+        "resize 1440 900",
+    ]
+    assert all(spec["kind"] == "normalized" for spec in specs)
+
+
+def test_playwright_command_normalizer_repairs_run_code_page_signature() -> None:
+    specs = normalize_playwright_commands(
+        ["run-code \"async ({ page }) => { await page.waitForLoadState('domcontentloaded'); }\""],
+        include_unsupported=True,
+    )
+
+    assert specs[0]["command"] == (
+        "run-code \"async page => { await page.waitForLoadState('domcontentloaded'); }\""
+    )
+    assert "page argument" in specs[0]["normalization"]
+
+
 def test_run_creation_uses_explicit_setup_instructions_without_objective_inference() -> None:
     assert _resolve_setup_instructions(
         RunCreate(source="https://example.test", objective="test the admin area")

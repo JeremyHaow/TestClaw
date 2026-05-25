@@ -31,6 +31,16 @@ SUPPORTED_PLAYWRIGHT_COMMANDS = {
 _WAIT_COMMANDS = {"wait", "sleep", "pause", "timeout"}
 _ASSERT_COMMANDS = {"assert", "expect"}
 _SNAPSHOT_REF_TOKEN = re.compile(r"(?P<quote>['\"]?)\[ref=(?P<ref>[A-Za-z0-9_-]+)\](?P=quote)")
+_VIEWPORT_ALIASES = {
+    "set_viewport_size",
+    "set-viewport-size",
+    "setviewportsize",
+    "set_viewport",
+    "set-viewport",
+    "viewport",
+    "viewport-size",
+}
+_RESIZE_RE = re.compile(r"(?P<w>\d{2,5})\s*(?:x|,|\s)\s*(?P<h>\d{2,5})", re.I)
 
 
 def strip_playwright_cli_prefix(command: str) -> str:
@@ -69,6 +79,74 @@ def _normalize_snapshot_ref_tokens(command: str) -> str:
     return _SNAPSHOT_REF_TOKEN.sub(lambda match: match.group("ref"), command)
 
 
+def _extract_resize_dimensions(command: str) -> tuple[str, str] | None:
+    width_match = re.search(r"\bwidth\s*[:=]\s*(?P<w>\d{2,5})", command, flags=re.I)
+    height_match = re.search(r"\bheight\s*[:=]\s*(?P<h>\d{2,5})", command, flags=re.I)
+    if width_match and height_match:
+        return width_match.group("w"), height_match.group("h")
+    match = _RESIZE_RE.search(command)
+    if not match:
+        return None
+    width = match.group("w")
+    height = match.group("h")
+    return width, height
+
+
+def _normalize_viewport_command(raw: str, normalized: str, name: str) -> dict | None:
+    if name == "resize":
+        parts = normalized.split(maxsplit=2)
+        if len(parts) >= 3 and parts[1].isdigit() and parts[2].isdigit():
+            return None
+        dimensions = _extract_resize_dimensions(normalized)
+        if dimensions:
+            width, height = dimensions
+            return {
+                "command": f"resize {width} {height}",
+                "source_command": raw,
+                "kind": "normalized",
+                "normalization": "Converted resize shorthand to playwright-cli resize <width> <height>.",
+            }
+        return None
+
+    if name in _VIEWPORT_ALIASES or "setviewportsize" in normalized.replace("_", "").replace("-", "").lower():
+        dimensions = _extract_resize_dimensions(normalized)
+        if dimensions:
+            width, height = dimensions
+            return {
+                "command": f"resize {width} {height}",
+                "source_command": raw,
+                "kind": "normalized",
+                "normalization": "Converted viewport pseudo-command to playwright-cli resize.",
+            }
+        return None
+
+    if name in {"evaluate", "eval", "run-code"} and re.search(
+        r"(resizeTo|setViewportSize|viewport)", normalized, flags=re.I
+    ):
+        dimensions = _extract_resize_dimensions(normalized)
+        if dimensions:
+            width, height = dimensions
+            return {
+                "command": f"resize {width} {height}",
+                "source_command": raw,
+                "kind": "normalized",
+                "normalization": "Converted viewport JavaScript attempt to playwright-cli resize.",
+            }
+    return None
+
+
+def _normalize_run_code_signature(command: str) -> str:
+    if command_name(command) != "run-code":
+        return command
+    return re.sub(
+        r"async\s*\(\s*\{\s*page\s*\}\s*\)\s*=>",
+        "async page =>",
+        command,
+        count=1,
+        flags=re.I,
+    )
+
+
 def normalize_playwright_command(command: str, include_unsupported: bool = False) -> list[dict]:
     """Normalize generated pseudo-commands into the playwright-cli dialect we execute."""
     raw = command.strip()
@@ -79,6 +157,10 @@ def normalize_playwright_command(command: str, include_unsupported: bool = False
     name = command_name(normalized)
     if not name:
         return []
+
+    viewport_spec = _normalize_viewport_command(raw, normalized, name)
+    if viewport_spec:
+        return [viewport_spec]
 
     if name in _WAIT_COMMANDS:
         return [
@@ -103,6 +185,17 @@ def normalize_playwright_command(command: str, include_unsupported: bool = False
         ]
 
     if name not in SUPPORTED_PLAYWRIGHT_COMMANDS:
+        if name == "evaluate":
+            return [
+                {
+                    "command": "eval " + normalized.split(maxsplit=1)[1]
+                    if len(normalized.split(maxsplit=1)) > 1
+                    else "eval",
+                    "source_command": raw,
+                    "kind": "normalized",
+                    "normalization": "Converted evaluate alias to playwright-cli eval.",
+                }
+            ]
         if not include_unsupported:
             return []
         return [
@@ -126,9 +219,15 @@ def normalize_playwright_command(command: str, include_unsupported: bool = False
         ]
 
     executable = _normalize_snapshot_ref_tokens(normalized)
+    executable = _normalize_run_code_signature(executable)
     spec = {"command": executable, "source_command": raw, "kind": "command"}
     if executable != normalized:
-        spec["normalization"] = "Converted snapshot [ref=...] token to playwright-cli element ref."
+        normalizations = []
+        if executable != _normalize_snapshot_ref_tokens(normalized):
+            normalizations.append("Converted run-code ({ page }) signature to playwright-cli page argument.")
+        if _normalize_snapshot_ref_tokens(normalized) != normalized:
+            normalizations.append("Converted snapshot [ref=...] token to playwright-cli element ref.")
+        spec["normalization"] = " ".join(normalizations)
     return [spec]
 
 
