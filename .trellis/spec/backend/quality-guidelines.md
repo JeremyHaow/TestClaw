@@ -46,6 +46,103 @@
 - UI may describe Multi-Agent only as role-based agent orchestration: Planner/Coder/Vision model defaults plus LangGraph nodes for planning, case generation, execution, reporting, and memory.
 - Do not imply autonomous peer-to-peer agent collaboration unless the backend implements that behavior.
 
+## Scenario: Mission Plan Agent Orchestration and Vector Memory Boundary
+
+### 1. Scope / Trigger
+
+- Trigger: TestClaw agent runs must behave like a mission-level AI agent instead of a legacy fixed automation route.
+- Applies to `app/agent/graph.py`, `app/agent/nodes/mission_planner.py`, `app/agent/tool_registry.py`, `app/agent/progress.py`, `app/agent/nodes/knowledge_retriever.py`, `app/services/vector_store.py`, run detail/SSE payloads, and related tests.
+- Purpose: keep planning, role delegation, ReAct-style traces, and RAG vector storage explicit and testable.
+
+### 2. Signatures
+
+- Graph path:
+  ```text
+  input_classifier -> source_loader -> mission_planner -> knowledge_retriever -> planner -> tc_generator -> api_runner/ui_login -> execution_evaluator -> reporter -> knowledge_sink
+  ```
+- Persisted execution-log keys:
+  ```python
+  agent_mission_plan: dict | None
+  agent_roster: list[dict] | None
+  agent_delegation_trace: list[dict] | None
+  agent_react_trace: list[dict] | None
+  ```
+- Vector backend configuration:
+  ```text
+  RAG_VECTOR_STORE_BACKEND=database|milvus
+  MILVUS_URI=
+  MILVUS_TOKEN=
+  MILVUS_COLLECTION=testclaw_knowledge
+  MILVUS_DIMENSION=384
+  ```
+
+### 3. Contracts
+
+- Active graph wiring must not register or route through legacy `coder`, `executor`, `analyzer`, or `healer` nodes.
+- `mission_planner` runs before memory retrieval and persists a real `agent_mission_plan` containing subgoals, memory needs, environment needs, selected skills, execution order, and success criteria.
+- Downstream planner, case generator, and evidence evaluator prompts must consume the mission plan as bounded context.
+- Multi-agent collaboration is role-based and persisted through `agent_roster` and `agent_delegation_trace`; expected roles include supervisor/planner, memory researcher, API executor, UI explorer, evidence evaluator, and reporter when relevant to the run.
+- ReAct-style trace fields are visible operational summaries only: concise `reason`, `action`, selected `tool`, `observation`, `evidence`, and `next_decision`. Do not store hidden chain-of-thought.
+- Runtime RAG must call the vector-store boundary instead of scoring `KnowledgeEntry` rows directly inside agent nodes.
+- Default vector backend remains database JSON embeddings. Selecting `milvus` must not require a running Milvus service or installed client for tests; it may fall back to database retrieval with explicit backend metadata.
+
+### 4. Validation & Error Matrix
+
+- Missing DB session during memory retrieval -> `rag_retrieval.mode="skipped"` and mission continues.
+- Embedding provider failure -> local embedding fallback where possible; otherwise lexical fallback with `fallback_reason`.
+- `RAG_VECTOR_STORE_BACKEND=milvus` without `pymilvus` or `MILVUS_URI` -> database fallback, `requested_backend="milvus"`, and non-secret `backend_config.fallback_reason`.
+- Legacy graph node appears in active graph nodes/edges -> failing regression test.
+- Tool call includes secret-bearing inputs -> `tool_calls` and `agent_react_trace` must be redacted before persistence.
+
+### 5. Good/Base/Bad Cases
+
+- Good: a full run stores a mission plan, role roster, delegation trace, tool calls, ReAct trace, vector RAG metadata, evidence evaluation, and report diagnostics.
+- Base: no memory entries exist; vector retrieval returns `mode="vector"`, `status="empty"`, and planning continues from live input.
+- Bad: `tc_generator` routes to `coder`, or graph registers legacy script-generation nodes as active execution paths.
+- Bad: prompts receive raw unbounded logs instead of compact mission, memory, tool, and evidence summaries.
+
+### 6. Tests Required
+
+- Unit: complex objective decomposes into multiple mission subgoals with active role delegation.
+- Unit: active graph nodes/edges exclude `coder`, `executor`, `analyzer`, and `healer`.
+- Unit: `build_execution_log_payload(...)` preserves `agent_mission_plan`, `agent_roster`, `agent_delegation_trace`, and `agent_react_trace`.
+- Unit: default vector backend selects database storage.
+- Unit: Milvus backend selection exposes config metadata without requiring a runtime dependency.
+- Regression: existing API scope guardrails still reject out-of-schema generated cases and preserve safe execution policy.
+- Frontend build: Run Detail compiles after receiving the new snapshot keys.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+graph.add_node("coder", coder.run)
+graph.add_edge("tc_generator", "coder")
+```
+
+#### Correct
+
+```python
+graph.add_node("mission_planner", mission_planner.run)
+graph.add_edge("source_loader", "mission_planner")
+graph.add_edge("mission_planner", "knowledge_retriever")
+```
+
+#### Wrong
+
+```python
+entries = await db.execute(select(KnowledgeEntry))
+sources = local_cosine_sort(entries, query_vector)
+```
+
+#### Correct
+
+```python
+vector_store = get_knowledge_vector_store()
+entries = await vector_store.load_recent_entries(db, limit)
+retrieval = await vector_store.similarity_search(...)
+```
+
 ## Scenario: Vector RAG Embedding Fallback
 
 ### 1. Scope / Trigger

@@ -23,6 +23,7 @@ async def run(state: AgentState) -> AgentState:
     parsed_api_schema = state.get("parsed_api_schema")
     rag_context = state.get("rag_context") or "No relevant prior testing knowledge"
     rag_retrieval = state.get("rag_retrieval") or {}
+    mission_plan = state.get("agent_mission_plan") or {}
     db = state.get("db_session")
     install_tool_context(state)
 
@@ -84,10 +85,31 @@ async def run(state: AgentState) -> AgentState:
     if db:
         try:
             llm = await llm_gateway.get_planner(db)
+            mission_plan_context = json.dumps(
+                {
+                    "control_pattern": mission_plan.get("control_pattern"),
+                    "subgoals": mission_plan.get("subgoals", [])[:8],
+                    "memory_needs": mission_plan.get("memory_needs", [])[:5],
+                    "environment_needs": mission_plan.get("environment_needs", [])[:6],
+                    "success_criteria": mission_plan.get("success_criteria", [])[:5],
+                },
+                ensure_ascii=False,
+                default=str,
+            )[:5000] if isinstance(mission_plan, dict) else "{}"
+            tool_context = json.dumps(
+                {
+                    "skills": state.get("skill_plan", []),
+                    "roster": state.get("agent_roster", []),
+                },
+                ensure_ascii=False,
+                default=str,
+            )[:4000]
             prompt = PLANNER_PROMPT.format(
                 input_type=input_type,
                 objective=objective,
                 target_url=target_url,
+                mission_plan=mission_plan_context,
+                tool_context=tool_context,
                 api_schema_summary=schema_summary,
                 rag_context=rag_context,
             )
@@ -140,6 +162,11 @@ async def run(state: AgentState) -> AgentState:
             "categories": categories,
             "scene_hints": [h.scene for h in scene_hints],
             "auth_type": auth_chain.auth_type if auth_chain else "unknown",
+            "mission_subgoals": [
+                subgoal.get("id")
+                for subgoal in mission_plan.get("subgoals", [])
+                if isinstance(subgoal, dict)
+            ][:8] if isinstance(mission_plan, dict) else [],
             "estimated_case_count": len(parsed_api_schema) * 3 if parsed_api_schema else 5,
             "skills": [
                 skill["name"]
@@ -165,6 +192,11 @@ async def run(state: AgentState) -> AgentState:
             "strategy": "基于页面结构和 API 场景自动生成 UI 测试",
             "categories": ui_categories,
             "estimated_case_count": 5,
+            "mission_subgoals": [
+                subgoal.get("id")
+                for subgoal in mission_plan.get("subgoals", [])
+                if isinstance(subgoal, dict)
+            ][:8] if isinstance(mission_plan, dict) else [],
             "skills": [
                 skill["name"]
                 for skill in state.get("skill_plan", [])
@@ -243,6 +275,13 @@ async def run(state: AgentState) -> AgentState:
             "ui_plan": bool(ui_plan),
             "selected_skills": [skill.get("name") for skill in state.get("skill_plan", [])],
             "rag_source_count": len(rag_retrieval.get("sources") or []),
+            "mission_subgoals": len(mission_plan.get("subgoals", []))
+            if isinstance(mission_plan, dict)
+            else 0,
+        },
+        metadata={
+            "reason": "Turn mission subgoals, retrieved memory, tools, and environment observations into an executable test plan.",
+            "next_decision": "generate_cases_from_plan",
         },
     )
 

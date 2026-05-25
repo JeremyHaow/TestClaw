@@ -29,6 +29,15 @@ class AutomationSkill:
 
 TOOL_CAPABILITIES: tuple[ToolCapability, ...] = (
     ToolCapability(
+        name="agent.create_mission_plan",
+        layer="supervisor",
+        skill="agent-supervision",
+        description="Decompose the user objective into mission subgoals, active roles, memory needs, environment observations, and execution success criteria.",
+        risk="read_only",
+        input_schema={"objective": "string", "input_type": "string", "test_type": "string"},
+        output_schema={"agent_mission_plan": "object", "agent_roster": "array", "agent_delegation_trace": "array"},
+    ),
+    ToolCapability(
         name="planner.parse_requirement",
         layer="planner",
         skill="test-planning",
@@ -45,6 +54,15 @@ TOOL_CAPABILITIES: tuple[ToolCapability, ...] = (
         risk="read_only",
         input_schema={"schema": "OpenAPI endpoints", "page_snapshot": "optional string"},
         output_schema={"api_plan": "object", "ui_plan": "object"},
+    ),
+    ToolCapability(
+        name="planner.generate_test_cases",
+        layer="planner",
+        skill="test-planning",
+        description="Generate mission-aligned API and UI cases from plans, schema, memory, and environment observations.",
+        risk="read_only",
+        input_schema={"agent_mission_plan": "object", "api_plan": "object", "ui_plan": "object"},
+        output_schema={"api_cases": "array", "ui_cases": "array"},
     ),
     ToolCapability(
         name="memory.retrieve_rag_context",
@@ -198,6 +216,13 @@ TOOL_CAPABILITIES: tuple[ToolCapability, ...] = (
 
 AUTOMATION_SKILLS: tuple[AutomationSkill, ...] = (
     AutomationSkill(
+        name="agent-supervision",
+        layer="supervisor",
+        description="Create and maintain the mission-level Plan-Execute/ReAct control artifact and role delegation trace.",
+        triggers=["any run", "complex objective", "multi-step mission"],
+        tools=["agent.create_mission_plan"],
+    ),
+    AutomationSkill(
         name="test-planning",
         layer="planner",
         description="Plan test scope, priorities, dependencies, and rerun/skip strategy from user intent and discovered assets.",
@@ -205,6 +230,7 @@ AUTOMATION_SKILLS: tuple[AutomationSkill, ...] = (
         tools=[
             "planner.parse_requirement",
             "planner.generate_execution_plan",
+            "planner.generate_test_cases",
             "planner.analyze_ui_execution_context",
             "planner.evaluate_execution_evidence",
         ],
@@ -295,7 +321,7 @@ def select_skills_for_state(state: dict[str, Any]) -> list[dict[str, Any]]:
         for case in (state.get("api_cases") or [])
     )
 
-    selected = ["test-planning"]
+    selected = ["agent-supervision", "test-planning"]
     if state.get("rag_retrieval") or state.get("rag_context"):
         selected.append("rag-knowledge-retrieval")
     if test_type in {"api", "full"} or (test_type == "auto" and has_api):
@@ -347,6 +373,100 @@ def _sanitize_tool_summary(value: Any) -> Any:
     return value
 
 
+def _role_for_layer(layer: str) -> str:
+    return {
+        "supervisor": "supervisor_planner",
+        "planner": "supervisor_planner",
+        "memory": "memory_researcher",
+        "api": "api_executor",
+        "ui": "ui_explorer",
+        "reporter": "reporter",
+    }.get(str(layer or "").lower(), "supervisor_planner")
+
+
+def _default_visible_reason(tool_name: str, layer: str) -> str:
+    if tool_name.startswith("agent."):
+        return "Create or update the visible mission control plan."
+    if tool_name.startswith("memory."):
+        return "Retrieve bounded historical context before deciding the next test action."
+    if tool_name.startswith("planner.evaluate"):
+        return "Compare execution evidence with mission goals and choose the next bounded action."
+    if tool_name.startswith("planner."):
+        return "Convert mission context into executable testing strategy or cases."
+    if tool_name.startswith("api."):
+        return "Collect API evidence inside the configured schema and safety policy."
+    if tool_name.startswith("ui."):
+        return "Observe or operate the browser surface and capture user-visible evidence."
+    if tool_name.startswith("reporter."):
+        return "Summarize tested coverage, findings, evidence, and next actions."
+    return f"Run {layer or 'agent'} tool and record its observation."
+
+
+def _observation_from_call(call: dict[str, Any]) -> str:
+    status = str(call.get("status") or "unknown")
+    output = call.get("output")
+    if isinstance(output, dict):
+        for key in (
+            "next_action",
+            "next_node",
+            "verdict",
+            "status_code",
+            "mode",
+            "source_count",
+            "subgoal_count",
+            "accepted",
+        ):
+            if key in output and output.get(key) not in (None, ""):
+                return f"{status}; {key}={output.get(key)}"
+        if output:
+            return f"{status}; observed {len(output)} output field(s)"
+    return status
+
+
+def _next_decision_from_call(call: dict[str, Any]) -> str:
+    metadata = call.get("metadata") if isinstance(call.get("metadata"), dict) else {}
+    if metadata.get("next_decision"):
+        return str(metadata["next_decision"])[:240]
+    output = call.get("output")
+    if isinstance(output, dict):
+        if output.get("next_action"):
+            return str(output["next_action"])[:240]
+        if output.get("next_node"):
+            return str(output["next_node"])[:240]
+    status = str(call.get("status") or "")
+    if status in {"failed", "error"}:
+        return "surface_blocker_or_fallback"
+    if status == "skipped":
+        return "continue_without_this_tool"
+    return "continue_mission"
+
+
+def _append_react_trace(state: dict[str, Any], call: dict[str, Any]) -> None:
+    metadata = call.get("metadata") if isinstance(call.get("metadata"), dict) else {}
+    layer = str(call.get("layer") or "")
+    tool_name = str(call.get("tool") or "unknown")
+    trace = {
+        "actor": metadata.get("actor") or _role_for_layer(layer),
+        "reason": str(metadata.get("reason") or _default_visible_reason(tool_name, layer))[:360],
+        "action": tool_name,
+        "tool": tool_name,
+        "status": call.get("status"),
+        "observation": _observation_from_call(call)[:360],
+        "evidence": call.get("output") or {},
+        "next_decision": _next_decision_from_call(call),
+        "timestamp": call.get("timestamp"),
+    }
+    if call.get("case_index") is not None:
+        trace["case_index"] = call.get("case_index")
+    if call.get("case_title"):
+        trace["case_title"] = call.get("case_title")
+
+    traces = state.setdefault("agent_react_trace", [])
+    traces.append(redact_sensitive_data(trace))
+    if len(traces) > 500:
+        del traces[:-500]
+
+
 def record_tool_call(
     state: dict[str, Any],
     *,
@@ -377,12 +497,13 @@ def record_tool_call(
     if case_title:
         call["case_title"] = case_title
     if metadata:
-        call["metadata"] = metadata
+        call["metadata"] = _sanitize_tool_summary(metadata)
 
     calls = state.setdefault("tool_calls", [])
     calls.append(call)
     if len(calls) > 1000:
         del calls[:-1000]
+    _append_react_trace(state, call)
     return call
 
 

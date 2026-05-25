@@ -6,15 +6,25 @@ import pytest
 from langchain_openai import OpenAIEmbeddings
 
 from app.agent.json_utils import parse_llm_json
-from app.agent.nodes import api_runner, execution_evaluator, knowledge_retriever, reporter, tc_generator
+from app.agent.nodes import (
+    api_runner,
+    execution_evaluator,
+    knowledge_retriever,
+    mission_planner,
+    reporter,
+    tc_generator,
+)
 from app.agent.nodes.ui_runner import _build_ui_case_batches
+from app.agent.progress import build_execution_log_payload
 from app.agent.tool_registry import build_tool_registry, select_skills_for_state
 from app.core.llm_gateway import LLMGateway
 from app.core.redaction import REDACTED_VALUE
 from app.models.llm_provider import LLMProvider, ProviderType
 from app.services.api_auth import AuthResolution
+from app.services import vector_store
 from app.services.embedding_service import EmbeddingService, EmbeddingUnavailableError
 from app.services.knowledge_service import KnowledgeService
+from app.services.vector_store import DatabaseKnowledgeVectorStore, MilvusKnowledgeVectorStore
 from app.tools.mock_data import generate_mock_json_body
 
 
@@ -44,6 +54,7 @@ def test_tool_registry_selects_api_ui_and_reporting_skills() -> None:
     tool_names = {tool["name"] for tool in registry["tools"]}
 
     assert {
+        "agent-supervision",
         "test-planning",
         "api-contract-testing",
         "api-mock-data-generation",
@@ -136,6 +147,66 @@ def test_tool_registry_exposes_evidence_evaluation_tool() -> None:
 
     assert "planner.evaluate_execution_evidence" in tool_names
     assert "planner.evaluate_execution_evidence" in planning["tools"]
+
+
+@pytest.mark.asyncio
+async def test_mission_planner_decomposes_complex_objective_and_persists_trace() -> None:
+    state = await mission_planner.run(
+        {
+            "objective": "Log in, verify dashboard metrics, test item search, and validate API health",
+            "target_url": "https://app.example.test/login",
+            "ui_seed_url": "https://app.example.test/login",
+            "source_input": "https://app.example.test/login",
+            "input_type": "url",
+            "test_type": "full",
+            "parsed_api_schema": [{"method": "GET", "path": "/health", "summary": "Health"}],
+            "api_execution_policy": "safe_read_only",
+            "workflow_steps": [],
+        }
+    )
+
+    mission = state["agent_mission_plan"]
+    role_names = {role["role"] for role in state["agent_roster"]}
+    delegated_roles = {item["to"] for item in state["agent_delegation_trace"]}
+    react_trace = state["agent_react_trace"]
+    payload = build_execution_log_payload(state)
+
+    assert mission["control_pattern"] == "plan_execute_react"
+    assert len(mission["subgoals"]) >= 7
+    assert mission["memory_needs"]
+    assert any(need["need"] == "browser_surface" for need in mission["environment_needs"])
+    assert {"supervisor_planner", "memory_researcher", "api_executor", "ui_explorer"} <= role_names
+    assert {"memory_researcher", "api_executor", "ui_explorer", "evidence_evaluator"} <= delegated_roles
+    assert react_trace[-1]["action"] == "agent.create_mission_plan"
+    assert react_trace[-1]["reason"]
+    assert react_trace[-1]["observation"]
+    assert payload["agent_mission_plan"]["subgoals"] == mission["subgoals"]
+    assert payload["agent_roster"] == state["agent_roster"]
+    assert payload["agent_delegation_trace"] == state["agent_delegation_trace"]
+    assert payload["agent_react_trace"] == state["agent_react_trace"]
+
+
+def test_vector_store_selects_default_database_backend(monkeypatch) -> None:
+    monkeypatch.setattr(vector_store.settings, "RAG_VECTOR_STORE_BACKEND", "database")
+
+    store = vector_store.get_knowledge_vector_store()
+
+    assert isinstance(store, DatabaseKnowledgeVectorStore)
+    assert store.backend_info()["active"] == "database"
+
+
+def test_vector_store_selects_milvus_config_without_runtime_dependency(monkeypatch) -> None:
+    monkeypatch.setattr(vector_store.settings, "RAG_VECTOR_STORE_BACKEND", "milvus")
+    monkeypatch.setattr(vector_store.settings, "MILVUS_URI", "http://milvus.example.test:19530")
+    monkeypatch.setattr(vector_store.settings, "MILVUS_COLLECTION", "testclaw_agent_memory")
+
+    store = vector_store.get_knowledge_vector_store()
+    info = store.backend_info()
+
+    assert isinstance(store, MilvusKnowledgeVectorStore)
+    assert info["requested"] == "milvus"
+    assert info["collection"] == "testclaw_agent_memory"
+    assert "dependency_available" in info
 
 
 def test_llm_json_parser_handles_fenced_extra_text_and_near_json() -> None:
@@ -737,6 +808,7 @@ async def test_knowledge_retriever_uses_vector_similarity_and_redacts_context(mo
 
     assert state["rag_retrieval"]["status"] == "matched"
     assert state["rag_retrieval"]["mode"] == "vector"
+    assert state["rag_retrieval"]["backend"] == "database"
     assert state["rag_retrieval"]["vector_source_count"] == 2
     assert state["rag_retrieval"]["sources"][0]["id"] == "knowledge-1"
     assert state["rag_retrieval"]["sources"][0]["mode"] == "vector"

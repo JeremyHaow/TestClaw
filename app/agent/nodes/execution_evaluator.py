@@ -393,6 +393,16 @@ async def _model_decision(
             test_type=state.get("test_type"),
             objective=state.get("objective", ""),
             target_url=state.get("target_url", ""),
+            mission_plan=json.dumps(
+                {
+                    "control_pattern": (state.get("agent_mission_plan") or {}).get("control_pattern"),
+                    "subgoals": (state.get("agent_mission_plan") or {}).get("subgoals", [])[:8],
+                    "success_criteria": (state.get("agent_mission_plan") or {}).get("success_criteria", [])[:5],
+                    "delegation": (state.get("agent_delegation_trace") or [])[-8:],
+                },
+                ensure_ascii=False,
+                default=str,
+            )[:5000],
             evidence_summary=json.dumps(summary, ensure_ascii=False, default=str)[:6000],
             tool_call_summary=json.dumps(tool_calls, ensure_ascii=False, default=str)[:4000],
             prior_evaluations=json.dumps(
@@ -627,6 +637,10 @@ async def run(state: AgentState) -> AgentState:
             "sufficient_evidence": evaluation["sufficient_evidence"],
             "source": evaluation["source"],
             "model_error": model_error,
+        },
+        metadata={
+            "reason": "Evaluate visible evidence against mission success criteria and decide whether to continue, replan, or report.",
+            "next_decision": evaluation["next_action"],
         },
     )
 

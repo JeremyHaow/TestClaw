@@ -293,6 +293,7 @@ async def run(state: AgentState) -> AgentState:
     auth_info = state.get("auth_chain")
     rag_context = state.get("rag_context") or "No relevant prior testing knowledge"
     replan_feedback = (state.get("agent_replan_feedback") or "").strip()
+    mission_plan = state.get("agent_mission_plan") or {}
     base_url = (state.get("base_url_override") or state.get("target_url") or "").rstrip("/")
     db = state.get("db_session")
     execution_policy = str(state.get("api_execution_policy") or "safe_read_only").strip().lower()
@@ -312,6 +313,12 @@ async def run(state: AgentState) -> AgentState:
                     "ui_plan": ui_plan,
                     "replan_feedback": replan_feedback or None,
                     "previous_attempts": (state.get("agent_attempt_history") or [])[-3:],
+                    "mission_subgoals": mission_plan.get("subgoals", [])[:8]
+                    if isinstance(mission_plan, dict)
+                    else [],
+                    "selected_skills": mission_plan.get("selected_skills", [])
+                    if isinstance(mission_plan, dict)
+                    else [],
                 },
                 ensure_ascii=False,
                 default=str,
@@ -340,6 +347,15 @@ async def run(state: AgentState) -> AgentState:
 
             prompt = CASE_GENERATOR_PROMPT.format(
                 test_plan=plan_summary,
+                mission_plan=json.dumps(
+                    {
+                        "subgoals": mission_plan.get("subgoals", [])[:8],
+                        "environment_needs": mission_plan.get("environment_needs", [])[:6],
+                        "success_criteria": mission_plan.get("success_criteria", [])[:5],
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                )[:5000] if isinstance(mission_plan, dict) else "{}",
                 api_schema=schema_str,
                 input_type=input_type,
                 rag_context=rag_context,
@@ -423,6 +439,30 @@ async def run(state: AgentState) -> AgentState:
     state["api_cases"] = api_cases
     state["ui_cases"] = ui_cases
     state["test_cases"] = api_cases + ui_cases
+
+    record_tool_call(
+        state,
+        tool_name="planner.generate_test_cases",
+        layer="planner",
+        status="success",
+        input_summary={
+            "test_type": test_type,
+            "api_plan": bool(api_plan),
+            "ui_plan": bool(ui_plan),
+            "mission_subgoals": len(mission_plan.get("subgoals", []))
+            if isinstance(mission_plan, dict)
+            else 0,
+        },
+        output_summary={
+            "api_cases": len(api_cases),
+            "ui_cases": len(ui_cases),
+            "used_replan_feedback": bool(replan_feedback),
+        },
+        metadata={
+            "reason": "Generate concrete test cases from the mission plan, memory, schema, and UI target context.",
+            "next_decision": "route_to_api_or_ui_execution",
+        },
+    )
 
     # Persist to DB
     if db and (api_cases or ui_cases):

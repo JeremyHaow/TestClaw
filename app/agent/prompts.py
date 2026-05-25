@@ -38,6 +38,8 @@ PLANNER_PROMPT = """你是测试策略专家。根据以下信息制定测试计
 输入类型：{input_type}
 测试目标：{objective}
 目标 URL：{target_url}
+任务控制计划：{mission_plan}
+可用工具/技能：{tool_context}
 API Schema 摘要：{api_schema_summary}
 RAG 上下文：{rag_context}
 
@@ -63,12 +65,15 @@ RAG 上下文：{rag_context}
 规则：
 1. 如果有 API Schema，api_plan 必须充分利用 schema 中的每个 endpoint
 2. 如果只有 URL（无 API Schema），ui_plan 应更详细
-3. 输出纯 JSON，不要包含 Markdown 标记
+3. 将任务控制计划里的 subgoals、memory_needs、environment_needs 和 selected_skills 作为边界上下文使用
+4. 不要输出隐藏推理过程；只在 strategy 字段给出简短、可观察的规划依据
+5. 输出纯 JSON，不要包含 Markdown 标记
 """
 
 CASE_GENERATOR_PROMPT = """你是测试用例设计专家。根据以下测试计划和 API Schema，生成详细的测试用例。
 
 测试计划：{test_plan}
+任务控制计划：{mission_plan}
 API Schema：{api_schema}
 输入类型：{input_type}
 RAG 上下文：{rag_context}
@@ -133,7 +138,9 @@ RAG 上下文：{rag_context}
 6. 默认安全策略下不要生成 POST/PUT/PATCH/DELETE 执行用例；如需要更深断言，只能基于已记录的响应 schema，无法确认的断言应设为非阻塞 advisory
 7. UI 用例应覆盖：页面加载、导航、表单交互、错误提示、响应式布局等场景
 8. 每种类型至少生成 5 个用例
-9. 输出纯 JSON，不要包含 Markdown 标记
+9. 用例必须能映射到任务控制计划中的 subgoals；不要生成任务范围外的用例
+10. 不要输出隐藏推理过程；如需说明依据，使用简短、可观察的字段
+11. 输出纯 JSON，不要包含 Markdown 标记
 """
 
 PLAYWRIGHT_CLI_AGENT_PROMPT = """你是 UI 自动化测试专家。根据以下测试用例，生成 playwright-cli 命令序列。
@@ -212,6 +219,8 @@ EVIDENCE_EVALUATOR_PROMPT = """你是 TestClaw 的测试执行质量评估智能
 测试类型：{test_type}
 测试目标：{objective}
 目标 URL：{target_url}
+任务控制计划：
+{mission_plan}
 
 执行证据摘要：
 {evidence_summary}
@@ -243,7 +252,8 @@ EVIDENCE_EVALUATOR_PROMPT = """你是 TestClaw 的测试执行质量评估智能
 4. 如果 API 用例没有产生可执行请求，但存在 schema、base URL 或可读端点线索，应建议 replan_api。
 5. 不要假设固定网站、固定接口、固定截图或固定业务菜单；只依据证据摘要和工具调用。
 6. API 重规划只能在已加载 OpenAPI schema 和执行策略范围内加深已记录 endpoint 的证据；不要建议不存在路径、schema 外路径、鉴权绕过测试或安全策略禁止的方法。
-7. 输出纯 JSON，不要包含 Markdown。
+7. 不要输出隐藏推理过程；reason 使用一句可观察的判断依据。
+8. 输出纯 JSON，不要包含 Markdown。
 """
 
 LOGIN_DETAILS_PROMPT = """你是测试前置说明理解器。用户提供的信息不一定是登录信息，也可能是测试范围、账号、环境说明、禁止操作、验证码、租户选择、语言选择或其他准备事项。

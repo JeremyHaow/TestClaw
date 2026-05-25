@@ -11,12 +11,26 @@ def test_graph_routes_source_loader_through_rag_before_planning() -> None:
     graph = build_graph().get_graph()
     edges = {(edge.source, edge.target) for edge in graph.edges}
 
-    assert ("source_loader", "knowledge_retriever") in edges
+    assert ("source_loader", "mission_planner") in edges
+    assert ("mission_planner", "knowledge_retriever") in edges
     assert ("knowledge_retriever", "planner") in edges
     assert ("source_loader", "planner") not in edges
     assert ("api_runner", "execution_evaluator") in edges
     assert ("ui_runner", "execution_evaluator") in edges
     assert ("ui_runner", "reporter") not in edges
+
+
+def test_legacy_coder_executor_route_is_not_active() -> None:
+    graph = build_graph().get_graph()
+    node_ids = set(graph.nodes)
+    edges = {(edge.source, edge.target) for edge in graph.edges}
+
+    assert {"coder", "executor", "analyzer", "healer"}.isdisjoint(node_ids)
+    assert not any(
+        node in {"coder", "executor", "analyzer", "healer"}
+        for edge in edges
+        for node in edge
+    )
 
 
 def test_after_tc_generator_routes_ui_runs_through_login_chain() -> None:

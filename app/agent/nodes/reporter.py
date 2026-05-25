@@ -500,6 +500,10 @@ async def run(state: AgentState) -> AgentState:
         "recommendations": recommendations,
         "execution_notes": execution_notes,
         "agent_diagnostics": {
+            "mission_plan": state.get("agent_mission_plan"),
+            "roster": state.get("agent_roster", []),
+            "delegation_trace": state.get("agent_delegation_trace", []),
+            "react_trace": (state.get("agent_react_trace") or [])[-80:],
             "latest_evaluation": state.get("evidence_evaluation"),
             "evaluations": state.get("agent_evaluations", []),
             "attempt_history": state.get("agent_attempt_history", []),
@@ -533,6 +537,10 @@ async def run(state: AgentState) -> AgentState:
             "verdict": verdict,
             "bugs_found": len(final_report["bugs_found"]),
             "recommendations": len(final_report["recommendations"]),
+        },
+        metadata={
+            "reason": "Synthesize mission evidence, tool observations, findings, and reusable assets into the final report.",
+            "next_decision": "complete_or_persist_memory",
         },
     )
     state["tool_summary"] = summarize_tool_calls(state.get("tool_calls"))

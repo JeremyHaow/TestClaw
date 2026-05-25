@@ -1,15 +1,12 @@
 from langgraph.graph import END, StateGraph
 
 from app.agent.nodes import (
-    analyzer,
     api_runner,
-    coder,
-    executor,
     execution_evaluator,
-    healer,
     input_classifier,
     knowledge_retriever,
     knowledge_sink,
+    mission_planner,
     planner,
     reporter,
     source_loader,
@@ -81,34 +78,13 @@ def _after_ui_login(state: AgentState) -> str:
     return "ui_test_planner"
 
 
-def _after_coder(state: AgentState) -> str:
-    return "executor"
-
-
-def _after_executor(state: AgentState) -> str:
-    return "analyzer"
-
-
-def _after_analyzer(state: AgentState) -> str:
-    result = state.get("execution_result") or {}
-    if result.get("status_code") == 0:
-        return "reporter"
-    retry = state.get("retry_count", 0)
-    if retry >= 3:
-        return "reporter"
-    return "healer"
-
-
-def _after_healer(state: AgentState) -> str:
-    return "executor"
-
-
 def build_graph():
     graph = StateGraph(AgentState)
 
     # Core workflow nodes
     graph.add_node("input_classifier", input_classifier.run)
     graph.add_node("source_loader", source_loader.run)
+    graph.add_node("mission_planner", mission_planner.run)
     graph.add_node("knowledge_retriever", knowledge_retriever.run)
     graph.add_node("planner", planner.run)
     graph.add_node("tc_generator", tc_generator.run)
@@ -119,11 +95,6 @@ def build_graph():
     graph.add_node("ui_runner", ui_runner.run)
     graph.add_node("reporter", reporter.run)
 
-    # Legacy nodes
-    graph.add_node("coder", coder.run)
-    graph.add_node("executor", executor.run)
-    graph.add_node("analyzer", analyzer.run)
-    graph.add_node("healer", healer.run)
     graph.add_node("knowledge_sink", knowledge_sink.run)
 
     # Entry point
@@ -131,7 +102,8 @@ def build_graph():
 
     # Linear edges
     graph.add_edge("input_classifier", "source_loader")
-    graph.add_edge("source_loader", "knowledge_retriever")
+    graph.add_edge("source_loader", "mission_planner")
+    graph.add_edge("mission_planner", "knowledge_retriever")
     graph.add_edge("knowledge_retriever", "planner")
     graph.add_edge("planner", "tc_generator")
     graph.add_conditional_edges(
@@ -145,14 +117,13 @@ def build_graph():
     graph.add_edge("ui_test_planner", "ui_runner")
     graph.add_edge("ui_runner", "execution_evaluator")
 
-    # Conditional: tc_generator → api_runner | ui_login | coder
+    # Conditional: tc_generator -> api_runner | ui_login
     graph.add_conditional_edges(
         "tc_generator",
         _after_tc_generator,
         {
             "api_runner": "api_runner",
             "ui_login": "ui_login",
-            "coder": "coder",
         },
     )
 
@@ -167,16 +138,6 @@ def build_graph():
             "reporter": "reporter",
         },
     )
-
-    # Legacy flow
-    graph.add_edge("coder", "executor")
-    graph.add_edge("executor", "analyzer")
-    graph.add_conditional_edges(
-        "analyzer",
-        _after_analyzer,
-        {"reporter": "reporter", "healer": "healer"},
-    )
-    graph.add_edge("healer", "executor")
 
     # Reporter → knowledge_sink → END
     graph.add_edge("reporter", "knowledge_sink")

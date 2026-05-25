@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     DEFAULT_MODEL_VISION: str = "gpt-4o"
     DEFAULT_MODEL_PLANNER: str = "gpt-4o"
     DEFAULT_EMBEDDING_MODEL: str = "text-embedding-3-small"
+    RAG_VECTOR_STORE_BACKEND: str = "database"
+    MILVUS_URI: str = ""
+    MILVUS_TOKEN: str = ""
+    MILVUS_COLLECTION: str = "testclaw_knowledge"
+    MILVUS_DIMENSION: int = 384
     SANDBOX_TIMEOUT: int = 120
     MAX_RETRY_COUNT: int = 3
     AGENT_MAX_REPLAN_ATTEMPTS: int = 2
