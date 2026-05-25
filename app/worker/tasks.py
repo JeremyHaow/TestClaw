@@ -87,7 +87,9 @@ def _safe_task_result(state: dict[str, Any]) -> dict[str, Any]:
 
 
 @celery_app.task(bind=True, name="run_agent_task")
-def run_agent_task(self, task_id: str, objective: str, target_url: str, **kwargs):
+def run_agent_task(
+    self: Any, task_id: str, objective: str, target_url: str, **kwargs: Any
+) -> dict[str, Any]:
     logger.info("[Agent] Starting task %s", task_id)
     return asyncio.run(_run(task_id, objective, target_url, **kwargs))
 
@@ -127,7 +129,7 @@ async def run_graph_with_progress(state: dict[str, Any]) -> dict[str, Any]:
     return final_state
 
 
-async def _run(task_id: str, objective: str, target_url: str, **kwargs: Any):
+async def _run(task_id: str, objective: str, target_url: str, **kwargs: Any) -> dict[str, Any]:
     async with _worker_session_scope() as db:
         task = await task_service.get(db, task_id)
         if task:
