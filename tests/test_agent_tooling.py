@@ -1488,6 +1488,53 @@ async def test_api_runner_extracts_and_injects_dependencies_with_tool_calls(monk
 
 
 @pytest.mark.asyncio
+async def test_api_runner_write_allowed_blocks_mutating_curated_case(monkeypatch) -> None:
+    calls = []
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs):
+            calls.append({"method": method, "url": url, **kwargs})
+            raise AssertionError("curated mutating write should be blocked before HTTP execution")
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "api_execution_policy": "write_allowed",
+            "api_cases": [
+                {
+                    "title": "create item",
+                    "request_template": {
+                        "method": "POST",
+                        "path": "/items",
+                        "body": {"name": "TestClaw temporary item"},
+                    },
+                }
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+
+    assert calls == []
+    assert api_result["executed"] == 0
+    assert api_result["skipped"] == 1
+    assert api_result["results"][0]["skip_type"] == api_runner.SAFE_WRITE_BLOCK_SKIP_TYPE
+
+
+@pytest.mark.asyncio
 async def test_api_runner_generates_mock_body_for_authenticated_write_schema(monkeypatch) -> None:
     calls = []
 
@@ -1537,7 +1584,8 @@ async def test_api_runner_generates_mock_body_for_authenticated_write_schema(mon
             "parsed_api_schema": [
                 {
                     "method": "POST",
-                    "path": "/users",
+                    "path": "/users/export",
+                    "summary": "Export users",
                     "auth_required": True,
                     "request_body_content_type": "application/json",
                     "request_body_schema": {
@@ -1681,7 +1729,8 @@ async def test_api_runner_accepts_validation_business_error_envelope_500(monkeyp
             "parsed_api_schema": [
                 {
                     "method": "POST",
-                    "path": "/items",
+                    "path": "/items/export",
+                    "summary": "Export items",
                     "request_body_content_type": "application/json",
                     "request_body_schema": {
                         "type": "object",
@@ -2485,6 +2534,68 @@ async def test_api_runner_falls_back_to_safe_schema_when_cases_are_not_safe_exec
 
 
 @pytest.mark.asyncio
+async def test_api_runner_write_allowed_blocks_mutating_schema_requests(monkeypatch) -> None:
+    calls = []
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs):
+            calls.append({"method": method, "url": url, **kwargs})
+            raise AssertionError("mutating write request should be blocked before HTTP execution")
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "http://api.example.test",
+            "api_execution_policy": "write_allowed",
+            "parsed_api_schema": [
+                {
+                    "method": "POST",
+                    "path": "/items",
+                    "summary": "Create item",
+                    "request_body_content_type": "application/json",
+                    "request_body_schema": {
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {"name": {"type": "string"}},
+                    },
+                    "response_status": "200",
+                },
+                {
+                    "method": "DELETE",
+                    "path": "/items/{id}",
+                    "summary": "Delete item",
+                    "response_status": "200",
+                },
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+
+    assert calls == []
+    assert api_result["http_executed"] == 0
+    assert api_result["executed"] == 0
+    assert api_result["skipped"] == api_result["total"]
+    assert {item.get("skip_type") for item in api_result["results"]} == {
+        api_runner.SAFE_WRITE_BLOCK_SKIP_TYPE
+    }
+    assert "api.safe_write_gate" in {call["tool"] for call in result["tool_calls"]}
+
+
+@pytest.mark.asyncio
 async def test_api_runner_skips_same_method_writes_after_environment_405(monkeypatch) -> None:
     calls = []
 
@@ -2522,7 +2633,8 @@ async def test_api_runner_skips_same_method_writes_after_environment_405(monkeyp
             "parsed_api_schema": [
                 {
                     "method": "POST",
-                    "path": "/items",
+                    "path": "/items/export",
+                    "summary": "Export items",
                     "request_body_content_type": "application/json",
                     "request_body_schema": {
                         "type": "object",
@@ -2533,7 +2645,8 @@ async def test_api_runner_skips_same_method_writes_after_environment_405(monkeyp
                 },
                 {
                     "method": "POST",
-                    "path": "/areas",
+                    "path": "/areas/export",
+                    "summary": "Export areas",
                     "request_body_content_type": "application/json",
                     "request_body_schema": {
                         "type": "object",
@@ -2551,7 +2664,7 @@ async def test_api_runner_skips_same_method_writes_after_environment_405(monkeyp
 
     assert len(calls) == 1
     assert calls[0]["method"] == "POST"
-    assert calls[0]["url"] == "http://api.example.test/items"
+    assert calls[0]["url"] == "http://api.example.test/items/export"
     assert api_result["total"] > 1
     assert api_result["http_executed"] == 1
     assert api_result["executed"] == 0

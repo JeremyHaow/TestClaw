@@ -54,6 +54,57 @@ API_EXECUTION_POLICIES = {
     "write_allowed",
 }
 BINARY_RESPONSE_PREVIEW = "Binary or non-text response omitted from execution log"
+SAFE_WRITE_BLOCK_SKIP_TYPE = "safe_write_gate_blocked"
+SAFE_WRITE_BLOCK_REASON = (
+    "write_allowed 策略仍需通过安全写入闸门；当前请求看起来会修改业务数据，"
+    "且没有被识别为登录、验证码、导出/下载或鉴权负向探测，因此未执行。"
+)
+_NON_MUTATING_WRITE_MARKERS = (
+    "login",
+    "signin",
+    "token",
+    "captcha",
+    "export",
+    "download",
+    "登录",
+    "验证码",
+    "导出",
+    "下载",
+)
+_HIGH_RISK_WRITE_MARKERS = (
+    "delete",
+    "remove",
+    "clean",
+    "force",
+    "reset",
+    "password",
+    "passwd",
+    "role",
+    "permission",
+    "grant",
+    "authorize",
+    "authuser",
+    "cancelall",
+    "shipment",
+    "warehousing",
+    "approve",
+    "audit",
+    "pay",
+    "refund",
+    "删除",
+    "清理",
+    "强退",
+    "重置",
+    "密码",
+    "角色",
+    "权限",
+    "授权",
+    "出库",
+    "入库",
+    "审核",
+    "支付",
+    "退款",
+)
 
 
 def _max_executed_requests() -> int | None:
@@ -199,8 +250,76 @@ def _is_endpoint_auth_required(endpoint: dict) -> bool:
     return bool(endpoint.get("auth_required"))
 
 
+def _request_descriptor_text(
+    *,
+    method: str,
+    path_or_url: str,
+    label: str | None = None,
+    endpoint: dict | None = None,
+    case: dict | None = None,
+) -> str:
+    parts: list[str] = [method, path_or_url, label or ""]
+    for source in (endpoint or {}, case or {}):
+        for key in ("path", "summary", "description", "operationId", "title", "category"):
+            value = source.get(key)
+            if value:
+                parts.append(str(value))
+        tags = source.get("tags")
+        if isinstance(tags, list):
+            parts.extend(str(tag) for tag in tags)
+    return " ".join(parts).lower()
+
+
+def _is_non_mutating_write_descriptor(text: str) -> bool:
+    return any(marker.lower() in text for marker in _NON_MUTATING_WRITE_MARKERS)
+
+
+def _is_high_risk_write_descriptor(text: str) -> bool:
+    return any(marker.lower() in text for marker in _HIGH_RISK_WRITE_MARKERS)
+
+
+def _safe_write_skip_reason(
+    *,
+    method: str,
+    path_or_url: str,
+    label: str | None = None,
+    endpoint: dict | None = None,
+    case: dict | None = None,
+    category: str | None = None,
+    expected_status=None,
+) -> str | None:
+    method = str(method or "GET").upper()
+    if method not in WRITE_API_METHODS:
+        return None
+
+    descriptor = _request_descriptor_text(
+        method=method,
+        path_or_url=path_or_url,
+        label=label,
+        endpoint=endpoint,
+        case=case,
+    )
+    if method == "DELETE":
+        return SAFE_WRITE_BLOCK_REASON
+
+    if (
+        str(category or "").upper() == "AUTH"
+        and _is_endpoint_auth_required(endpoint or {})
+        and (_parse_status_values(expected_status) & {401, 403})
+    ):
+        return None
+
+    if _is_non_mutating_write_descriptor(descriptor):
+        return None
+
+    if _is_high_risk_write_descriptor(descriptor):
+        return SAFE_WRITE_BLOCK_REASON
+
+    return SAFE_WRITE_BLOCK_REASON
+
+
 def _make_skipped_result(req: dict, reason: str) -> dict:
-    return {
+    result = {
         "label": req.get("label", f"{req.get('method', 'GET')} {req.get('url', '')}"),
         "method": req.get("method", "GET"),
         "url": req.get("url", ""),
@@ -216,6 +335,11 @@ def _make_skipped_result(req: dict, reason: str) -> dict:
         "category": req.get("category", "SKIPPED"),
         "assertion_results": [],
     }
+    if req.get("skip_type"):
+        result["skip_type"] = req.get("skip_type")
+    if req.get("failure_type"):
+        result["failure_type"] = req.get("failure_type")
+    return result
 
 
 def _make_environment_skipped_result(
@@ -1029,6 +1153,29 @@ def _build_case_test_requests(
                 "skip_reason": "当前策略为安全只读，未执行会创建、修改或删除数据的请求",
             })
             continue
+        if method in WRITE_API_METHODS:
+            safe_write_reason = _safe_write_skip_reason(
+                method=method,
+                path_or_url=tmpl.get("path") or tmpl.get("url") or url,
+                label=case.get("title"),
+                case=case,
+                category=case.get("category"),
+                expected_status=tmpl.get("expected_status", case.get("expected_status", 200)),
+            )
+            if safe_write_reason:
+                requests.append({
+                    "label": case.get("title", f"BLOCKED_WRITE {method} {url}"),
+                    "method": method,
+                    "url": url,
+                    "headers": {},
+                    "body": None,
+                    "expected_status": None,
+                    "category": "SKIPPED",
+                    "skip_reason": safe_write_reason,
+                    "skip_type": SAFE_WRITE_BLOCK_SKIP_TYPE,
+                    "failure_type": SAFE_WRITE_BLOCK_SKIP_TYPE,
+                })
+                continue
         content_type = (
             tmpl.get("content_type")
             or tmpl.get("request_body_content_type")
@@ -1253,6 +1400,31 @@ def _build_test_requests(
                 "skip_reason": "当前策略为安全只读，未执行会创建、修改或删除数据的请求",
             })
             continue
+        if method in WRITE_API_METHODS:
+            safe_write_reason = _safe_write_skip_reason(
+                method=method,
+                path_or_url=path,
+                label=f"{method} {path}",
+                endpoint=endpoint,
+                category="SMOKE",
+                expected_status=_parse_status(endpoint.get("response_status", "200"), default=200),
+            )
+            if safe_write_reason:
+                requests.append({
+                    "label": f"BLOCKED_WRITE {method} {path}",
+                    "method": method,
+                    "url": full_url,
+                    "schema_method": method,
+                    "schema_path": path,
+                    "headers": {},
+                    "body": None,
+                    "expected_status": None,
+                    "category": "SKIPPED",
+                    "skip_reason": safe_write_reason,
+                    "skip_type": SAFE_WRITE_BLOCK_SKIP_TYPE,
+                    "failure_type": SAFE_WRITE_BLOCK_SKIP_TYPE,
+                })
+                continue
 
         required_fields = _body_required_fields(endpoint)
         query_params = _extract_query_params(endpoint)
