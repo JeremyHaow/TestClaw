@@ -7,6 +7,7 @@ import re
 import shutil
 import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -17,7 +18,9 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse
-from sqlalchemy import func, select
+from sqlalchemy import case as sql_case, cast, func, select
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import settings
 
@@ -55,7 +58,11 @@ from app.services.task_service import (
     normalize_test_type,
     task_service,
 )
-from app.api.v1.test_cases import _extract_playwright_commands, _extract_request_template, _suite_case_kind
+from app.api.v1.test_cases import (
+    _extract_playwright_commands,
+    _extract_request_template,
+    _suite_case_kind,
+)
 from app.worker.tasks import run_agent_task, run_graph_with_progress
 
 logger = logging.getLogger(__name__)
@@ -497,7 +504,13 @@ def _expected_flow_for(input_type: str, test_type: str, has_base_url: bool = Fal
     if input_type in ("swagger_url", "swagger_json", "swagger_yaml") and not has_base_url:
         return ["识别 Swagger", "解析 API", "生成接口用例", "执行 API 测试", "生成报告"]
     if input_type in ("swagger_url", "swagger_json", "swagger_yaml"):
-        return ["识别 Swagger", "解析 API", "执行 API 测试", "如有 UI 入口则继续 UI 测试", "生成报告"]
+        return [
+            "识别 Swagger",
+            "解析 API",
+            "执行 API 测试",
+            "如有 UI 入口则继续 UI 测试",
+            "生成报告",
+        ]
     return ["识别目标", "准备浏览器上下文", "规划 UI 场景", "执行 UI 测试", "生成报告"]
 
 
@@ -508,7 +521,9 @@ async def _count_rows(db: DbSession, model: type[Any]) -> int:
 
 async def _count_default_planners(db: DbSession) -> int:
     result = await db.execute(
-        select(func.count()).select_from(LLMProvider).where(
+        select(func.count())
+        .select_from(LLMProvider)
+        .where(
             LLMProvider.is_active.is_(True),
             LLMProvider.is_default_planner.is_(True),
         )
@@ -518,7 +533,9 @@ async def _count_default_planners(db: DbSession) -> int:
 
 async def _count_default_vision_models(db: DbSession) -> int:
     result = await db.execute(
-        select(func.count()).select_from(LLMProvider).where(
+        select(func.count())
+        .select_from(LLMProvider)
+        .where(
             LLMProvider.is_active.is_(True),
             LLMProvider.is_default_vision.is_(True),
         )
@@ -544,7 +561,9 @@ async def _best_effort_endpoint_count(source: str, input_type: str) -> int | Non
         return None
 
 
-async def _best_effort_api_profile(source: str, input_type: str, api_execution_policy: str) -> dict[str, Any]:
+async def _best_effort_api_profile(
+    source: str, input_type: str, api_execution_policy: str
+) -> dict[str, Any]:
     if input_type == "url":
         return {
             "endpoint_count": None,
@@ -580,10 +599,9 @@ async def _best_effort_api_profile(source: str, input_type: str, api_execution_p
         if input_type == "swagger_url":
             prefix_rewrite = _infer_proxy_prefix_rewrite(source, endpoints)
             endpoints = _apply_path_prefix_rewrite(endpoints, prefix_rewrite)
-        inferred_target_url = (
-            _extract_document_base_url(content, source_url=source if input_type == "swagger_url" else None)
-            or (_extract_base_url(source) if input_type == "swagger_url" else None)
-        )
+        inferred_target_url = _extract_document_base_url(
+            content, source_url=source if input_type == "swagger_url" else None
+        ) or (_extract_base_url(source) if input_type == "swagger_url" else None)
         policy = _normalize_api_execution_policy(api_execution_policy)
         write_allowed = _policy_allows_write(policy)
         skipped_for_policy = sum(
@@ -593,7 +611,9 @@ async def _best_effort_api_profile(source: str, input_type: str, api_execution_p
         )
         return {
             "endpoint_count": len(endpoints),
-            "auth_required_count": sum(1 for endpoint in endpoints if endpoint.get("auth_required")),
+            "auth_required_count": sum(
+                1 for endpoint in endpoints if endpoint.get("auth_required")
+            ),
             "estimated_executable_count": max(len(endpoints) - skipped_for_policy, 0),
             "estimated_skipped_count": skipped_for_policy,
             "target_url": inferred_target_url,
@@ -708,7 +728,11 @@ def _normalize_auth_mode(payload: RunCreate | RunPreflightRequest) -> str:
         legacy_headers = normalize_headers(payload.headers)
         merge_token_header(payload.token, legacy_headers)
         auth_config = coerce_auth_config(payload.auth_config)
-        if has_auth_like_header(legacy_headers) and not auth_config.get("enabled") and not _has_login_credentials(payload):
+        if (
+            has_auth_like_header(legacy_headers)
+            and not auth_config.get("enabled")
+            and not _has_login_credentials(payload)
+        ):
             return "manual"
     return mode
 
@@ -859,7 +883,11 @@ def _api_validation_candidates(
     protected_only: bool,
     limit: int = 3,
 ) -> list[dict[str, str]]:
-    from app.agent.nodes.api_runner import SAFE_API_METHODS, _build_request_url, _resolve_path_params
+    from app.agent.nodes.api_runner import (
+        SAFE_API_METHODS,
+        _build_request_url,
+        _resolve_path_params,
+    )
 
     candidates: list[dict[str, str]] = []
     for endpoint in endpoints:
@@ -1171,7 +1199,9 @@ async def _run_auth_preflight(
             steps=steps,
             validation_results=validation_results,
             protected_validation_count=success_count,
-            next_action=None if status == "passed" else "目标仍需要鉴权；请选择自动鉴权或手动 Header/Token。",
+            next_action=None
+            if status == "passed"
+            else "目标仍需要鉴权；请选择自动鉴权或手动 Header/Token。",
         )
         return auth_preflight, {}, None, auth_resolution
 
@@ -1222,7 +1252,9 @@ async def _run_auth_preflight(
                 next_action="补充 OpenAPI 中带 security 的 GET/HEAD/OPTIONS 接口，或改用可验证的登录链路。",
             )
             return auth_preflight, headers, None, auth_resolution
-        validation_results, success_count = await _validate_readonly_auth_access(candidates, headers)
+        validation_results, success_count = await _validate_readonly_auth_access(
+            candidates, headers
+        )
         status = "passed" if success_count >= max(1, min(2, len(candidates))) else "blocked"
         steps.append(
             RunAuthPreflightStep(
@@ -1247,14 +1279,23 @@ async def _run_auth_preflight(
             validation_results=validation_results,
             auth_header_name="Authorization" if (payload.token or "").strip() else None,
             protected_validation_count=success_count,
-            next_action=None if status == "passed" else "确认 Token/Header 有效，并确保受保护只读接口可访问。",
+            next_action=None
+            if status == "passed"
+            else "确认 Token/Header 有效，并确保受保护只读接口可访问。",
         )
-        return auth_preflight, headers, runtime_auth_config, AuthResolution(
-            ok=status == "passed",
-            headers=headers,
-            strategy="manual_header",
-            header_name="Authorization" if (payload.token or "").strip() else None,
-            detail="手动 Header/Token 预检通过" if status == "passed" else "手动 Header/Token 预检失败",
+        return (
+            auth_preflight,
+            headers,
+            runtime_auth_config,
+            AuthResolution(
+                ok=status == "passed",
+                headers=headers,
+                strategy="manual_header",
+                header_name="Authorization" if (payload.token or "").strip() else None,
+                detail="手动 Header/Token 预检通过"
+                if status == "passed"
+                else "手动 Header/Token 预检失败",
+            ),
         )
 
     if not _has_login_credentials(payload):
@@ -1305,7 +1346,10 @@ async def _run_auth_preflight(
         target_url=target_url,
     )
     if captcha_mode == "static":
-        captcha_value = _auth_credentials_dict(payload).get("captcha") or str(auth_config.get("captcha") or "").strip()
+        captcha_value = (
+            _auth_credentials_dict(payload).get("captcha")
+            or str(auth_config.get("captcha") or "").strip()
+        )
         if not captcha_value:
             steps.append(
                 RunAuthPreflightStep(
@@ -1384,7 +1428,8 @@ async def _run_auth_preflight(
             key="login",
             label="登录换取 Token/Cookie",
             status="passed" if auth_resolution.ok else "blocked",
-            detail=auth_resolution.detail or ("自动获取成功" if auth_resolution.ok else "自动获取失败"),
+            detail=auth_resolution.detail
+            or ("自动获取成功" if auth_resolution.ok else "自动获取失败"),
         )
     )
     if auth_resolution.ok:
@@ -1399,7 +1444,9 @@ async def _run_auth_preflight(
             plan="根据 OpenAPI 推理 login/token/captcha/csrf 链路，并限制为登录相关接口与只读验证接口。",
             captcha_handling=_captcha_context_summary(captcha_context)
             if captcha_mode == "dynamic"
-            else {"none": "无验证码。", "static": "固定验证码：使用用户填写的验证码。"}[captcha_mode],
+            else {"none": "无验证码。", "static": "固定验证码：使用用户填写的验证码。"}[
+                captcha_mode
+            ],
             steps=steps,
             missing_fields=auth_resolution.missing_inputs,
             auth_header_name=auth_resolution.header_name,
@@ -1426,7 +1473,9 @@ async def _run_auth_preflight(
             plan="根据 OpenAPI 推理 login/token/captcha/csrf 链路，并限制为登录相关接口与只读验证接口。",
             captcha_handling=_captcha_context_summary(captcha_context)
             if captcha_mode == "dynamic"
-            else {"none": "无验证码。", "static": "固定验证码：使用用户填写的验证码。"}[captcha_mode],
+            else {"none": "无验证码。", "static": "固定验证码：使用用户填写的验证码。"}[
+                captcha_mode
+            ],
             steps=steps,
             missing_fields=["protected_read_only_endpoint"],
             auth_header_name=auth_resolution.header_name,
@@ -1459,7 +1508,9 @@ async def _run_auth_preflight(
         validation_results=validation_results,
         auth_header_name=auth_resolution.header_name,
         protected_validation_count=success_count,
-        next_action=None if status == "passed" else "Token/Cookie 获取成功，但受保护接口验证失败；请检查账号权限。",
+        next_action=None
+        if status == "passed"
+        else "Token/Cookie 获取成功，但受保护接口验证失败；请检查账号权限。",
     )
     return auth_preflight, headers, runtime_auth_config, auth_resolution
 
@@ -1519,7 +1570,9 @@ def _preflight_test_mode_label(test_type: str) -> str:
     }.get(test_type, test_type)
 
 
-def _preflight_objective_summary(payload: RunPreflightRequest, input_type: str, test_type: str) -> str:
+def _preflight_objective_summary(
+    payload: RunPreflightRequest, input_type: str, test_type: str
+) -> str:
     objective = payload.objective.strip()
     if objective:
         return objective
@@ -1540,10 +1593,14 @@ def _preflight_scope_summary(
     if test_type == "ui" or (test_type == "auto" and input_type == "url"):
         return "浏览器会从目标入口开始探索 UI 路径，并采集截图与执行证据。"
 
-    endpoint_text = "运行时解析接口范围" if endpoint_count is None else f"文档包含 {endpoint_count} 个端点"
+    endpoint_text = (
+        "运行时解析接口范围" if endpoint_count is None else f"文档包含 {endpoint_count} 个端点"
+    )
     if estimated_executable_count is None:
         return f"{endpoint_text}，执行前会继续规划可运行用例。"
-    skipped_text = f"，策略跳过 {estimated_skipped_count} 个变更接口" if estimated_skipped_count else ""
+    skipped_text = (
+        f"，策略跳过 {estimated_skipped_count} 个变更接口" if estimated_skipped_count else ""
+    )
     return f"{endpoint_text}，预计执行 {estimated_executable_count} 个接口{skipped_text}。"
 
 
@@ -1664,7 +1721,9 @@ def _build_mission_preview(
         ),
         execution_policy=_preflight_policy_summary(api_execution_policy),
         safety_boundary=_preflight_safety_boundary(payload, api_execution_policy),
-        auth_readiness=_preflight_auth_readiness(auth_required_count, supplied_auth, auth_resolution),
+        auth_readiness=_preflight_auth_readiness(
+            auth_required_count, supplied_auth, auth_resolution
+        ),
         counts=RunPreflightMissionCounts(
             endpoint_count=endpoint_count,
             estimated_executable_count=estimated_executable_count,
@@ -1722,7 +1781,11 @@ def _target_memory_url_parts(value: Any) -> dict[str, str | None]:
         parsed = urlsplit(text)
     except Exception:
         safe_text = _target_memory_text(text, 160)
-        return {"host": None, "exact": safe_text.lower() if safe_text else None, "label": safe_text or "Unknown target"}
+        return {
+            "host": None,
+            "exact": safe_text.lower() if safe_text else None,
+            "label": safe_text or "Unknown target",
+        }
     if parsed.scheme in {"http", "https"} and parsed.netloc:
         hostname = parsed.hostname or ""
         if ":" in hostname and not hostname.startswith("["):
@@ -1737,7 +1800,11 @@ def _target_memory_url_parts(value: Any) -> dict[str, str | None]:
             "label": _redact_url_for_memory(text),
         }
     safe_text = _target_memory_text(text, 160)
-    return {"host": None, "exact": safe_text.lower() if safe_text else None, "label": safe_text or "Unknown target"}
+    return {
+        "host": None,
+        "exact": safe_text.lower() if safe_text else None,
+        "label": safe_text or "Unknown target",
+    }
 
 
 def _target_memory_task_matches(target_parts: dict[str, str | None], task: Task) -> bool:
@@ -1829,9 +1896,13 @@ async def _build_preflight_target_memory(
     target_url: str,
 ) -> RunTargetMemory:
     target_parts = _target_memory_url_parts(target_url)
-    result = await db.execute(select(Task).order_by(Task.created_at.desc()).limit(_TARGET_MEMORY_SAMPLE_LIMIT))
+    result = await db.execute(
+        select(Task).order_by(Task.created_at.desc()).limit(_TARGET_MEMORY_SAMPLE_LIMIT)
+    )
     sampled_tasks = list(result.scalars())
-    matching_tasks = [task for task in sampled_tasks if _target_memory_task_matches(target_parts, task)]
+    matching_tasks = [
+        task for task in sampled_tasks if _target_memory_task_matches(target_parts, task)
+    ]
     now = datetime.utcnow()
     matching_tasks.sort(key=lambda item: _history_created_at(item, now), reverse=True)
 
@@ -1862,7 +1933,9 @@ async def _build_preflight_target_memory(
     for task in matching_tasks:
         status = _history_status(task)
         created_at = _history_created_at(task, now)
-        parsed = redact_sensitive_data(_parse_execution_log_dict(getattr(task, "execution_log", None)))
+        parsed = redact_sensitive_data(
+            _parse_execution_log_dict(getattr(task, "execution_log", None))
+        )
         triage = _build_run_triage_summary(status, parsed)
 
         setup_blocked, setup_reason = _setup_intervention_signal(parsed)
@@ -1885,7 +1958,9 @@ async def _build_preflight_target_memory(
                 created_at=created_at,
             )
 
-        issue_run = status in _HISTORY_ISSUE_STATUSES or _triage_int(triage.get("blocking_count")) > 0
+        issue_run = (
+            status in _HISTORY_ISSUE_STATUSES or _triage_int(triage.get("blocking_count")) > 0
+        )
         if not issue_run:
             continue
         for finding in _triage_list(triage.get("blocking_findings")):
@@ -1926,7 +2001,9 @@ async def _build_preflight_target_memory(
             severity=item["severity"],
             surfaces=sorted(item["surfaces"])[:5],
             last_seen=_history_iso(item["last_seen_dt"]),
-            recommended_action=_history_theme_action(item["category"], item["severity"], item["theme"]),
+            recommended_action=_history_theme_action(
+                item["category"], item["severity"], item["theme"]
+            ),
         )
         for item in theme_stats.values()
         if item["count"] > 1
@@ -1952,13 +2029,15 @@ async def _build_preflight_target_memory(
         1
         for task in matching_tasks
         if target_parts.get("exact")
-        and _target_memory_url_parts(getattr(task, "target_url", None)).get("exact") == target_parts.get("exact")
+        and _target_memory_url_parts(getattr(task, "target_url", None)).get("exact")
+        == target_parts.get("exact")
     )
     host_run_count = sum(
         1
         for task in matching_tasks
         if target_parts.get("host")
-        and _target_memory_url_parts(getattr(task, "target_url", None)).get("host") == target_parts.get("host")
+        and _target_memory_url_parts(getattr(task, "target_url", None)).get("host")
+        == target_parts.get("host")
     )
     previous_run_count = host_run_count if target_parts.get("host") else target_run_count
 
@@ -1979,7 +2058,9 @@ async def _build_preflight_target_memory(
         last_run=RunTargetMemoryLastRun(
             run_id=last_task.id,
             status=last_status or "",
-            test_type=normalize_agent_test_type(last_task.test_type, default="auto") if last_task else None,
+            test_type=normalize_agent_test_type(last_task.test_type, default="auto")
+            if last_task
+            else None,
             created_at=_history_iso(_history_created_at(last_task, now)) if last_task else None,
         )
         if last_task
@@ -2016,7 +2097,9 @@ def _case_asset_source_cases(parsed: dict[str, Any], source: str) -> list[dict[s
     return [item for item in value if isinstance(item, dict)]
 
 
-def _case_asset_source_case(parsed: dict[str, Any], source: str, index: int) -> dict[str, Any] | None:
+def _case_asset_source_case(
+    parsed: dict[str, Any], source: str, index: int
+) -> dict[str, Any] | None:
     cases = parsed.get(source)
     if not isinstance(cases, list) or index < 0 or index >= len(cases):
         return None
@@ -2026,7 +2109,9 @@ def _case_asset_source_case(parsed: dict[str, Any], source: str, index: int) -> 
     return dict(case)
 
 
-def _case_asset_merge_case(original: dict[str, Any], edited: dict[str, Any] | None) -> dict[str, Any]:
+def _case_asset_merge_case(
+    original: dict[str, Any], edited: dict[str, Any] | None
+) -> dict[str, Any]:
     if not edited:
         return dict(original)
     merged = dict(original)
@@ -2105,7 +2190,12 @@ def _redact_case_url_or_path(value: Any) -> str:
                 netloc = f"{netloc}:{parsed.port}"
         query = urlencode(
             [
-                (key, REDACTED_VALUE if is_sensitive_header(key) else redact_sensitive_text(query_value))
+                (
+                    key,
+                    REDACTED_VALUE
+                    if is_sensitive_header(key)
+                    else redact_sensitive_text(query_value),
+                )
                 for key, query_value in parse_qsl(parsed.query, keep_blank_values=True)
             ]
         )
@@ -2183,11 +2273,15 @@ def _redact_playwright_command(command: Any) -> str:
         return ""
 
     lowered = text.lower()
-    if lowered.startswith(("fill ", "type ")) and any(hint in lowered for hint in _SENSITIVE_PLAYWRIGHT_TARGET_HINTS):
+    if lowered.startswith(("fill ", "type ")) and any(
+        hint in lowered for hint in _SENSITIVE_PLAYWRIGHT_TARGET_HINTS
+    ):
         if REDACTED_VALUE in text:
             return text
         quoted_value = re.compile(r"([\"'])([^\"']*)(\1)\s*$")
-        redacted = quoted_value.sub(lambda match: f"{match.group(1)}{REDACTED_VALUE}{match.group(1)}", text)
+        redacted = quoted_value.sub(
+            lambda match: f"{match.group(1)}{REDACTED_VALUE}{match.group(1)}", text
+        )
         if redacted != text:
             return redacted
         parts = text.rsplit(" ", 1)
@@ -2270,7 +2364,9 @@ def _normalize_case_asset_for_save(
         "steps": _case_asset_text_list(case.get("steps") or case.get("actions")),
         "expected": expected,
         "priority": _case_asset_priority(case.get("priority")),
-        "category": _case_asset_category(case.get("category") or case.get("case_type") or case_type, case_type),
+        "category": _case_asset_category(
+            case.get("category") or case.get("case_type") or case_type, case_type
+        ),
         "test_data": _safe_case_asset_test_data(
             case,
             case_type=case_type,
@@ -2332,7 +2428,16 @@ def _triage_api_surface(result: dict[str, Any]) -> str:
 
 
 def _triage_surface_from_text(value: Any) -> str:
-    tokens = _triage_text(value, limit=500).replace(":", " ").split()
+    text = _triage_text(value, limit=500)
+    method_url_match = re.search(
+        r"\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+([^\s,;)}\]]+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if method_url_match:
+        return f"{method_url_match.group(1).upper()} {_triage_url_path(method_url_match.group(2))}"
+
+    tokens = text.replace(":", " ").split()
     for index, token in enumerate(tokens[:-1]):
         method = token.upper()
         if method in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
@@ -2409,34 +2514,51 @@ def _triage_screenshot_items(*sources: Any) -> list[Any]:
     return [item for item in screenshots if item]
 
 
-def _triage_screenshot_count(artifacts: dict[str, Any], ui_result: dict[str, Any], final_report: dict[str, Any]) -> int:
+def _triage_screenshot_count(
+    artifacts: dict[str, Any], ui_result: dict[str, Any], final_report: dict[str, Any]
+) -> int:
     markers: set[str] = set()
 
     def add(value: Any) -> None:
         if not value:
             return
         if isinstance(value, dict):
-            marker = str(value.get("path") or value.get("screenshot") or value.get("filename") or value.get("url") or value)
+            marker = str(
+                value.get("path")
+                or value.get("screenshot")
+                or value.get("filename")
+                or value.get("url")
+                or value
+            )
         else:
             marker = str(value)
         markers.add(marker)
 
     for item in _triage_list(artifacts.get("ui_screenshots")):
         add(item)
+    for item in _triage_list(artifacts.get("screenshots")):
+        add(item)
     for item in _triage_list(ui_result.get("screenshots")):
         add(item)
     for item in _triage_list(_triage_dict(final_report.get("artifacts")).get("screenshots")):
         add(item)
-    for case in [*_triage_list(artifacts.get("ui_case_evidence")), *_triage_list(ui_result.get("cases"))]:
+    for case in [
+        *_triage_list(artifacts.get("ui_case_evidence")),
+        *_triage_list(ui_result.get("cases")),
+    ]:
         if not isinstance(case, dict):
             continue
-        for item in _triage_list(case.get("screenshot_evidence")) or _triage_list(case.get("screenshots")):
+        for item in _triage_list(case.get("screenshot_evidence")) or _triage_list(
+            case.get("screenshots")
+        ):
             add(item)
 
     return len(markers)
 
 
-def _triage_tool_call_count(artifacts: dict[str, Any], final_report: dict[str, Any], parsed: dict[str, Any]) -> int:
+def _triage_tool_call_count(
+    artifacts: dict[str, Any], final_report: dict[str, Any], parsed: dict[str, Any]
+) -> int:
     tool_summary = (
         _triage_dict(parsed.get("tool_summary"))
         or _triage_dict(final_report.get("tool_summary"))
@@ -2461,7 +2583,9 @@ def _triage_severity(value: Any, default: str = "MEDIUM") -> str:
     return severity if severity in {"CRITICAL", "HIGH", "MEDIUM", "LOW"} else default
 
 
-def _triage_confidence(has_report: bool, evidence_count: int, finding_evidence_count: int = 0) -> str:
+def _triage_confidence(
+    has_report: bool, evidence_count: int, finding_evidence_count: int = 0
+) -> str:
     if has_report and (finding_evidence_count or evidence_count):
         return "high"
     if has_report or evidence_count:
@@ -2483,8 +2607,18 @@ def _triage_api_finding(result: dict[str, Any], has_report: bool) -> dict[str, A
     surface = _triage_api_surface(result)
     status_code = result.get("status_code")
     failure_type = str(result.get("failure_type") or "")
-    severity = "CRITICAL" if _triage_int(status_code) >= 500 else "HIGH" if _triage_int(status_code) in {0, 401, 403} else "MEDIUM"
-    reason = result.get("failure_reason") or result.get("error") or f"API result did not pass for {surface}."
+    severity = (
+        "CRITICAL"
+        if _triage_int(status_code) >= 500
+        else "HIGH"
+        if _triage_int(status_code) in {0, 401, 403}
+        else "MEDIUM"
+    )
+    reason = (
+        result.get("failure_reason")
+        or result.get("error")
+        or f"API result did not pass for {surface}."
+    )
     evidence_summary = f"{surface}"
     if status_code not in (None, ""):
         evidence_summary = f"{evidence_summary} returned HTTP {status_code}"
@@ -2513,7 +2647,9 @@ def _triage_api_finding(result: dict[str, Any], has_report: bool) -> dict[str, A
     return finding
 
 
-def _triage_ui_finding(case: dict[str, Any], has_report: bool, script_available: bool) -> dict[str, Any]:
+def _triage_ui_finding(
+    case: dict[str, Any], has_report: bool, script_available: bool
+) -> dict[str, Any]:
     title = _triage_text(case.get("title") or case.get("case_title") or "UI case failed", 180)
     screenshots = _triage_screenshot_items(
         _triage_list(case.get("screenshot_evidence")),
@@ -2540,7 +2676,9 @@ def _triage_ui_finding(case: dict[str, Any], has_report: bool, script_available:
                 "kind": "screenshot",
                 "summary": f"{len(screenshots)} 张截图证据",
             }
-        ] if screenshots else [],
+        ]
+        if screenshots
+        else [],
         "reproduction_steps": steps,
     }
     finding["next_action"] = _triage_next_action_for_finding(finding)
@@ -2560,7 +2698,11 @@ def _triage_report_finding(
     title = _triage_text(bug.get("title") or "Blocking finding", 180)
     description = _triage_text(bug.get("description") or title)
     matched_api = api_failures[0] if source == "api" and len(api_failures) == 1 else None
-    surface = _triage_api_surface(matched_api) if matched_api else _triage_surface_from_text(title) or title
+    surface = (
+        _triage_api_surface(matched_api)
+        if matched_api
+        else _triage_surface_from_text(title) or title
+    )
     screenshots = _triage_screenshot_items(
         _triage_list(bug.get("screenshots")),
         [bug.get("screenshot")] if bug.get("screenshot") else [],
@@ -2570,9 +2712,13 @@ def _triage_report_finding(
         evidence.append(
             {
                 "kind": "api_result",
-                "summary": _triage_text(f"{surface} returned HTTP {matched_api.get('status_code')}", 220),
+                "summary": _triage_text(
+                    f"{surface} returned HTTP {matched_api.get('status_code')}", 220
+                ),
                 "status_code": matched_api.get("status_code"),
-                "failure_type": _triage_text(matched_api.get("failure_type"), 80) if matched_api.get("failure_type") else None,
+                "failure_type": _triage_text(matched_api.get("failure_type"), 80)
+                if matched_api.get("failure_type")
+                else None,
             }
         )
     if screenshots:
@@ -2612,7 +2758,9 @@ def _triage_release_risk(
 ) -> dict[str, str]:
     normalized_status = status.lower()
     normalized_verdict = verdict.upper()
-    highest = max((_triage_severity_rank(item.get("severity")) for item in blocking_findings), default=0)
+    highest = max(
+        (_triage_severity_rank(item.get("severity")) for item in blocking_findings), default=0
+    )
     if normalized_status == "cancelled":
         return {
             "level": "unknown",
@@ -2667,10 +2815,14 @@ def _build_run_triage_summary(status: str, parsed: dict[str, Any]) -> dict[str, 
     ui_result = _triage_dict(parsed.get("ui_execution_result"))
     artifacts = _triage_dict(parsed.get("artifacts"))
     has_report = bool(final_report)
-    script_available = bool(parsed.get("ui_reproducible_script") or artifacts.get("ui_reproducible_script"))
+    script_available = bool(
+        parsed.get("ui_reproducible_script") or artifacts.get("ui_reproducible_script")
+    )
 
     api_results = _triage_list(api_result.get("results"))
-    api_result_count = len(api_results) or _triage_int(api_result.get("executed") or api_result.get("total"))
+    api_result_count = len(api_results) or _triage_int(
+        api_result.get("executed") or api_result.get("total")
+    )
     screenshot_count = _triage_screenshot_count(artifacts, ui_result, final_report)
     tool_call_count = _triage_tool_call_count(artifacts, final_report, parsed)
     evidence = {
@@ -2724,7 +2876,9 @@ def _build_run_triage_summary(status: str, parsed: dict[str, Any]) -> dict[str, 
     for finding in blocking_findings:
         source = str(finding.get("source") or "")
         surface = str(finding.get("surface") or "")
-        surface_type = "api_endpoint" if source == "api" else "ui_page" if source.startswith("ui") else "run"
+        surface_type = (
+            "api_endpoint" if source == "api" else "ui_page" if source.startswith("ui") else "run"
+        )
         _triage_add_surface(
             surfaces,
             seen_surfaces,
@@ -2789,7 +2943,11 @@ def _build_run_triage_summary(status: str, parsed: dict[str, Any]) -> dict[str, 
         "reproduction": {
             "available": bool(reproduction_steps),
             "script_available": script_available,
-            "script_field": "ui_reproducible_script" if parsed.get("ui_reproducible_script") else "artifacts.ui_reproducible_script" if artifacts.get("ui_reproducible_script") else None,
+            "script_field": "ui_reproducible_script"
+            if parsed.get("ui_reproducible_script")
+            else "artifacts.ui_reproducible_script"
+            if artifacts.get("ui_reproducible_script")
+            else None,
             "steps": reproduction_steps[:6],
         },
         "triage_flow": [
@@ -2832,9 +2990,7 @@ _TRIAGE_EXPORT_REQUEST_BODY_RE = re.compile(
 _TRIAGE_EXPORT_QUERY_CONTEXT_RE = re.compile(
     r"(?i)\b(?:url[_ -]?query|query(?:[_ -]?params?)?)\b[^.\n;]*"
 )
-_TRIAGE_EXPORT_KEY_VALUE_RE = re.compile(
-    r"([A-Za-z0-9_.:-]+\s*=\s*)([^\s,;&)}\]]+)"
-)
+_TRIAGE_EXPORT_KEY_VALUE_RE = re.compile(r"([A-Za-z0-9_.:-]+\s*=\s*)([^\s,;&)}\]]+)")
 _TRIAGE_EXPORT_CREDENTIAL_LABEL_RE = re.compile(
     rf"(?i)\b(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|x-auth|auth|"
     rf"(?:x[-_])?(?:jwt|csrf|xsrf|session(?:[_ -]?id)?|sid))\b\s*[:=]?\s*(?:Bearer|Basic)?"
@@ -2925,7 +3081,9 @@ def _triage_export_evidence(value: Any) -> list[RunTriageExportEvidenceItem]:
     evidence: list[RunTriageExportEvidenceItem] = []
     for item in _triage_list(value):
         evidence_item = _triage_dict(item)
-        summary = _triage_export_text(evidence_item.get("summary") or evidence_item.get("kind"), 240)
+        summary = _triage_export_text(
+            evidence_item.get("summary") or evidence_item.get("kind"), 240
+        )
         if not summary:
             continue
         evidence.append(
@@ -2943,7 +3101,9 @@ def _triage_export_findings(value: Any) -> list[RunTriageExportFinding]:
     findings: list[RunTriageExportFinding] = []
     for item in _triage_list(value):
         finding = _triage_dict(item)
-        title = _triage_export_text(finding.get("title") or finding.get("description") or "Blocking finding", 180)
+        title = _triage_export_text(
+            finding.get("title") or finding.get("description") or "Blocking finding", 180
+        )
         description = _triage_export_text(finding.get("description"), 360)
         findings.append(
             RunTriageExportFinding(
@@ -3004,7 +3164,9 @@ def _triage_export_suite_case_count(suite: TestSuite) -> int:
     return len(case_ids)
 
 
-async def _triage_export_saved_suites(db: DbSession, run_id: str) -> list[RunTriageExportSavedSuite]:
+async def _triage_export_saved_suites(
+    db: DbSession, run_id: str
+) -> list[RunTriageExportSavedSuite]:
     result = await db.execute(
         select(TestSuite)
         .where(TestSuite.task_id == run_id)
@@ -3040,7 +3202,9 @@ async def _build_run_triage_export(
         run=RunTriageExportRunMetadata(
             id=run_id,
             status=_triage_export_text(status, 80),
-            test_type=_triage_export_text(normalize_agent_test_type(task.test_type, default="auto"), 60),
+            test_type=_triage_export_text(
+                normalize_agent_test_type(task.test_type, default="auto"), 60
+            ),
             objective=_triage_export_text(task.objective, 280),
             target=_triage_export_target(task.target_url),
             created_at=task.created_at.isoformat() if task.created_at else None,
@@ -3129,7 +3293,9 @@ def _render_run_triage_export_markdown(payload: dict[str, Any]) -> str:
             item = _triage_dict(surface)
             detail = _markdown_text(item.get("detail"))
             suffix = f" - {detail}" if detail else ""
-            lines.append(f"- [{_markdown_text(item.get('type'), 'target')}] {_markdown_text(item.get('name'), 'Unknown')}{suffix}")
+            lines.append(
+                f"- [{_markdown_text(item.get('type'), 'target')}] {_markdown_text(item.get('name'), 'Unknown')}{suffix}"
+            )
     else:
         lines.append("- No affected surfaces were identified.")
 
@@ -3154,8 +3320,12 @@ def _render_run_triage_export_markdown(payload: dict[str, Any]) -> str:
                 for evidence_value in evidence_items:
                     evidence_item = _triage_dict(evidence_value)
                     status_code = evidence_item.get("status_code")
-                    status_text = f" (status {status_code})" if status_code not in (None, "") else ""
-                    lines.append(f"  - {_markdown_text(evidence_item.get('summary'), 'Evidence')}{status_text}")
+                    status_text = (
+                        f" (status {status_code})" if status_code not in (None, "") else ""
+                    )
+                    lines.append(
+                        f"  - {_markdown_text(evidence_item.get('summary'), 'Evidence')}{status_text}"
+                    )
             steps = _triage_list(finding.get("reproduction_steps"))
             if steps:
                 lines.append("- Reproduction:")
@@ -3347,9 +3517,16 @@ def _ui_intervention_signal(parsed: dict[str, Any]) -> tuple[bool, str]:
     ui_result = _triage_dict(parsed.get("ui_execution_result"))
     for case in _triage_list(ui_result.get("cases")):
         item = _triage_dict(case)
-        reason = item.get("skip_reason") or item.get("failure_reason") or item.get("error") or item.get("reason")
+        reason = (
+            item.get("skip_reason")
+            or item.get("failure_reason")
+            or item.get("error")
+            or item.get("reason")
+        )
         status = str(item.get("status") or "").lower()
-        if status in {"skipped", "failed", "blocked"} and _contains_any_term(reason, _INTERVENTION_SETUP_TERMS):
+        if status in {"skipped", "failed", "blocked"} and _contains_any_term(
+            reason, _INTERVENTION_SETUP_TERMS
+        ):
             return True, _intervention_reason_text(
                 reason,
                 fallback="UI 用例因登录、鉴权或前置状态不足未执行，需要补充测试账号和路径说明。",
@@ -3359,7 +3536,9 @@ def _ui_intervention_signal(parsed: dict[str, Any]) -> tuple[bool, str]:
     completed = _triage_int(ui_result.get("completed"))
     failed = _triage_int(ui_result.get("failed"))
     last_error = parsed.get("last_error")
-    if (failed or (total and not completed)) and _contains_any_term(last_error, _INTERVENTION_SETUP_TERMS):
+    if (failed or (total and not completed)) and _contains_any_term(
+        last_error, _INTERVENTION_SETUP_TERMS
+    ):
         return True, _intervention_reason_text(
             last_error,
             fallback="UI 执行在前置准备或登录阶段受阻，需要补充上下文后重跑。",
@@ -3465,14 +3644,388 @@ def _build_run_intervention_summary(
 _HISTORY_ISSUE_STATUSES = {"failed", "bug_found"}
 _HISTORY_ACTIVE_STATUSES = {"pending", "queued", "running"}
 _HISTORY_TERMINAL_STATUSES = {"succeeded", "failed", "bug_found", "cancelled"}
+_HISTORY_INSIGHT_API_COUNT_KEYS = (
+    "total",
+    "executed",
+    "completed",
+    "passed",
+    "failed",
+    "skipped",
+    "all_passed",
+)
+_HISTORY_INSIGHT_UI_COUNT_KEYS = (
+    "total",
+    "executed",
+    "completed",
+    "passed",
+    "failed",
+    "skipped",
+    "all_passed",
+)
+_HISTORY_INSIGHT_FINAL_REPORT_KEYS = (
+    "overall_verdict",
+    "summary",
+    "bugs_found",
+    "recommendations",
+    "tool_summary",
+)
+_HISTORY_INSIGHT_FINAL_REPORT_ARTIFACT_KEYS = ("screenshots", "tool_summary")
+_HISTORY_INSIGHT_ARTIFACT_KEYS = (
+    "ui_screenshots",
+    "screenshots",
+    "tool_summary",
+    "ui_reproducible_script",
+)
+_HISTORY_INSIGHT_LOG_KEYS = (
+    "api_execution_result",
+    "ui_execution_result",
+    "final_report",
+    "tool_summary",
+    "ui_reproducible_script",
+    "artifacts",
+)
+_HISTORY_INSIGHTS_CACHE_TTL_SECONDS = 30
+_HISTORY_INSIGHTS_CACHE_MAX_ENTRIES = 8
+_HISTORY_INSIGHTS_CACHE: dict[tuple[int, int, int, str | None], tuple[float, dict[str, Any]]] = {}
 
 
-def _history_status(task: Task) -> str:
+@dataclass(slots=True)
+class RunHistoryInsightTask:
+    id: str
+    target_url: str | None
+    status: Any
+    test_type: Any
+    created_at: datetime | None
+    execution_log: dict[str, Any] = field(default_factory=dict)
+
+
+def _history_insights_cache_key(
+    *,
+    days: int,
+    limit: int,
+    window_run_count: int,
+    latest_updated_at: Any,
+) -> tuple[int, int, int, str | None]:
+    if isinstance(latest_updated_at, datetime):
+        latest_marker = latest_updated_at.isoformat()
+    elif latest_updated_at is None:
+        latest_marker = None
+    else:
+        latest_marker = str(latest_updated_at)
+    return (days, limit, window_run_count, latest_marker)
+
+
+def _history_insights_cache_get(key: tuple[int, int, int, str | None]) -> dict[str, Any] | None:
+    entry = _HISTORY_INSIGHTS_CACHE.get(key)
+    if entry is None:
+        return None
+    cached_at, value = entry
+    if time.monotonic() - cached_at > _HISTORY_INSIGHTS_CACHE_TTL_SECONDS:
+        _HISTORY_INSIGHTS_CACHE.pop(key, None)
+        return None
+    return value
+
+
+def _history_insights_cache_set(
+    key: tuple[int, int, int, str | None], value: dict[str, Any]
+) -> None:
+    if len(_HISTORY_INSIGHTS_CACHE) >= _HISTORY_INSIGHTS_CACHE_MAX_ENTRIES:
+        _HISTORY_INSIGHTS_CACHE.clear()
+    _HISTORY_INSIGHTS_CACHE[key] = (time.monotonic(), value)
+
+
+def _decode_history_insight_projection(value: Any) -> dict[str, Any]:
+    if value in (None, ""):
+        return {}
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", errors="ignore")
+    try:
+        decoded = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if isinstance(decoded, dict):
+        return {key: item for key, item in decoded.items() if item is not None}
+    if not isinstance(decoded, list):
+        return {}
+    return {key: item for key, item in zip(_HISTORY_INSIGHT_LOG_KEYS, decoded) if item is not None}
+
+
+def _sqlite_history_json_path(prefix: str | None, key: str) -> str:
+    return f"$.{prefix}.{key}" if prefix else f"$.{key}"
+
+
+def _sqlite_history_object_from_paths(prefix: str | None, keys: tuple[str, ...]) -> Any:
+    object_args: list[Any] = []
+    for key in keys:
+        object_args.extend(
+            [key, func.json_extract(Task.execution_log, _sqlite_history_json_path(prefix, key))]
+        )
+    return func.json_object(*object_args)
+
+
+def _sqlite_history_api_result() -> Any:
+    object_args: list[Any] = []
+    for key in _HISTORY_INSIGHT_API_COUNT_KEYS:
+        object_args.extend(
+            [key, func.json_extract(Task.execution_log, f"$.api_execution_result.{key}")]
+        )
+    return func.json_object(*object_args)
+
+
+def _sqlite_history_ui_result() -> Any:
+    object_args: list[Any] = []
+    for key in _HISTORY_INSIGHT_UI_COUNT_KEYS:
+        object_args.extend(
+            [key, func.json_extract(Task.execution_log, f"$.ui_execution_result.{key}")]
+        )
+    return func.json_object(*object_args)
+
+
+def _sqlite_history_tool_summary() -> Any:
+    return func.coalesce(
+        func.json_extract(Task.execution_log, "$.tool_summary"),
+        func.json_extract(Task.execution_log, "$.artifacts.tool_summary"),
+        func.json_extract(Task.execution_log, "$.final_report.tool_summary"),
+        func.json_extract(Task.execution_log, "$.final_report.artifacts.tool_summary"),
+    )
+
+
+def _sqlite_history_projection() -> Any:
+    tool_summary = _sqlite_history_tool_summary()
+    final_report_artifacts = _sqlite_history_object_from_paths(
+        "final_report.artifacts",
+        _HISTORY_INSIGHT_FINAL_REPORT_ARTIFACT_KEYS,
+    )
+    final_report_args: list[Any] = []
+    for key in _HISTORY_INSIGHT_FINAL_REPORT_KEYS:
+        final_report_args.extend(
+            [key, func.json_extract(Task.execution_log, f"$.final_report.{key}")]
+        )
+    final_report_args.extend(["artifacts", final_report_artifacts])
+
+    artifacts_args: list[Any] = []
+    for key in _HISTORY_INSIGHT_ARTIFACT_KEYS:
+        value = (
+            tool_summary
+            if key == "tool_summary"
+            else func.json_extract(Task.execution_log, f"$.artifacts.{key}")
+        )
+        artifacts_args.extend([key, value])
+
+    return sql_case(
+        (
+            func.json_valid(Task.execution_log) == 1,
+            func.json_object(
+                "api_execution_result",
+                _sqlite_history_api_result(),
+                "ui_execution_result",
+                _sqlite_history_ui_result(),
+                "final_report",
+                func.json_object(*final_report_args),
+                "tool_summary",
+                tool_summary,
+                "ui_reproducible_script",
+                func.json_extract(Task.execution_log, "$.ui_reproducible_script"),
+                "artifacts",
+                func.json_object(*artifacts_args),
+            ),
+        ),
+        else_=None,
+    ).label("insight_log")
+
+
+def _postgres_history_jsonb_object(items: list[tuple[str, Any]]) -> Any:
+    object_args: list[Any] = []
+    for key, value in items:
+        object_args.extend([key, value])
+    return func.jsonb_strip_nulls(func.jsonb_build_object(*object_args))
+
+
+def _postgres_history_jsonb_path(root: Any, *keys: str) -> Any:
+    return root[tuple(keys)]
+
+
+def _postgres_history_api_result(log_json: Any) -> Any:
+    return _postgres_history_jsonb_object(
+        [
+            (key, _postgres_history_jsonb_path(log_json, "api_execution_result", key))
+            for key in _HISTORY_INSIGHT_API_COUNT_KEYS
+        ]
+    )
+
+
+def _postgres_history_ui_result(log_json: Any) -> Any:
+    return _postgres_history_jsonb_object(
+        [
+            (key, _postgres_history_jsonb_path(log_json, "ui_execution_result", key))
+            for key in _HISTORY_INSIGHT_UI_COUNT_KEYS
+        ]
+    )
+
+
+def _postgres_history_tool_summary(log_json: Any) -> Any:
+    return func.coalesce(
+        _postgres_history_jsonb_path(log_json, "tool_summary"),
+        _postgres_history_jsonb_path(log_json, "artifacts", "tool_summary"),
+        _postgres_history_jsonb_path(log_json, "final_report", "tool_summary"),
+        _postgres_history_jsonb_path(log_json, "final_report", "artifacts", "tool_summary"),
+    )
+
+
+def _postgres_history_projection(log_json: Any) -> Any:
+    tool_summary = _postgres_history_tool_summary(log_json)
+    final_report_artifacts = _postgres_history_jsonb_object(
+        [
+            (key, _postgres_history_jsonb_path(log_json, "final_report", "artifacts", key))
+            for key in _HISTORY_INSIGHT_FINAL_REPORT_ARTIFACT_KEYS
+        ]
+    )
+    final_report_items = [
+        (key, _postgres_history_jsonb_path(log_json, "final_report", key))
+        for key in _HISTORY_INSIGHT_FINAL_REPORT_KEYS
+    ]
+    final_report_items.append(("artifacts", final_report_artifacts))
+
+    artifacts_items = []
+    for key in _HISTORY_INSIGHT_ARTIFACT_KEYS:
+        value = (
+            tool_summary
+            if key == "tool_summary"
+            else _postgres_history_jsonb_path(log_json, "artifacts", key)
+        )
+        artifacts_items.append((key, value))
+
+    return _postgres_history_jsonb_object(
+        [
+            (
+                "api_execution_result",
+                _postgres_history_api_result(log_json),
+            ),
+            (
+                "ui_execution_result",
+                _postgres_history_ui_result(log_json),
+            ),
+            ("final_report", _postgres_history_jsonb_object(final_report_items)),
+            ("tool_summary", tool_summary),
+            (
+                "ui_reproducible_script",
+                _postgres_history_jsonb_path(log_json, "ui_reproducible_script"),
+            ),
+            ("artifacts", _postgres_history_jsonb_object(artifacts_items)),
+        ]
+    ).label("insight_log")
+
+
+def _build_history_insight_projection(dialect_name: str) -> Any | None:
+    if dialect_name == "sqlite":
+        return _sqlite_history_projection()
+    return None
+
+
+def _build_postgres_history_insight_statement(*, cutoff: datetime, limit: int) -> Any:
+    sampled = (
+        select(
+            Task.id.label("id"),
+            Task.target_url.label("target_url"),
+            Task.status.label("status"),
+            Task.test_type.label("test_type"),
+            Task.created_at.label("created_at"),
+            cast(Task.execution_log, JSONB).label("log_json"),
+        )
+        .where(Task.created_at >= cutoff)
+        .order_by(Task.created_at.desc())
+        .limit(limit)
+        .cte("sampled_history_tasks")
+        .prefix_with("MATERIALIZED", dialect="postgresql")
+    )
+    insight_log = _postgres_history_projection(sampled.c.log_json)
+    return (
+        select(
+            sampled.c.id,
+            sampled.c.target_url,
+            sampled.c.status,
+            sampled.c.test_type,
+            sampled.c.created_at,
+            insight_log,
+        )
+        .select_from(sampled)
+        .order_by(sampled.c.created_at.desc())
+    )
+
+
+def _history_task_execution_log(task: Any) -> dict[str, Any]:
+    raw_log = getattr(task, "execution_log", None)
+    parsed = raw_log if isinstance(raw_log, dict) else _parse_execution_log_dict(raw_log)
+    redacted = redact_sensitive_data(parsed)
+    return redacted if isinstance(redacted, dict) else {}
+
+
+async def _load_run_history_insight_tasks_fallback(
+    db: Any,
+    *,
+    cutoff: datetime,
+    limit: int,
+) -> list[Any]:
+    result = await db.execute(
+        select(Task).where(Task.created_at >= cutoff).order_by(Task.created_at.desc()).limit(limit)
+    )
+    return list(result.scalars())
+
+
+async def _load_run_history_insight_tasks(
+    db: Any,
+    *,
+    cutoff: datetime,
+    limit: int,
+) -> list[Any]:
+    bind = db.get_bind()
+    dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+    if dialect_name == "postgresql":
+        stmt = _build_postgres_history_insight_statement(cutoff=cutoff, limit=limit)
+    else:
+        insight_log = _build_history_insight_projection(dialect_name)
+        if insight_log is None:
+            return await _load_run_history_insight_tasks_fallback(db, cutoff=cutoff, limit=limit)
+
+        stmt = (
+            select(
+                Task.id,
+                Task.target_url,
+                Task.status,
+                Task.test_type,
+                Task.created_at,
+                insight_log,
+            )
+            .where(Task.created_at >= cutoff)
+            .order_by(Task.created_at.desc())
+            .limit(limit)
+        )
+    try:
+        result = await db.execute(stmt)
+    except SQLAlchemyError as exc:
+        logger.warning("Falling back to full run history insight logs: %s", exc)
+        await db.rollback()
+        return await _load_run_history_insight_tasks_fallback(db, cutoff=cutoff, limit=limit)
+
+    return [
+        RunHistoryInsightTask(
+            id=row.id,
+            target_url=row.target_url,
+            status=row.status,
+            test_type=row.test_type,
+            created_at=row.created_at,
+            execution_log=_decode_history_insight_projection(row.insight_log),
+        )
+        for row in result
+    ]
+
+
+def _history_status(task: Any) -> str:
     status = getattr(task, "status", "")
     return status.value if hasattr(status, "value") else str(status)
 
 
-def _history_created_at(task: Task, fallback: datetime) -> datetime:
+def _history_created_at(task: Any, fallback: datetime) -> datetime:
     value = getattr(task, "created_at", None)
     return value if isinstance(value, datetime) else fallback
 
@@ -3497,7 +4050,7 @@ def _history_safe_target(value: Any) -> str:
     return _triage_text(text, 180) or "Unknown target"
 
 
-def _history_status_counts(tasks: list[Task]) -> dict[str, Any]:
+def _history_status_counts(tasks: list[Any]) -> dict[str, Any]:
     counts = {status.value: 0 for status in TaskStatus}
     for task in tasks:
         status = _history_status(task)
@@ -3523,7 +4076,7 @@ def _history_status_counts(tasks: list[Task]) -> dict[str, Any]:
     }
 
 
-def _history_issue_rate(tasks: list[Task]) -> float | None:
+def _history_issue_rate(tasks: list[Any]) -> float | None:
     completed = [task for task in tasks if _history_status(task) in _HISTORY_TERMINAL_STATUSES]
     if not completed:
         return None
@@ -3531,7 +4084,7 @@ def _history_issue_rate(tasks: list[Task]) -> float | None:
     return _history_percent(issues, len(completed))
 
 
-def _history_trend_buckets(tasks: list[Task], now: datetime, days: int) -> list[dict[str, Any]]:
+def _history_trend_buckets(tasks: list[Any], now: datetime, days: int) -> list[dict[str, Any]]:
     bucket_days = min(days, 14)
     buckets: dict[str, dict[str, Any]] = {}
     for index in range(bucket_days - 1, -1, -1):
@@ -3561,7 +4114,7 @@ def _history_trend_buckets(tasks: list[Task], now: datetime, days: int) -> list[
     return list(buckets.values())
 
 
-def _history_quality_trend(tasks: list[Task], now: datetime, days: int) -> dict[str, Any]:
+def _history_quality_trend(tasks: list[Any], now: datetime, days: int) -> dict[str, Any]:
     terminal_tasks = [
         task
         for task in sorted(tasks, key=lambda item: _history_created_at(item, now))
@@ -3626,7 +4179,8 @@ def _history_normalize_theme(value: Any) -> str:
         token
         for token in text.split()
         if token
-        and token not in {
+        and token
+        not in {
             "the",
             "a",
             "an",
@@ -3687,7 +4241,7 @@ def _build_history_recommendations(
 
 
 def _build_run_history_insights(
-    tasks: list[Task],
+    tasks: list[Any],
     *,
     now: datetime,
     days: int,
@@ -3713,10 +4267,12 @@ def _build_run_history_insights(
     for task in ordered_tasks:
         status = _history_status(task)
         created_at = _history_created_at(task, now)
-        parsed = redact_sensitive_data(_parse_execution_log_dict(getattr(task, "execution_log", None)))
+        parsed = _history_task_execution_log(task)
         triage = _build_run_triage_summary(status, parsed)
         target = _history_safe_target(getattr(task, "target_url", None))
-        issue_run = status in _HISTORY_ISSUE_STATUSES or _triage_int(triage.get("blocking_count")) > 0
+        issue_run = (
+            status in _HISTORY_ISSUE_STATUSES or _triage_int(triage.get("blocking_count")) > 0
+        )
 
         target_entry = target_stats.setdefault(
             target,
@@ -3730,7 +4286,9 @@ def _build_run_history_insights(
             },
         )
         target_entry["run_count"] += 1
-        target_entry["last_seen_dt"] = _history_add_last_seen(target_entry["last_seen_dt"], created_at)
+        target_entry["last_seen_dt"] = _history_add_last_seen(
+            target_entry["last_seen_dt"], created_at
+        )
         if issue_run:
             target_entry["issue_run_count"] += 1
         if status == "failed":
@@ -4025,7 +4583,9 @@ async def _seed_intervention_execution_log(
         if value not in (None, "", [], {}):
             initial_log[key] = value
 
-    task.execution_log = json.dumps(redact_sensitive_data(initial_log), ensure_ascii=False, default=str)
+    task.execution_log = json.dumps(
+        redact_sensitive_data(initial_log), ensure_ascii=False, default=str
+    )
     await db.commit()
     await db.refresh(task)
 
@@ -4079,6 +4639,7 @@ async def create_run(payload: RunCreate, db: DbSession, _: CurrentUser):
             text = text.strip()
             if text.startswith("{"):
                 import json as _json
+
                 data = _json.loads(text)
                 title = (data.get("info") or {}).get("title", "")
                 if title:
@@ -4096,6 +4657,7 @@ async def create_run(payload: RunCreate, db: DbSession, _: CurrentUser):
             pass
 
     from app.agent.nodes.api_runner import _normalize_api_execution_policy
+
     api_execution_policy = _normalize_api_execution_policy(payload.api_execution_policy)
     api_profile = await _best_effort_api_profile(source, input_type, api_execution_policy)
     if not payload.base_url and api_profile.get("target_url"):
@@ -4104,7 +4666,12 @@ async def create_run(payload: RunCreate, db: DbSession, _: CurrentUser):
     if cached_auth is not None:
         auth_preflight, extra_headers, runtime_auth_config, auth_resolution = cached_auth
     else:
-        auth_preflight, extra_headers, runtime_auth_config, auth_resolution = await _run_auth_preflight(
+        (
+            auth_preflight,
+            extra_headers,
+            runtime_auth_config,
+            auth_resolution,
+        ) = await _run_auth_preflight(
             payload,
             db=db,
             source=source,
@@ -4218,8 +4785,15 @@ async def preflight_run(payload: RunPreflightRequest, db: DbSession, _: CurrentU
         target_url = str(api_profile["target_url"])
     reachability = await _best_effort_reachability(source)
     worker_status, worker_detail, worker_action = await _best_effort_worker_readiness()
-    browser_tool_found = shutil.which("playwright-cli") is not None or shutil.which("npx") is not None
-    auth_preflight, prepared_headers, runtime_auth_config, auth_resolution = await _run_auth_preflight(
+    browser_tool_found = (
+        shutil.which("playwright-cli") is not None or shutil.which("npx") is not None
+    )
+    (
+        auth_preflight,
+        prepared_headers,
+        runtime_auth_config,
+        auth_resolution,
+    ) = await _run_auth_preflight(
         payload,
         db=db,
         source=source,
@@ -4257,7 +4831,9 @@ async def preflight_run(payload: RunPreflightRequest, db: DbSession, _: CurrentU
             key="planner",
             label="规划模型",
             status="ready" if planner_count else "warning",
-            detail="已有默认 Planner 模型" if planner_count else "未设置默认 Planner，系统将按现有回退逻辑尝试运行",
+            detail="已有默认 Planner 模型"
+            if planner_count
+            else "未设置默认 Planner，系统将按现有回退逻辑尝试运行",
             action=None if planner_count else "在模型管理中设置默认 Planner",
         ),
         RunPreflightCheck(
@@ -4271,34 +4847,43 @@ async def preflight_run(payload: RunPreflightRequest, db: DbSession, _: CurrentU
             key="runner",
             label="浏览器执行器",
             status="ready" if browser_tool_found else "warning",
-            detail="检测到本地浏览器执行入口" if browser_tool_found else "未检测到 playwright-cli 或 npx，UI 测试可能失败",
+            detail="检测到本地浏览器执行入口"
+            if browser_tool_found
+            else "未检测到 playwright-cli 或 npx，UI 测试可能失败",
             action=None if browser_tool_found else "确认前端/Worker 镜像已安装浏览器工具",
         ),
         RunPreflightCheck(
             key="reachability",
             label="目标可达性",
             status=reachability,
-            detail="目标可访问" if reachability == "ready" else "未执行网络检查" if reachability == "skipped" else "暂时无法确认目标可达",
+            detail="目标可访问"
+            if reachability == "ready"
+            else "未执行网络检查"
+            if reachability == "skipped"
+            else "暂时无法确认目标可达",
         ),
         RunPreflightCheck(
             key="environment",
             label="环境资产",
             status="ready" if environment_count else "warning",
-            detail=f"已配置 {environment_count} 个环境" if environment_count else "尚未沉淀环境配置，本次将使用输入源直接运行",
+            detail=f"已配置 {environment_count} 个环境"
+            if environment_count
+            else "尚未沉淀环境配置，本次将使用输入源直接运行",
         ),
         RunPreflightCheck(
             key="auth",
             label="鉴权准备",
-            status="ready" if auth_preflight.can_start else "missing" if auth_preflight.status == "blocked" else "warning",
-            detail=(
-                auth_preflight.steps[-1].detail
-                if auth_preflight.steps
-                else "鉴权预检未完成"
-            ),
+            status="ready"
+            if auth_preflight.can_start
+            else "missing"
+            if auth_preflight.status == "blocked"
+            else "warning",
+            detail=(auth_preflight.steps[-1].detail if auth_preflight.steps else "鉴权预检未完成"),
             action=(
                 None
                 if auth_preflight.can_start
-                else auth_preflight.next_action or "选择自动鉴权、手动 Header/Token，或确认无需鉴权。"
+                else auth_preflight.next_action
+                or "选择自动鉴权、手动 Header/Token，或确认无需鉴权。"
             ),
         ),
         RunPreflightCheck(
@@ -4315,20 +4900,30 @@ async def preflight_run(payload: RunPreflightRequest, db: DbSession, _: CurrentU
 
     warnings: list[str] = []
     if input_type in ("swagger_json", "swagger_yaml") and not payload.base_url:
-        warnings.append("原文 Swagger 未提供 Base URL 时，系统只能依赖文档 servers 字段推断请求地址。")
+        warnings.append(
+            "原文 Swagger 未提供 Base URL 时，系统只能依赖文档 servers 字段推断请求地址。"
+        )
     if agent_test_type == "ui" and not payload.setup_instructions.strip():
-        warnings.append("如果目标需要登录、验证码或其他前置步骤，请在前置说明里提供测试账号和安全边界。")
+        warnings.append(
+            "如果目标需要登录、验证码或其他前置步骤，请在前置说明里提供测试账号和安全边界。"
+        )
     if input_type == "url" and agent_test_type == "api":
-        warnings.append("当前输入看起来是网页 URL，但测试模式选择了 API；建议确认是否应使用 Swagger/OpenAPI。")
+        warnings.append(
+            "当前输入看起来是网页 URL，但测试模式选择了 API；建议确认是否应使用 Swagger/OpenAPI。"
+        )
     if not auth_preflight.can_start:
         warnings.append(f"鉴权预检未通过：{auth_preflight.next_action or auth_preflight.status}")
     if auth_attempted and auth_resolution.detail and not auth_resolution.ok:
         warnings.append(f"自动鉴权预检失败：{auth_resolution.detail}")
     if estimated_skipped_count:
-        warnings.append(f"当前 API 策略预计会跳过 {estimated_skipped_count} 个写入/变更接口，避免误改真实数据。")
+        warnings.append(
+            f"当前 API 策略预计会跳过 {estimated_skipped_count} 个写入/变更接口，避免误改真实数据。"
+        )
     if api_profile.get("api_path_prefix_rewrite"):
         rewrite = api_profile["api_path_prefix_rewrite"]
-        warnings.append(f"检测到代理路径改写：请求执行时会将 {rewrite.get('from')} 改为 {rewrite.get('to')}。")
+        warnings.append(
+            f"检测到代理路径改写：请求执行时会将 {rewrite.get('from')} 改为 {rewrite.get('to')}。"
+        )
 
     expected_flow = _expected_flow_for(input_type, agent_test_type, bool(payload.base_url))
     readiness = _preflight_readiness(checks)
@@ -4374,21 +4969,29 @@ async def preflight_run(payload: RunPreflightRequest, db: DbSession, _: CurrentU
         estimated_skipped_count=estimated_skipped_count,
         api_execution_policy=api_execution_policy,
         api_path_prefix_rewrite=api_profile.get("api_path_prefix_rewrite"),
-        auth_resolved=auth_resolution.ok or (
-            auth_preflight.can_start and auth_preflight.strategy == "manual_header"
-        ),
+        auth_resolved=auth_resolution.ok
+        or (auth_preflight.can_start and auth_preflight.strategy == "manual_header"),
         auth_strategy=auth_resolution.strategy or auth_preflight.strategy,
         auth_header_name=auth_resolution.header_name,
-        auth_error=None if auth_preflight.can_start else auth_resolution.detail or auth_preflight.next_action,
-        auth_missing_inputs=[] if auth_preflight.can_start else auth_preflight.missing_fields or auth_resolution.missing_inputs,
-        auth_next_action=None if auth_preflight.can_start else auth_preflight.next_action or auth_resolution.next_action,
-        auth_required_fields=[] if auth_preflight.can_start else auth_resolution.required_fields or auth_preflight.missing_fields,
+        auth_error=None
+        if auth_preflight.can_start
+        else auth_resolution.detail or auth_preflight.next_action,
+        auth_missing_inputs=[]
+        if auth_preflight.can_start
+        else auth_preflight.missing_fields or auth_resolution.missing_inputs,
+        auth_next_action=None
+        if auth_preflight.can_start
+        else auth_preflight.next_action or auth_resolution.next_action,
+        auth_required_fields=[]
+        if auth_preflight.can_start
+        else auth_resolution.required_fields or auth_preflight.missing_fields,
     )
 
 
 @router.get("", response_model=list[TaskListItemRead])
 async def list_runs(
-    db: DbSession, _: CurrentUser,
+    db: DbSession,
+    _: CurrentUser,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     status: str | None = Query(default=None),
@@ -4413,16 +5016,14 @@ async def list_runs(
     total = int((await db.execute(count_stmt)).scalar_one())
 
     offset = (page - 1) * page_size
-    stmt = (
-        select(
-            Task.id,
-            Task.target_url,
-            Task.objective,
-            Task.status,
-            Task.test_type,
-            Task.created_at,
-            Task.updated_at,
-        )
+    stmt = select(
+        Task.id,
+        Task.target_url,
+        Task.objective,
+        Task.status,
+        Task.test_type,
+        Task.created_at,
+        Task.updated_at,
     )
     if filters:
         stmt = stmt.where(*filters)
@@ -4457,24 +5058,33 @@ async def get_run_history_insights(
     """Summarize recent run quality memory from task rows and redacted execution logs."""
     now = datetime.utcnow()
     cutoff = now - timedelta(days=days)
-    count_result = await db.execute(
-        select(func.count()).select_from(Task).where(Task.created_at >= cutoff)
-    )
-    window_run_count = int(count_result.scalar_one())
-    result = await db.execute(
-        select(Task)
+    summary_result = await db.execute(
+        select(func.count(), func.max(Task.updated_at))
+        .select_from(Task)
         .where(Task.created_at >= cutoff)
-        .order_by(Task.created_at.desc())
-        .limit(limit)
     )
-    tasks = list(result.scalars())
-    return _build_run_history_insights(
+    window_run_count, latest_updated_at = summary_result.one()
+    window_run_count = int(window_run_count or 0)
+    cache_key = _history_insights_cache_key(
+        days=days,
+        limit=limit,
+        window_run_count=window_run_count,
+        latest_updated_at=latest_updated_at,
+    )
+    cached = _history_insights_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    tasks = await _load_run_history_insight_tasks(db, cutoff=cutoff, limit=limit)
+    response = _build_run_history_insights(
         tasks,
         now=now,
         days=days,
         limit=limit,
         window_run_count=window_run_count,
     )
+    _history_insights_cache_set(cache_key, response)
+    return response
 
 
 @router.get("/{run_id}")
@@ -4514,7 +5124,9 @@ async def get_run_detail(run_id: str, db: DbSession, _: CurrentUser):
     detail["cancelled"] = parsed.get("cancelled", False)
     detail["cancelled_at"] = parsed.get("cancelled_at")
     detail["last_error"] = parsed.get("last_error")
-    detail["setup_instructions"] = parsed.get("setup_instructions") or parsed.get("login_instructions")
+    detail["setup_instructions"] = parsed.get("setup_instructions") or parsed.get(
+        "login_instructions"
+    )
     detail["login_instructions"] = parsed.get("login_instructions")
     detail["setup_result"] = parsed.get("setup_result")
     detail["ui_login_snapshot"] = parsed.get("ui_login_snapshot")
@@ -4668,12 +5280,15 @@ async def _verify_token_or_user(db, token: str | None = None):
         from app.core.security import decode_access_token
         from app.models.user import User
         from sqlalchemy import select
+
         try:
             payload = decode_access_token(token)
             username = payload.get("sub")
             if not username:
                 raise HTTPException(status_code=401, detail="Invalid token")
-            result = await db.execute(select(User).where(User.username == username, User.is_active.is_(True)))
+            result = await db.execute(
+                select(User).where(User.username == username, User.is_active.is_(True))
+            )
             user = result.scalar_one_or_none()
             if user is None:
                 raise HTTPException(status_code=401, detail="User not found")
@@ -4698,7 +5313,9 @@ async def list_run_screenshots(run_id: str, db: DbSession, _: CurrentUser):
 
 @router.get("/{run_id}/screenshots/{filename}")
 async def get_run_screenshot(
-    run_id: str, filename: str, db: DbSession,
+    run_id: str,
+    filename: str,
+    db: DbSession,
     token: str | None = Query(default=None),
 ):
     """Serve a screenshot file for a run."""
@@ -4723,12 +5340,15 @@ async def stream_run(run_id: str, db: DbSession, token: str | None = Query(defau
         from app.core.security import decode_access_token
         from app.models.user import User
         from sqlalchemy import select
+
         try:
             payload = decode_access_token(token)
             username = payload.get("sub")
             if not username:
                 raise HTTPException(status_code=401, detail="Invalid token")
-            result = await db.execute(select(User).where(User.username == username, User.is_active.is_(True)))
+            result = await db.execute(
+                select(User).where(User.username == username, User.is_active.is_(True))
+            )
             user = result.scalar_one_or_none()
             if user is None:
                 raise HTTPException(status_code=401, detail="User not found")
@@ -4840,7 +5460,9 @@ async def create_run_intervention(
                 status_code=400,
                 detail="Run is still active. Set cancel_current=true to cancel it before creating an assisted rerun.",
             )
-        task = await _cancel_active_task(db, task, "Run cancelled before assisted intervention rerun")
+        task = await _cancel_active_task(
+            db, task, "Run cancelled before assisted intervention rerun"
+        )
     elif current_status not in {"failed", "bug_found", "cancelled"}:
         raise HTTPException(
             status_code=400,

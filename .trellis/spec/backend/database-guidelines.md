@@ -259,18 +259,22 @@ agent_test_type = normalize_agent_test_type(db_test_type, default="auto")
 run_agent_task.delay(task.id, objective, target_url, test_type=agent_test_type)
 ```
 
-## Scenario: Lightweight Run History List Contract
+## Scenario: Lightweight Run History List and Quality Memory Contract
 
 ### 1. Scope / Trigger
 
-- Trigger: `/api/v1/runs` powers the History page list and must stay fast even when `Task.execution_log` contains large agent traces, screenshots metadata, API results, and final reports.
-- Applies to `app/api/v1/runs.py`, `app/schemas/task.py`, History page list rendering, and runs-list regression tests.
+- Trigger: `/api/v1/runs` powers the History page list and `/api/v1/runs/insights` powers the Quality Memory page; both must stay fast even when `Task.execution_log` contains large agent traces, screenshots metadata, API results, and final reports.
+- Applies to `app/api/v1/runs.py`, `app/schemas/task.py`, History/Quality Memory page rendering, and runs-list/history-insights regression tests.
 
 ### 2. Signatures
 
 - List route:
   ```python
   GET /api/v1/runs?page=1&page_size=20&status=failed&test_type=api
+  ```
+- Quality memory route:
+  ```python
+  GET /api/v1/runs/insights?days=30&limit=100
   ```
 - Response item:
   ```json
@@ -294,6 +298,13 @@ run_agent_task.delay(task.id, objective, target_url, test_type=agent_test_type)
 - Preserve existing pagination and filters: `page`, `page_size`, `status`, and `test_type`.
 - Run detail endpoints may continue to load `Task.execution_log`, redact it, and enrich detail summaries.
 - Frontend History must not block the run list behind `/api/v1/runs/insights`; list loading and quality-memory loading are separate states.
+- The quality-memory insights route must not parse/redact full `execution_log` history for every sampled task. It should fetch sampled task metadata separately and project only the fields needed for triage: count-only `api_execution_result`, count-only `ui_execution_result`, reduced `final_report`, top-level `tool_summary`, top-level `ui_reproducible_script`, and a reduced `artifacts` object.
+- The reduced `api_execution_result` must preserve only count fields: `total`, `executed`, `completed`, `passed`, `failed`, `skipped`, and `all_passed`. Do not project `api_execution_result.results`.
+- The reduced `ui_execution_result` must preserve only count fields: `total`, `executed`, `completed`, `passed`, `failed`, `skipped`, and `all_passed`. Do not project `ui_execution_result.cases`, `ui_execution_result.commands`, snapshots, stdout, or stderr.
+- The reduced `final_report` may include `overall_verdict`, `summary`, `bugs_found`, `recommendations`, `tool_summary`, and reduced `artifacts` with `screenshots` and `tool_summary`.
+- The projected `artifacts` object must be limited to evidence summary fields: `ui_screenshots`, `screenshots`, `tool_summary`, and `ui_reproducible_script`. Do not project full `artifacts`, top-level `tool_calls`, `artifacts.tool_calls`, `ui_case_evidence`, `ui_snapshots`, `ui_commands`, or raw `stdout`/`stderr` dumps.
+- SQLite must use a bounded JSON projection, and production PostgreSQL must use a sampled CTE/subquery that casts `Task.execution_log` to `JSONB` once as `log_json` after cutoff/order/limit. The outer PostgreSQL projection must build the compact `insight_log` from that `log_json` alias using JSONB extraction (`#>`/getitem-style access) and must not use `jsonb_path_query` or scan/filter result arrays. Unsupported databases may fall back to full parsing.
+- A short cache for identical insights requests is allowed when the key includes the query window, sample limit, window row count, and latest task update marker. Do not cache by only `days`/`limit`, because new run completion must invalidate the response.
 
 ### 4. Validation & Error Matrix
 
@@ -301,18 +312,25 @@ run_agent_task.delay(task.id, objective, target_url, test_type=agent_test_type)
 - Unsupported `test_type` filter -> `400` with allowed test types.
 - Empty result set after filters -> `200 []` with `X-Total-Count: 0`.
 - Large `execution_log` rows -> list response excludes the log and still returns list metadata only.
+- Large `progress_events`, full `artifacts`, `tool_calls`, UI snapshots, commands, or raw stdout/stderr dumps -> `/runs/insights` ignores those fields and still returns bounded insight summaries without leaking secrets.
+- Large passed/skipped/failed API results or UI cases/commands -> `/runs/insights` preserves aggregate counts but does not return result/case/command array items.
 
 ### 5. Good/Base/Bad Cases
 
 - Good: `/api/v1/runs?page=1&page_size=20` returns lightweight list rows and `X-Total-Count` without touching detail payload fields.
+- Good: `/api/v1/runs/insights?days=30&limit=100` returns trend, evidence, affected target, surface, and recurring-theme summaries from projected log fields only.
 - Base: `/api/v1/runs/{id}` still returns redacted `execution_log`, workflow steps, evidence, and triage summaries.
 - Bad: serializing `TaskRead` for `/api/v1/runs`, because it includes `execution_log` and can make History load multi-megabyte payloads.
+- Bad: parsing and redacting the entire `execution_log` for each Quality Memory row, because verbose progress and command history can dominate page load time.
+- Bad: projecting any `api_execution_result.results`, `ui_execution_result.cases`, or `ui_execution_result.commands` array, because result arrays can dominate Quality Memory first load and command output can include huge stdout/stderr dumps.
 
 ### 6. Tests Required
 
 - Integration: `/api/v1/runs` response items do not contain `execution_log` or generated/detail fields.
 - Integration: status/test type filters and pagination still return the correct rows and `X-Total-Count`.
 - Regression: invalid filters still return `400`.
+- Regression: `/runs/insights` over large logs with verbose `progress_events`, full `artifacts`, `tool_calls`, UI snapshots, commands, and stdout/stderr dumps does not call the full execution-log parser on SQLite; PostgreSQL uses a sampled `log_json` JSONB CTE/subquery rather than selecting the full `execution_log` row, does not compile `jsonb_path_query(...)`, and omitted secret-bearing history fields do not leak.
+- Regression: API results and UI cases/commands are absent from the projected log while count fields remain available.
 - Frontend build: `HistoryPage.vue` compiles with independent list and insights loading states.
 
 ### 7. Wrong vs Correct
@@ -329,6 +347,55 @@ return [TaskRead.model_validate(item).model_dump(mode="json") for item in items]
 ```python
 stmt = select(Task.id, Task.target_url, Task.objective, Task.status, Task.test_type, Task.created_at, Task.updated_at)
 rows = await db.execute(stmt.order_by(Task.created_at.desc()).offset(offset).limit(page_size))
+```
+
+#### Wrong
+
+```python
+rows = await db.execute(select(Task).order_by(Task.created_at.desc()).limit(limit))
+for task in rows.scalars():
+    parsed = redact_sensitive_data(json.loads(task.execution_log or "{}"))
+```
+
+#### Correct
+
+```python
+projection = func.json_object(
+    "api_execution_result",
+    func.json_object("total", func.json_extract(Task.execution_log, "$.api_execution_result.total")),
+    "artifacts",
+    func.json_object("ui_screenshots", func.json_extract(Task.execution_log, "$.artifacts.ui_screenshots")),
+)
+rows = await db.execute(select(Task.id, Task.target_url, Task.status, Task.created_at, projection).limit(limit))
+```
+
+```python
+log_json = cast(Task.execution_log, JSONB)
+projection = func.jsonb_build_object(
+    "api_execution_result",
+    func.jsonb_build_object("total", log_json["api_execution_result"]["total"]),
+    "artifacts",
+    func.jsonb_build_object("ui_screenshots", log_json["artifacts"]["ui_screenshots"]),
+)
+rows = await db.execute(select(Task.id, Task.target_url, Task.status, Task.created_at, projection).limit(limit))
+```
+
+In production PostgreSQL, sample rows first, cast once, and build the projection from the `log_json` alias:
+
+```python
+sampled = (
+    select(Task.id, Task.target_url, Task.status, Task.created_at, cast(Task.execution_log, JSONB).label("log_json"))
+    .where(Task.created_at >= cutoff)
+    .order_by(Task.created_at.desc())
+    .limit(limit)
+    .cte("sampled_history_tasks")
+)
+log_json = sampled.c.log_json
+projection = func.jsonb_build_object(
+    "api_execution_result",
+    func.jsonb_build_object("total", log_json[("api_execution_result", "total")]),
+)
+rows = await db.execute(select(sampled.c.id, sampled.c.target_url, sampled.c.status, sampled.c.created_at, projection))
 ```
 
 ## Scenario: UI/API Evidence and Final Report Contract
