@@ -20,6 +20,8 @@ EXECUTION_LOG_KEYS = (
     "ui_plan",
     "api_cases",
     "api_cases_generated",
+    "api_case_generation_source",
+    "api_coverage_goal",
     "ui_cases",
     "api_execution_result",
     "ui_execution_result",

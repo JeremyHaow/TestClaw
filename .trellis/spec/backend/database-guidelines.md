@@ -283,6 +283,8 @@ else:
 
 API routes must normalize user-facing lowercase test types into DB enum values through `normalize_test_type(...)`, and pass lowercase agent modes through `normalize_agent_test_type(...)`.
 
+Celery agent tasks must have a soft time limit lower than the hard time limit. If a soft timeout, hard-timeout failure signal, or worker exception occurs, `app/worker/tasks.py` must persist a terminal `TaskStatus.FAILED` state with `last_error`, `execution_result.status_code=1`, a failed `current_step`, and a failed worker workflow step. A timed-out worker must not leave a run stuck in `running`.
+
 ### 4. Validation & Error Matrix
 
 - Empty run source -> `400 {"detail": "source is required"}`
@@ -292,12 +294,15 @@ API routes must normalize user-facing lowercase test types into DB enum values t
 - Cancel non-active run/task -> `400`
 - SSE without query `token` -> `401`
 - Cancelled task detected during persistence -> keep `TaskStatus.CANCELLED` and do not overwrite it with success/failure
+- Celery soft timeout or task failure signal for an active run -> task status becomes `failed`, run detail/SSE expose `last_error` and failed worker progress
 
 ### 5. Good/Base/Bad Cases
 
 - Good: worker calls `run_graph_with_progress(...)`, persists a snapshot after every graph update, and SSE emits `snapshot` events while status is `running`.
+- Good: worker soft timeout fires before the hard kill and persists a failed terminal run so the user sees a finished error state instead of endless replanning.
 - Base: synchronous fallback uses the same progress helper path so local dev without Celery still writes compatible `execution_log` JSON.
 - Bad: writing `task.execution_log = '{"cancelled": true}'` directly, because it destroys prior workflow steps and logs.
+- Bad: relying only on Celery's hard time limit, because a SIGKILLed child cannot update `Task.status` and the UI may stay `running`.
 
 ### 6. Tests Required
 
@@ -306,6 +311,7 @@ API routes must normalize user-facing lowercase test types into DB enum values t
 - Unit: `determine_final_status({"cancelled": True}) == TaskStatus.CANCELLED`
 - Integration: creating a run stores an uppercase DB enum but returns a usable response schema
 - Integration: cancelling a queued/running run sets status `cancelled` and preserves previous `execution_log` keys
+- Regression: worker timeout/failure persistence helper marks a running task failed and preserves terminal progress fields
 - Frontend build: `RunDetailPage.vue` must compile after consuming `snapshot`, `progress_events`, and `current_step`
 
 ### 7. Wrong vs Correct

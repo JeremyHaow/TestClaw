@@ -12,6 +12,7 @@ celery_app.conf.update(
     task_serializer="json",
     result_serializer="json",
     task_track_started=True,
-    task_time_limit=600,
+    task_soft_time_limit=settings.AGENT_TASK_SOFT_TIME_LIMIT_SECONDS,
+    task_time_limit=settings.AGENT_TASK_TIME_LIMIT_SECONDS,
     worker_concurrency=4,
 )

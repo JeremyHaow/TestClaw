@@ -1,7 +1,9 @@
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 
+from billiard.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.pool import NullPool
@@ -161,3 +163,76 @@ def test_run_uses_worker_session_for_persistence_and_disposes_engine(monkeypatch
             assert bug_report.reproduce_steps == "1. Open checkout\n2. Submit payment"
 
     asyncio.run(scenario())
+
+
+def test_worker_soft_timeout_config_precedes_hard_limit() -> None:
+    soft_limit = worker_tasks.celery_app.conf.task_soft_time_limit
+    hard_limit = worker_tasks.celery_app.conf.task_time_limit
+
+    assert soft_limit == worker_tasks.settings.AGENT_TASK_SOFT_TIME_LIMIT_SECONDS
+    assert hard_limit == worker_tasks.settings.AGENT_TASK_TIME_LIMIT_SECONDS
+    assert soft_limit < hard_limit
+
+
+def test_persist_terminal_worker_failure_marks_running_task_failed() -> None:
+    async def scenario() -> None:
+        await _reset_db()
+        async with AsyncSessionLocal() as session:
+            task = Task(
+                objective="timeout coverage",
+                target_url="https://example.test",
+                status=TaskStatus.RUNNING,
+                test_type=TaskTestType.API,
+            )
+            session.add(task)
+            await session.commit()
+            await session.refresh(task)
+            task_id = task.id
+
+        result = await worker_tasks.persist_terminal_worker_failure(
+            task_id,
+            "Agent run exceeded the Celery soft time limit after 540s",
+            error_type="worker_soft_time_limit",
+        )
+
+        assert result["last_error"].startswith("Agent run exceeded")
+        assert result["execution_result"]["failure_type"] == "worker_soft_time_limit"
+
+        async with AsyncSessionLocal() as session:
+            persisted = await session.get(Task, task_id)
+            assert persisted is not None
+            assert persisted.status == TaskStatus.FAILED
+            execution_log = json.loads(persisted.execution_log or "{}")
+
+        assert execution_log["last_error"].startswith("Agent run exceeded")
+        assert execution_log["execution_result"]["status_code"] == 1
+        assert execution_log["execution_result"]["failure_type"] == "worker_soft_time_limit"
+        assert execution_log["current_step"]["node"] == "worker"
+        assert execution_log["current_step"]["status"] == "failed"
+        assert execution_log["workflow_steps"][-1]["status"] == "failed"
+
+    asyncio.run(scenario())
+
+
+def test_task_failure_signal_persists_agent_run_failure(monkeypatch) -> None:
+    calls = []
+
+    def fake_persist(run_id: str, detail: str, *, error_type: str) -> dict:
+        calls.append({"run_id": run_id, "detail": detail, "error_type": error_type})
+        return {}
+
+    monkeypatch.setattr(worker_tasks, "_persist_worker_failure_sync", fake_persist)
+
+    worker_tasks._persist_failed_agent_task_from_signal(
+        sender=SimpleNamespace(name="run_agent_task"),
+        args=("run-123", "objective", "https://example.test"),
+        exception=SoftTimeLimitExceeded(),
+    )
+
+    assert calls == [
+        {
+            "run_id": "run-123",
+            "detail": worker_tasks._worker_timeout_detail(SoftTimeLimitExceeded()),
+            "error_type": "worker_failure_signal",
+        }
+    ]

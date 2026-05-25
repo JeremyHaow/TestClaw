@@ -3,6 +3,7 @@ import logging
 from app.agent.progress import persist_progress
 from app.agent.state import AgentState
 from app.agent.tool_registry import record_tool_call, summarize_tool_calls
+from app.agent.api_scope import ALL_SAFE_GET_COVERAGE_SOURCE
 
 logger = logging.getLogger(__name__)
 
@@ -409,6 +410,7 @@ async def run(state: AgentState) -> AgentState:
     failure_details = _collect_failure_details(state)
     advisory_findings = _collect_api_advisories(state)
     api_counts = _summary_counts(api_result)
+    api_request_selection = (api_result or {}).get("request_selection") or {}
     ui_counts = _summary_counts(ui_result)
     total_executed = api_counts["executed"] + ui_counts["executed"]
     total_passed = api_counts["passed"] + ui_counts["passed"]
@@ -436,6 +438,12 @@ async def run(state: AgentState) -> AgentState:
         api_findings.append(
             f"已执行 {api_counts['executed']} 个 API 请求，通过 {api_counts['passed']} 个，跳过 {api_counts['skipped']} 个。"
         )
+        if api_request_selection.get("source") == ALL_SAFE_GET_COVERAGE_SOURCE:
+            api_findings.append(
+                "本次按 OpenAPI schema 确定性覆盖安全 GET/HEAD/OPTIONS："
+                f"{api_request_selection.get('selected_safe_endpoint_total', api_counts['total'])}/"
+                f"{api_request_selection.get('safe_endpoint_total', api_counts['total'])} 个安全端点已纳入执行选择。"
+            )
     elif test_type == "ui":
         api_findings.append("本次为 UI 测试运行，API 测试不适用。")
     elif _has_api_target(state):
@@ -466,6 +474,14 @@ async def run(state: AgentState) -> AgentState:
         execution_notes.append(
             f"达到 API 请求执行预算后跳过了 {skip_note_counts['execution_budget_exhausted']} 个剩余请求，避免长时间运行触发 Worker 超时。"
         )
+    if (
+        api_request_selection.get("source") == ALL_SAFE_GET_COVERAGE_SOURCE
+        and api_request_selection.get("omitted_safe_endpoint_total")
+    ):
+        execution_notes.append(
+            "所有 GET/只读端点目标按执行预算有界覆盖，"
+            f"另有 {api_request_selection.get('omitted_safe_endpoint_total')} 个安全端点未在本轮执行。"
+        )
     if advisory_findings:
         execution_notes.append(
             f"记录了 {len(advisory_findings)} 个 API 鉴权策略提醒，未计入主通过率失败。"
@@ -487,6 +503,7 @@ async def run(state: AgentState) -> AgentState:
             **api_counts,
             "planned_cases": len(api_cases),
             "has_execution": api_counts["executed"] > 0,
+            "request_selection": api_request_selection,
             "key_findings": api_findings,
         },
         "ui_test_summary": {

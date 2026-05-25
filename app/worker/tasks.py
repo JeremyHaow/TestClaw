@@ -5,6 +5,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+from billiard.exceptions import SoftTimeLimitExceeded
+from celery.signals import task_failure
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -16,6 +18,7 @@ from sqlalchemy.pool import NullPool
 
 from app.agent.graph import agent_graph
 from app.agent.progress import (
+    append_progress_event,
     determine_final_status,
     latest_workflow_step,
     persist_progress,
@@ -86,12 +89,144 @@ def _safe_task_result(state: dict[str, Any]) -> dict[str, Any]:
     return redact_sensitive_data(result)
 
 
+def _terminal_worker_failure_state(
+    task_id: str,
+    detail: str,
+    *,
+    error_type: str,
+) -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "task_id": task_id,
+        "last_error": detail,
+        "workflow_steps": [
+            {
+                "node": "worker",
+                "status": "failed",
+                "detail": detail,
+            }
+        ],
+        "execution_result": {
+            "status_code": 1,
+            "stdout": "",
+            "stderr": detail,
+            "trace_path": None,
+            "failure_type": error_type,
+        },
+    }
+    append_progress_event(state, "worker", "failed", detail)
+    return state
+
+
+async def persist_terminal_worker_failure(
+    task_id: str,
+    detail: str,
+    *,
+    error_type: str = "worker_error",
+) -> dict[str, Any]:
+    async with _worker_session_scope() as db:
+        task = await task_service.get(db, task_id)
+        state = _terminal_worker_failure_state(task_id, detail, error_type=error_type)
+        if task is None:
+            return _safe_task_result(state)
+
+        current_status = task.status if isinstance(task.status, str) else task.status.value
+        if current_status == TaskStatus.CANCELLED.value:
+            state["cancelled"] = True
+            await persist_task_state(db, task, state, status=TaskStatus.CANCELLED, refresh=True)
+            return _safe_task_result(state)
+
+        await persist_task_state(db, task, state, status=TaskStatus.FAILED, refresh=True)
+        return _safe_task_result(state)
+
+
+def _persist_worker_failure_sync(
+    task_id: str,
+    detail: str,
+    *,
+    error_type: str,
+) -> dict[str, Any]:
+    return asyncio.run(
+        persist_terminal_worker_failure(task_id, detail, error_type=error_type)
+    )
+
+
+def _worker_timeout_detail(exc: BaseException | None = None) -> str:
+    configured = getattr(settings, "AGENT_TASK_SOFT_TIME_LIMIT_SECONDS", None)
+    limit_text = f" after {configured}s" if configured else ""
+    exc_text = str(exc).strip() if exc else ""
+    suffix = f": {exc_text}" if exc_text else "."
+    return (
+        "Agent run exceeded the Celery soft time limit"
+        f"{limit_text}; marked failed before the hard timeout could leave the run running"
+        f"{suffix}"
+    )
+
+
 @celery_app.task(bind=True, name="run_agent_task")
 def run_agent_task(
     self: Any, task_id: str, objective: str, target_url: str, **kwargs: Any
 ) -> dict[str, Any]:
     logger.info("[Agent] Starting task %s", task_id)
-    return asyncio.run(_run(task_id, objective, target_url, **kwargs))
+    try:
+        return asyncio.run(_run(task_id, objective, target_url, **kwargs))
+    except SoftTimeLimitExceeded as exc:
+        detail = _worker_timeout_detail(exc)
+        logger.exception("[Agent] Task %s exceeded soft time limit", task_id)
+        try:
+            _persist_worker_failure_sync(
+                task_id,
+                detail,
+                error_type="worker_soft_time_limit",
+            )
+        except Exception as persist_exc:
+            logger.warning("Failed to persist soft timeout for task %s: %s", task_id, persist_exc)
+        raise
+    except Exception as exc:
+        detail = f"Agent worker task failed: {exc}"
+        logger.exception("[Agent] Task %s failed", task_id)
+        try:
+            _persist_worker_failure_sync(
+                task_id,
+                detail,
+                error_type="worker_exception",
+            )
+        except Exception as persist_exc:
+            logger.warning("Failed to persist worker exception for task %s: %s", task_id, persist_exc)
+        raise
+
+
+@task_failure.connect
+def _persist_failed_agent_task_from_signal(
+    sender: Any = None,
+    task_id: str | None = None,
+    exception: BaseException | None = None,
+    args: tuple[Any, ...] | None = None,
+    kwargs: dict[str, Any] | None = None,
+    **_: Any,
+) -> None:
+    task_name = getattr(sender, "name", None)
+    if task_name != "run_agent_task":
+        return
+    run_id = str(args[0]) if args else str((kwargs or {}).get("task_id") or "")
+    if not run_id:
+        return
+    detail = (
+        _worker_timeout_detail(exception)
+        if isinstance(exception, SoftTimeLimitExceeded)
+        else f"Agent worker task failed before completion: {exception}"
+    )
+    try:
+        _persist_worker_failure_sync(
+            run_id,
+            detail,
+            error_type="worker_failure_signal",
+        )
+    except Exception as persist_exc:
+        logger.warning(
+            "Failed to persist terminal worker failure for task %s: %s",
+            run_id,
+            persist_exc,
+        )
 
 
 async def run_graph_with_progress(state: dict[str, Any]) -> dict[str, Any]:

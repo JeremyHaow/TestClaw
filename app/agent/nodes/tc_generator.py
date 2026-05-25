@@ -3,13 +3,20 @@ import logging
 
 from langchain_core.messages import HumanMessage
 
-from app.agent.api_scope import validate_generated_api_cases
+from app.agent.api_scope import (
+    ALL_SAFE_GET_COVERAGE_GOAL,
+    ALL_SAFE_GET_COVERAGE_SOURCE,
+    objective_requests_all_safe_get_coverage,
+    safe_schema_method_endpoints,
+    validate_generated_api_cases,
+)
 from app.agent.analysis.token_budget import apply_schema_budget
 from app.agent.json_utils import parse_llm_json
 from app.agent.progress import persist_progress
 from app.agent.prompts import CASE_GENERATOR_PROMPT
 from app.agent.state import AgentState
 from app.agent.tool_registry import record_tool_call
+from app.config import settings
 from app.core.llm_gateway import llm_gateway
 
 logger = logging.getLogger(__name__)
@@ -128,6 +135,73 @@ def _build_fallback_api_cases(
                 ],
             })
 
+    return cases
+
+
+def _build_schema_safe_smoke_api_cases(
+    endpoints: list[dict],
+    *,
+    limit: int | None = None,
+) -> list[dict]:
+    """Build deterministic smoke cases for every safe schema endpoint within budget."""
+    cases = []
+    for ep in endpoints:
+        method = str(ep.get("method") or "GET").upper()
+        path = str(ep.get("path") or "")
+        if not path:
+            continue
+        query_params = {}
+        for qp in ep.get("query_params") or []:
+            if isinstance(qp, dict) and qp.get("name"):
+                val = qp.get("example")
+                if val is None:
+                    enum_vals = qp.get("enum") or qp.get("schema", {}).get("enum")
+                    if enum_vals:
+                        val = enum_vals[0]
+                    else:
+                        qtype = qp.get("type") or qp.get("schema", {}).get("type", "string")
+                        if qtype == "integer":
+                            val = 1
+                        elif qtype == "number":
+                            val = 1.0
+                        elif qtype == "boolean":
+                            val = True
+                        elif qtype == "array":
+                            val = ["test"]
+                        else:
+                            val = "test"
+                query_params[str(qp["name"])] = val
+
+        try:
+            expected_status = int(ep.get("response_status") or 200)
+        except (TypeError, ValueError):
+            expected_status = 200
+        case = {
+            "title": f"SCHEMA SAFE SMOKE {method} {path}",
+            "endpoint": path,
+            "method": method,
+            "preconditions": "Endpoint is documented in the OpenAPI schema and read-only safe.",
+            "steps": [f"Send {method} request to {path}"],
+            "expected": ["Response satisfies the documented status contract or safe auth boundary."],
+            "priority": "P1",
+            "category": "SMOKE",
+            "case_type": "api",
+            "source": ALL_SAFE_GET_COVERAGE_SOURCE,
+            "request_template": {
+                "method": method,
+                "path": path,
+                "headers": {},
+                "query_params": query_params,
+            },
+            "assertions": [
+                {"type": "status_code", "expected": expected_status},
+            ],
+        }
+        if ep.get("response_schema"):
+            case["response_schema"] = ep.get("response_schema")
+        cases.append(case)
+        if limit is not None and len(cases) >= limit:
+            break
     return cases
 
 
@@ -303,6 +377,25 @@ async def run(state: AgentState) -> AgentState:
     api_cases = list(state.get("api_cases") or [])
     ui_cases = list(state.get("ui_cases") or [])
     generated_api_cases = False
+    safe_schema_endpoints = safe_schema_method_endpoints(parsed_api_schema)
+    all_safe_get_coverage_requested = (
+        objective_requests_all_safe_get_coverage(objective)
+        and bool(safe_schema_endpoints)
+        and test_type != "ui"
+    )
+
+    if all_safe_get_coverage_requested and not api_cases:
+        try:
+            case_limit = int(getattr(settings, "API_MAX_EXECUTED_REQUESTS", 120) or 0)
+        except (TypeError, ValueError):
+            case_limit = 120
+        api_cases = _build_schema_safe_smoke_api_cases(
+            safe_schema_endpoints,
+            limit=case_limit if case_limit > 0 else None,
+        )
+        generated_api_cases = True
+        state["api_coverage_goal"] = ALL_SAFE_GET_COVERAGE_GOAL
+        state["api_case_generation_source"] = ALL_SAFE_GET_COVERAGE_SOURCE
 
     if db and not (api_cases or ui_cases):
         try:

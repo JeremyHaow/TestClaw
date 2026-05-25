@@ -7,7 +7,12 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
-from app.agent.api_scope import documented_api_scope_text
+from app.agent.api_scope import (
+    ALL_SAFE_GET_COVERAGE_GOAL,
+    ALL_SAFE_GET_COVERAGE_SOURCE,
+    documented_api_scope_text,
+    objective_requests_all_safe_get_coverage,
+)
 from app.agent.json_utils import parse_llm_json_object
 from app.agent.progress import persist_progress
 from app.agent.prompts import EVIDENCE_EVALUATOR_PROMPT
@@ -128,6 +133,10 @@ def _api_summary(state: AgentState) -> dict[str, Any]:
         "all_passed": bool(result.get("all_passed")),
         "complete": bool(result.get("complete")),
         "request_selection": result.get("request_selection") or state.get("api_request_selection") or {},
+        "coverage_goal": (
+            (result.get("request_selection") or state.get("api_request_selection") or {}).get("coverage_goal")
+            or state.get("api_coverage_goal")
+        ),
         "safe_schema_endpoint_count": _safe_schema_endpoint_count(state),
         "failure_samples": failure_samples,
         "skip_reasons": skip_reasons[:4],
@@ -235,6 +244,8 @@ def _api_needs_replan(state: AgentState, summary: dict[str, Any]) -> tuple[bool,
     api = summary["api"]
     if not api["requested"]:
         return False, "API stage is not requested for this run.", []
+    if _api_has_schema_driven_all_safe_coverage(state, summary):
+        return False, "Schema-driven all-safe-GET coverage was selected for the requested scope.", []
     if api["total"] == 0:
         if state.get("parsed_api_schema") or state.get("api_cases") or state.get("base_url_override"):
             return True, "API stage produced no executable request candidates.", [
@@ -255,6 +266,18 @@ def _api_needs_replan(state: AgentState, summary: dict[str, Any]) -> tuple[bool,
             "不要停在单个失败用例；从 OpenAPI schema 重新选择多个安全端点收集对照证据。"
         ]
     return False, "API evidence is sufficient for this bounded pass.", []
+
+
+def _api_has_schema_driven_all_safe_coverage(state: AgentState, summary: dict[str, Any]) -> bool:
+    api = summary["api"]
+    selection = api.get("request_selection") or {}
+    if selection.get("source") == ALL_SAFE_GET_COVERAGE_SOURCE:
+        return api["total"] > 0 and selection.get("coverage_goal") == ALL_SAFE_GET_COVERAGE_GOAL
+    return (
+        objective_requests_all_safe_get_coverage(state.get("objective"))
+        and selection.get("coverage_goal") == ALL_SAFE_GET_COVERAGE_GOAL
+        and api["total"] > 0
+    )
 
 
 def _ui_needs_replan(state: AgentState, summary: dict[str, Any]) -> tuple[bool, str, list[str]]:
@@ -522,6 +545,11 @@ def _merge_decisions(
         return guardrail
 
     if model_decision and model_decision["next_action"] in {_REPLAN_API, _REPLAN_UI}:
+        if stage == "api" and _api_has_schema_driven_all_safe_coverage(
+            state,
+            _evidence_summary(state, stage),
+        ):
+            return guardrail
         target_stage = "api" if model_decision["next_action"] == _REPLAN_API else "ui"
         if target_stage == stage and _can_replan(state, stage):
             return _sanitize_replan_instructions(state, stage, model_decision)

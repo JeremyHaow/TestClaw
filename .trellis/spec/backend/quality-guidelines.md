@@ -840,7 +840,7 @@ assert _after_ui_login({"login_instructions": "demo", "login_verified": False}) 
       "selected_total": int,
       "omitted": int,
       "request_selection": {
-          "source": "api_cases|parsed_api_schema|safe_schema_fallback|schema_fallback|fallback_url",
+          "source": "api_cases|parsed_api_schema|all_safe_schema|safe_schema_fallback|schema_fallback|fallback_url",
           "candidate_total": int,
           "selected_total": int,
           "budget_limit": int | None,
@@ -863,8 +863,10 @@ assert _after_ui_login({"login_instructions": "demo", "login_verified": False}) 
 - When auth is required but no token/header is provided, safe methods may run unauthorized checks, but positive business assertions must be skipped.
 - If a Swagger document is served through a public proxy prefix, the loader may rewrite documented paths such as `/dev-api/*` to the reachable public prefix such as `/api/*`; the rewrite must be surfaced in preflight and run detail state.
 - Status matching must consider both HTTP status and common JSON envelope status fields such as `code` or `status`.
+- Status assertions must parse numeric strings, lists, and `one_of:401,403` style expectations exactly. Unknown formats must not silently become HTTP 200; `not_equals:200` may be supported as an explicit negative status expectation.
 - API result entries may include `envelope_status_code`, `failure_type`, and `failure_reason` so reporter output can distinguish backend validation/contract failures from generic runner assertions.
 - When `api_cases` are present, the API runner must build execution requests from those curated/generated cases before considering `parsed_api_schema`; do not fan out the full schema while ignoring the curated case set.
+- Exception: objectives that explicitly ask for all GET/read-only coverage (for example "所有 GET", "全部 GET", "all GET requests", or "read-only endpoints") must not rely on LLM-generated samples. With a parsed OpenAPI schema, case generation and/or runner selection must deterministically derive safe `GET`/`HEAD`/`OPTIONS` smoke coverage from the schema, mark `request_selection.source="all_safe_schema"`, and cover up to `API_MAX_EXECUTED_REQUESTS`.
 - If curated cases produce no executable request under `safe_read_only` or `safe_with_auth`, the runner may fall back to a bounded safe-method schema subset so read-only runs can still produce useful `GET`/`HEAD`/`OPTIONS` evidence.
 - Evidence-evaluator API replan feedback must be bounded before it reaches `tc_generator`: list the documented method/path scope, remove out-of-schema path mentions, and forbid auth-bypass probes or mutation methods blocked by `api_execution_policy`.
 - Model-generated API cases must be validated against `parsed_api_schema` before execution. Drop generated method/path pairs absent from the loaded OpenAPI schema unless `allow_out_of_schema_api_cases=true` was explicitly supplied. User-curated/suite cases may remain curated, but generated replans default to schema-only.
@@ -893,8 +895,11 @@ assert _after_ui_login({"login_instructions": "demo", "login_verified": False}) 
 - Generated objective-grounded assertion `$.session.status == "active"` for objective "Verify login session status is active" -> remains blocking even without a response schema; a mismatched response fails the API case.
 - Generated objective-grounded assertion `$.userName == "Ada"` for objective "Verify user name is Ada" -> remains blocking; camelCase field tokenization must not downgrade it to advisory.
 - JSON envelope returns `{"code": 401}` with HTTP 200 -> treat as unauthorized for matching and reporting.
+- Assertion `expected: "one_of:401,403"` + actual HTTP 200 -> fail; actual HTTP 401 or 403 -> pass.
 - Invalid-input negative case returns HTTP 200 with body `{"code": 500, "msg": "不能为空"}` -> pass the `PARAM_VALIDATION` rejection with `accepted_error_envelope=true` and warning metadata; do not create a blocking finding solely for the 5xx business code.
 - Large OpenAPI schema with more executable requests than `API_MAX_EXECUTED_REQUESTS` -> select up to the budget, execute selected requests, keep omitted requests out of `results`, and report `budget_exhausted=true`, `budget_skipped=<omitted count>`, `omitted=<omitted count>`, and `request_selection`.
+- Objective "测试所有 GET 请求" + OpenAPI has 107 safe endpoints + `API_MAX_EXECUTED_REQUESTS=120` -> derive schema-driven safe smoke requests for all 107 endpoints, use `request_selection.source="all_safe_schema"`, and do not replan merely because LLM `api_cases` would have been sparse.
+- Objective "all GET requests" + OpenAPI has more safe endpoints than `API_MAX_EXECUTED_REQUESTS` -> execute a bounded deterministic subset, report `safe_endpoint_total`, `selected_safe_endpoint_total`, `omitted_safe_endpoint_total`, and `bounded=true`.
 - Write request returns HTTP 405 from nginx or an upstream method gate -> mark that request environment-not-executable, then skip same-origin same-method write requests without counting them as failures.
 - AUTH negative probe returns HTTP 200 with no unauthorized envelope -> record an advisory/security warning and keep main `failed` count unchanged.
 - AUTH negative curated case has `request_template.headers.Authorization="[REDACTED]"` and target returns HTTP 200 with `{"code":401}` when no token is sent -> strip auth-like headers, execute without credentials, and pass the case.
@@ -925,6 +930,8 @@ assert _after_ui_login({"login_instructions": "demo", "login_verified": False}) 
 - Regression: reporter summaries include executed/skipped counts and keep skipped requests out of failed totals.
 - Regression: reporter turns `backend_validation_contract` API result failures into backend validation contract findings.
 - Regression: API runner prefers curated `api_cases` over `parsed_api_schema` when both are present.
+- Regression: all-GET/read-only objectives deterministically select schema-derived safe endpoints up to the execution budget instead of relying on sparse LLM-generated `api_cases`.
+- Regression: execution evaluator does not trigger repeated API replans when `request_selection.source="all_safe_schema"` has covered the schema-derived budget.
 - Regression: evidence-evaluator API replan instructions remove out-of-schema path mentions and name only documented method/path scope.
 - Regression: generated API cases targeting undocumented paths are filtered before execution; no HTTP request is sent for the hallucinated path.
 - Regression: unsupported generated assertions are downgraded to advisory/non-blocking and appear in `agent_case_diagnostics`, not `bugs_found`.

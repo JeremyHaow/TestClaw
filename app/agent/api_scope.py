@@ -7,6 +7,8 @@ from urllib.parse import urlsplit
 
 SAFE_API_METHODS = {"GET", "HEAD", "OPTIONS"}
 WRITE_API_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+ALL_SAFE_GET_COVERAGE_SOURCE = "all_safe_schema"
+ALL_SAFE_GET_COVERAGE_GOAL = "schema_driven_all_safe_get"
 _JSON_PATH_BRACKET_RE = re.compile(r"\[\s*(?:(\d+)|[\"']([^\"']+)[\"'])\s*\]")
 _JSON_PATH_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]+")
 _JSON_TYPE_ALIASES = {
@@ -50,6 +52,48 @@ _MISSION_CONTROL_STRONG_TERMS = {
     "react trace",
     "react traces",
 }
+
+
+def objective_requests_all_safe_get_coverage(objective: Any) -> bool:
+    """Return true when the user asked for all read-only schema endpoints.
+
+    This intentionally focuses on objective wording only. The caller must still
+    require a parsed schema before using schema-derived coverage.
+    """
+    raw = str(objective or "").strip().lower()
+    if not raw:
+        return False
+    compact = re.sub(r"\s+", "", raw)
+    normalized = re.sub(r"[_\-]+", " ", raw)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    chinese_all = ("所有", "全部", "全量", "每个", "所有的")
+    if "get" in compact and any(token in compact for token in chinese_all):
+        return True
+    if any(token in compact for token in ("只读接口", "只读端点", "只读endpoint")) and any(
+        token in compact for token in chinese_all
+    ):
+        return True
+
+    english_patterns = (
+        r"\ball\s+(?:the\s+)?(?:safe\s+|read\s+only\s+|readonly\s+)?get\s+(?:requests?|endpoints?|apis?)\b",
+        r"\bevery\s+(?:safe\s+|read\s+only\s+|readonly\s+)?get\s+(?:request|endpoint|api)\b",
+        r"\bget\s+(?:requests?|endpoints?|apis?)\s+(?:all|every)\b",
+        r"\ball\s+(?:safe\s+)?read\s+only\s+(?:requests?|endpoints?|apis?)\b",
+        r"\bread\s+only\s+(?:requests?|endpoints?|apis?)\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in english_patterns)
+
+
+def safe_schema_method_endpoints(parsed_api_schema: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Return OpenAPI endpoints that are safe to execute under read-only policy."""
+    return [
+        endpoint
+        for endpoint in (parsed_api_schema or [])
+        if isinstance(endpoint, dict)
+        and _normalize_method(endpoint.get("method")) in SAFE_API_METHODS
+        and endpoint.get("path")
+    ]
 
 
 def _normalize_method(value: Any) -> str:
@@ -354,6 +398,11 @@ def _status_expected_values(expected: Any) -> set[int]:
     values = expected if isinstance(expected, list) else [expected]
     parsed: set[int] = set()
     for value in values:
+        if isinstance(value, str) and value.strip().lower().startswith("one_of:"):
+            parsed.update(int(item) for item in re.findall(r"\b\d{3}\b", value))
+            continue
+        if isinstance(value, str) and value.strip().lower().startswith("not_equals:"):
+            continue
         try:
             parsed.add(int(value))
         except (TypeError, ValueError):

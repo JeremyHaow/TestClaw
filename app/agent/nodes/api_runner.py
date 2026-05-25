@@ -8,7 +8,14 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 from openapi_schema_validator import validate
 
-from app.agent.api_scope import sanitize_api_case_assertions, validate_generated_api_cases
+from app.agent.api_scope import (
+    ALL_SAFE_GET_COVERAGE_GOAL,
+    ALL_SAFE_GET_COVERAGE_SOURCE,
+    objective_requests_all_safe_get_coverage,
+    safe_schema_method_endpoints,
+    sanitize_api_case_assertions,
+    validate_generated_api_cases,
+)
 from app.agent.progress import persist_progress
 from app.agent.state import AgentState
 from app.agent.tool_registry import install_tool_context, record_tool_call, summarize_tool_calls
@@ -124,12 +131,40 @@ def _environment_block_reason(method: str, origin: str) -> str:
     return f"当前测试环境或上游网关不允许 {target}{method} 请求，后续同类写入请求已跳过。"
 
 
-def _parse_status(val) -> int:
-    """Parse response status, handling 'default' and non-numeric values."""
+def _parse_status(val, default: int | None = None) -> int | None:
+    """Parse a single response status without silently treating unknown text as 200."""
     try:
         return int(val)
     except (ValueError, TypeError):
-        return 200
+        return default
+
+
+def _parse_status_values(expected_status) -> set[int]:
+    if isinstance(expected_status, (list, tuple, set)):
+        values: set[int] = set()
+        for value in expected_status:
+            values.update(_parse_status_values(value))
+        return values
+
+    if isinstance(expected_status, str):
+        text = expected_status.strip()
+        lowered = text.lower()
+        if lowered.startswith("not_equals:"):
+            return set()
+        if lowered.startswith("one_of:"):
+            return {int(value) for value in re.findall(r"\b\d{3}\b", text)}
+
+    parsed = _parse_status(expected_status)
+    return {parsed} if parsed is not None else set()
+
+
+def _parse_status_not_equals_values(expected_status) -> set[int]:
+    if not isinstance(expected_status, str):
+        return set()
+    text = expected_status.strip()
+    if not text.lower().startswith("not_equals:"):
+        return set()
+    return {int(value) for value in re.findall(r"\b\d{3}\b", text)}
 
 
 def _normalize_api_execution_policy(value: str | None) -> str:
@@ -198,9 +233,7 @@ def _make_environment_skipped_result(
 
 
 def _expected_status_values(expected_status) -> set[int]:
-    if isinstance(expected_status, list):
-        return {_parse_status(value) for value in expected_status}
-    return {_parse_status(expected_status)}
+    return _parse_status_values(expected_status)
 
 
 def _is_auth_negative_probe(req: dict) -> bool:
@@ -520,16 +553,19 @@ def _status_matches(expected_status, http_status: int, payload) -> bool:
     if payload_status is not None:
         actual_candidates.append(payload_status)
 
-    if isinstance(expected_status, list):
-        expected_values = {_parse_status(value) for value in expected_status}
-        return any(value in expected_values for value in actual_candidates)
+    not_equals_values = _parse_status_not_equals_values(expected_status)
+    if not_equals_values:
+        return all(value not in not_equals_values for value in actual_candidates)
 
-    expected = _parse_status(expected_status)
-    if expected == 200:
+    expected_values = _parse_status_values(expected_status)
+    if not expected_values:
+        return False
+
+    if not isinstance(expected_status, (list, tuple, set)) and expected_values == {200}:
         if 200 <= http_status < 300:
             return payload_status is None or 200 <= payload_status < 300
         return False
-    return any(value == expected for value in actual_candidates)
+    return any(value in expected_values for value in actual_candidates)
 
 
 _JSON_PATH_TOKEN_RE = re.compile(r"([A-Za-z0-9_\-]+)|\[(\d+)\]")
@@ -1043,9 +1079,7 @@ def _has_executable_request(requests: list[dict]) -> bool:
 
 def _safe_schema_subset(api_schema: list[dict], limit: int | None) -> list[dict]:
     subset = []
-    for endpoint in api_schema:
-        if str(endpoint.get("method") or "GET").upper() not in SAFE_API_METHODS:
-            continue
+    for endpoint in safe_schema_method_endpoints(api_schema):
         subset.append(endpoint)
         if limit is not None and len(subset) >= limit:
             break
@@ -1058,6 +1092,7 @@ def _select_requests_for_execution(
     *,
     source: str,
     fallback_reason: str | None = None,
+    coverage_metadata: dict | None = None,
 ) -> tuple[list[dict], dict]:
     candidate_total = len(requests)
     if execution_budget is None or candidate_total <= execution_budget:
@@ -1082,7 +1117,61 @@ def _select_requests_for_execution(
     }
     if fallback_reason:
         metadata["fallback_reason"] = fallback_reason
+    if coverage_metadata:
+        metadata.update(coverage_metadata)
     return selected, metadata
+
+
+def _schema_endpoint_identity(request: dict) -> str | None:
+    method = str(request.get("schema_method") or request.get("method") or "").upper()
+    path = str(request.get("schema_path") or "").strip()
+    if not method or not path:
+        return None
+    return f"{method} {path}"
+
+
+def _all_safe_schema_coverage_metadata(
+    safe_endpoints: list[dict],
+    selected_requests: list[dict],
+) -> dict:
+    selected_endpoint_ids = {
+        identity
+        for request in selected_requests
+        if (identity := _schema_endpoint_identity(request))
+    }
+    safe_endpoint_total = len(safe_endpoints)
+    selected_safe_endpoint_total = len(selected_endpoint_ids)
+    omitted_safe_endpoint_total = max(safe_endpoint_total - selected_safe_endpoint_total, 0)
+    return {
+        "coverage_goal": ALL_SAFE_GET_COVERAGE_GOAL,
+        "safe_methods": sorted(SAFE_API_METHODS),
+        "safe_endpoint_total": safe_endpoint_total,
+        "selected_safe_endpoint_total": selected_safe_endpoint_total,
+        "omitted_safe_endpoint_total": omitted_safe_endpoint_total,
+        "bounded": omitted_safe_endpoint_total > 0 or len(selected_requests) < safe_endpoint_total,
+    }
+
+
+def _api_execution_progress_detail(total_requests: int, request_selection: dict) -> str:
+    if request_selection.get("source") == ALL_SAFE_GET_COVERAGE_SOURCE:
+        detail = (
+            "Executing schema-driven all-safe-GET coverage: "
+            f"{request_selection.get('selected_safe_endpoint_total', total_requests)}/"
+            f"{request_selection.get('safe_endpoint_total', total_requests)} safe endpoint(s), "
+            f"{total_requests} selected request(s)"
+        )
+        if request_selection.get("omitted"):
+            detail += f"; {request_selection.get('omitted')} request candidate(s) omitted by execution budget"
+        if request_selection.get("omitted_safe_endpoint_total"):
+            detail += f"; {request_selection.get('omitted_safe_endpoint_total')} safe endpoint(s) omitted"
+        return detail
+
+    if not request_selection.get("omitted"):
+        return f"Executing {total_requests} API request(s)"
+    return (
+        f"Executing {total_requests} selected API request(s); "
+        f"{request_selection.get('omitted')} omitted by execution budget"
+    )
 
 
 def _build_test_requests(
@@ -1113,6 +1202,8 @@ def _build_test_requests(
                 "label": f"SKIPPED_WRITE {method} {path}",
                 "method": method,
                 "url": full_url,
+                "schema_method": method,
+                "schema_path": path,
                 "headers": {},
                 "body": None,
                 "expected_status": None,
@@ -1132,6 +1223,8 @@ def _build_test_requests(
                 "label": f"SKIPPED_UPLOAD {method} {path}",
                 "method": method,
                 "url": full_url,
+                "schema_method": method,
+                "schema_path": path,
                 "headers": {},
                 "body": None,
                 "expected_status": None,
@@ -1153,6 +1246,8 @@ def _build_test_requests(
                     "label": f"UNAUTHORIZED {method} {path}",
                     "method": method,
                     "url": full_url,
+                    "schema_method": method,
+                    "schema_path": path,
                     "headers": {},
                     "body": None,
                     "query_params": query_params,
@@ -1163,6 +1258,8 @@ def _build_test_requests(
                 "label": f"SKIPPED_AUTH {method} {path}",
                 "method": method,
                 "url": full_url,
+                "schema_method": method,
+                "schema_path": path,
                 "headers": {},
                 "body": None,
                 "expected_status": None,
@@ -1179,10 +1276,12 @@ def _build_test_requests(
             "label": f"SMOKE {method} {path}",
             "method": method,
             "url": full_url,
+            "schema_method": method,
+            "schema_path": path,
             "headers": smoke_headers,
             "body": req_body if not is_upload else None,
             "query_params": query_params,
-            "expected_status": _parse_status(endpoint.get("response_status", "200")),
+            "expected_status": _parse_status(endpoint.get("response_status", "200"), default=200),
             "response_schema": endpoint.get("response_schema"),
             "auto_schema_assertion": bool(endpoint.get("response_schema")),
             "schema_assertion_mode": "advisory",
@@ -1206,6 +1305,8 @@ def _build_test_requests(
                     "label": f"MISSING_FIELD {method} {path} (no {field})",
                     "method": method,
                     "url": full_url,
+                    "schema_method": method,
+                    "schema_path": path,
                     "headers": {**default_headers, "Content-Type": content_type},
                     "body": broken_body,
                     "expected_status": [400, 422],
@@ -1219,6 +1320,8 @@ def _build_test_requests(
                 "label": f"EMPTY_BODY {method} {path}",
                 "method": method,
                 "url": full_url,
+                "schema_method": method,
+                "schema_path": path,
                 "headers": {**default_headers, "Content-Type": "application/json"},
                 "body": {},
                 "expected_status": [400, 422],
@@ -1232,6 +1335,8 @@ def _build_test_requests(
                 "label": f"UNAUTHORIZED {method} {path}",
                 "method": method,
                 "url": full_url,
+                "schema_method": method,
+                "schema_path": path,
                 "headers": {"Content-Type": "application/json"} if req_body is not None else {},
                 "body": req_body,
                 "query_params": query_params,
@@ -1261,6 +1366,8 @@ def _build_test_requests(
                     "label": f"INVALID_TYPE {method} {path}",
                     "method": method,
                     "url": full_url,
+                    "schema_method": method,
+                    "schema_path": path,
                     "headers": {**default_headers, "Content-Type": content_type},
                     "body": bad_body,
                     "expected_status": [400, 422],
@@ -1348,6 +1455,13 @@ async def run(state: AgentState) -> AgentState:
     execution_policy = _normalize_api_execution_policy(state.get("api_execution_policy"))
     state["api_execution_policy"] = execution_policy
     write_allowed = _policy_allows_write(execution_policy)
+    safe_schema_endpoints = safe_schema_method_endpoints(api_schema)
+    all_safe_get_coverage_requested = (
+        objective_requests_all_safe_get_coverage(state.get("objective"))
+        and bool(safe_schema_endpoints)
+    )
+    if all_safe_get_coverage_requested:
+        state["api_coverage_goal"] = ALL_SAFE_GET_COVERAGE_GOAL
     retry_count = max(0, int(getattr(settings, "API_REQUEST_RETRY_COUNT", 0) or 0))
     timeout_seconds = float(getattr(settings, "API_REQUEST_TIMEOUT_SECONDS", 30.0) or 30.0)
     execution_budget = _max_executed_requests()
@@ -1380,7 +1494,16 @@ async def run(state: AgentState) -> AgentState:
     request_candidates = []
     selection_source = "fallback_url"
     fallback_reason = None
-    if api_cases:
+    if all_safe_get_coverage_requested:
+        request_candidates = _build_test_requests(
+            safe_schema_endpoints,
+            base_url,
+            auth_headers,
+            execution_policy,
+        )
+        selection_source = ALL_SAFE_GET_COVERAGE_SOURCE
+        fallback_reason = "objective_requested_all_safe_get_schema_coverage"
+    elif api_cases:
         case_requests = _build_case_test_requests(
             api_cases,
             base_url,
@@ -1441,6 +1564,12 @@ async def run(state: AgentState) -> AgentState:
         source=selection_source,
         fallback_reason=fallback_reason,
     )
+    if selection_source == ALL_SAFE_GET_COVERAGE_SOURCE:
+        coverage_metadata = _all_safe_schema_coverage_metadata(safe_schema_endpoints, test_requests)
+        coverage_metadata["bounded"] = bool(
+            request_selection.get("bounded") or coverage_metadata.get("bounded")
+        )
+        request_selection.update(coverage_metadata)
     state["api_request_selection"] = request_selection
     total_requests = len(test_requests)
     state["tool_summary"] = None
@@ -1465,14 +1594,7 @@ async def run(state: AgentState) -> AgentState:
         state,
         "api_runner",
         "running",
-        (
-            f"Executing {total_requests} API request(s)"
-            if not request_selection.get("omitted")
-            else (
-                f"Executing {total_requests} selected API request(s); "
-                f"{request_selection.get('omitted')} omitted by execution budget"
-            )
-        ),
+        _api_execution_progress_detail(total_requests, request_selection),
     )
 
     # Execute all test requests
@@ -1920,6 +2042,16 @@ async def run(state: AgentState) -> AgentState:
         f"Executed {executed_count} API request(s): "
         f"{passed_count} passed, {failed_count} failed, {skipped_count} skipped"
     )
+    request_selection = state.get("api_request_selection") or {}
+    if request_selection.get("source") == ALL_SAFE_GET_COVERAGE_SOURCE:
+        detail += (
+            " (schema-driven all-safe-GET coverage "
+            f"{request_selection.get('selected_safe_endpoint_total', total_requests)}/"
+            f"{request_selection.get('safe_endpoint_total', total_requests)} safe endpoint(s)"
+        )
+        if request_selection.get("omitted_safe_endpoint_total"):
+            detail += f", {request_selection.get('omitted_safe_endpoint_total')} omitted by budget"
+        detail += ")"
     state.setdefault("workflow_steps", []).append(
         {"node": "api_runner", "status": status, "detail": detail}
     )
