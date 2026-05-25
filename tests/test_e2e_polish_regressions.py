@@ -297,6 +297,21 @@ def test_authenticated_business_cases_include_deep_business_flows_from_snapshot(
     assert any("click e4" in command for command in commands_by_operation["safe_form_validation_flow"])
 
 
+def test_conditional_ui_helper_clicks_are_bounded_and_skippable() -> None:
+    close_command = ui_test_planner._conditional_click_labels_command(("取消", "返回"))
+    submit_command = ui_test_planner._conditional_required_submit_command()
+    drilldown_command = ui_test_planner._conditional_open_first_record_command()
+
+    for command in (close_command, submit_command, drilldown_command):
+        assert "click({ timeout: 1200 })" in command
+        assert "isVisible({ timeout: 500 })" in command
+        assert ".click(); return" not in command
+
+    assert "no safe matching action" in close_command
+    assert "skip submit" in submit_command
+    assert "skip record open" in drilldown_command
+
+
 def test_authenticated_case_batches_open_target_when_auth_context_is_missing() -> None:
     batches = _build_ui_case_batches(
         [
