@@ -17,6 +17,7 @@ from app.agent.nodes import (
 )
 from app.agent.nodes.ui_runner import _build_ui_case_batches
 from app.agent.progress import build_execution_log_payload, determine_final_status
+from app.agent.strategy import normalize_agent_strategy_decision
 from app.agent.tool_registry import build_tool_registry, select_skills_for_state
 from app.core.llm_gateway import LLMGateway
 from app.core.redaction import REDACTED_VALUE
@@ -1995,6 +1996,57 @@ async def test_model_strategy_guardrail_drops_write_and_out_of_schema_endpoints(
     assert any(item["kind"] == "out_of_schema_endpoint" for item in diagnostics)
     assert any(item["kind"] == "unknown_tool_name" for item in diagnostics)
     assert all(call["method"] == "GET" for call in calls)
+
+
+@pytest.mark.parametrize("execution_policy", ["safe_read_only", "safe_with_auth"])
+def test_strategy_normalizer_blocks_write_and_out_of_schema_under_safe_policies(
+    execution_policy: str,
+) -> None:
+    decision = normalize_agent_strategy_decision(
+        {
+            "intent": "api_focused_endpoints",
+            "coverage_scope": "focused_documented_endpoints",
+            "method_policy": {
+                "allowed_methods": ["GET", "POST", "DELETE"],
+                "write_allowed": True,
+            },
+            "endpoint_selection": {
+                "source": "model_focus",
+                "include": [
+                    {"method": "POST", "path": "/items"},
+                    {"method": "DELETE", "path": "/items/1"},
+                    {"method": "GET", "path": "/ghost"},
+                    {"method": "GET", "path": "/health"},
+                ],
+                "budget_behavior": "focused_only",
+            },
+            "tool_plan": [
+                {"tool_name": "api.http_request", "inputs": {}},
+                {"tool_name": "api.missing_tool", "inputs": {}},
+            ],
+            "confidence": "high",
+            "reason": "Validate safe policy enforcement.",
+        },
+        parsed_api_schema=[
+            {"method": "GET", "path": "/health", "response_status": "200"},
+            {"method": "POST", "path": "/items", "response_status": "200"},
+            {"method": "DELETE", "path": "/items/{id}", "response_status": "204"},
+        ],
+        execution_policy=execution_policy,
+        test_type="api",
+        source="llm",
+    )
+
+    assert decision["method_policy"]["write_allowed"] is False
+    assert decision["method_policy"]["allowed_methods"] == ["GET"]
+    assert decision["endpoint_selection"]["include"] == [{"method": "GET", "path": "/health"}]
+    assert [step["tool_name"] for step in decision["tool_plan"]] == ["api.http_request"]
+    diagnostics = decision["diagnostics"]
+    assert any(item["kind"] == "write_policy_overridden" for item in diagnostics)
+    assert any(item["kind"] == "method_blocked_by_policy" and item["method"] == "POST" for item in diagnostics)
+    assert any(item["kind"] == "method_blocked_by_policy" and item["method"] == "DELETE" for item in diagnostics)
+    assert any(item["kind"] == "out_of_schema_endpoint" and item["path"] == "/ghost" for item in diagnostics)
+    assert any(item["kind"] == "unknown_tool_name" for item in diagnostics)
 
 
 @pytest.mark.asyncio
