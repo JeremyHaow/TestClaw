@@ -189,9 +189,10 @@ def test_persist_terminal_worker_failure_marks_running_task_failed() -> None:
             await session.refresh(task)
             task_id = task.id
 
+        detail = worker_tasks._worker_timeout_detail(SoftTimeLimitExceeded())
         result = await worker_tasks.persist_terminal_worker_failure(
             task_id,
-            "Agent run exceeded the Celery soft time limit after 540s",
+            detail,
             error_type="worker_soft_time_limit",
         )
 
