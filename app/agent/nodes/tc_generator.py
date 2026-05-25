@@ -286,6 +286,7 @@ def _build_fallback_ui_cases(
 async def run(state: AgentState) -> AgentState:
     api_plan = state.get("api_plan")
     ui_plan = state.get("ui_plan")
+    objective = state.get("objective", "")
     parsed_api_schema = state.get("parsed_api_schema")
     input_type = state.get("input_type", "unknown")
     test_type = (state.get("test_type") or "auto").lower()
@@ -405,6 +406,7 @@ async def run(state: AgentState) -> AgentState:
             parsed_api_schema,
             execution_policy=execution_policy,
             allow_out_of_schema=allow_out_of_schema,
+            objective=objective,
         )
         if diagnostics:
             state.setdefault("agent_case_diagnostics", []).extend(diagnostics)
@@ -432,11 +434,13 @@ async def run(state: AgentState) -> AgentState:
                 parsed_api_schema,
                 execution_policy=execution_policy,
                 allow_out_of_schema=allow_out_of_schema,
+                objective=objective,
             )
             if fallback_diagnostics:
                 state.setdefault("agent_case_diagnostics", []).extend(fallback_diagnostics)
 
     state["api_cases"] = api_cases
+    state["api_cases_generated"] = generated_api_cases
     state["ui_cases"] = ui_cases
     state["test_cases"] = api_cases + ui_cases
 

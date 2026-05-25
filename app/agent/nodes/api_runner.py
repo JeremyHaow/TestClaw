@@ -8,6 +8,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 from openapi_schema_validator import validate
 
+from app.agent.api_scope import sanitize_api_case_assertions, validate_generated_api_cases
 from app.agent.progress import persist_progress
 from app.agent.state import AgentState
 from app.agent.tool_registry import install_tool_context, record_tool_call, summarize_tool_calls
@@ -647,7 +648,7 @@ def _evaluate_json_path_assertion(assertion: dict, payload) -> dict:
     else:
         passed = actual == expected
 
-    return {
+    result = {
         "type": "json_path",
         "path": path_expr,
         "operator": operator,
@@ -656,6 +657,49 @@ def _evaluate_json_path_assertion(assertion: dict, payload) -> dict:
         "passed": passed,
         "blocking": assertion.get("blocking", True),
     }
+    if assertion.get("advisory"):
+        result["advisory"] = True
+    if assertion.get("source"):
+        result["source"] = assertion.get("source")
+    return result
+
+
+def _json_value_type(value) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    return type(value).__name__
+
+
+def _evaluate_json_type_assertion(assertion: dict, payload) -> dict:
+    path_expr = assertion.get("path") or "$"
+    actual = _json_path_get(payload, path_expr) if isinstance(payload, (dict, list)) else payload
+    expected = str(assertion.get("expected") or "").strip().lower()
+    actual_type = _json_value_type(actual)
+    passed = actual_type == expected or (expected == "number" and actual_type == "integer")
+    result = {
+        "type": "json_type",
+        "path": path_expr,
+        "expected": expected,
+        "actual": actual_type,
+        "passed": passed,
+        "blocking": assertion.get("blocking", True),
+        "source": assertion.get("source"),
+    }
+    if assertion.get("advisory"):
+        result["advisory"] = True
+    return result
 
 
 def _evaluate_schema_assertion(assertion: dict, payload, fallback_schema: dict | None = None) -> dict:
@@ -724,6 +768,8 @@ def _evaluate_assertions(req: dict, resp_status: int, payload) -> list[dict]:
             results.append(_evaluate_status_assertion(assertion, resp_status, payload))
         elif atype in {"json_path", "jsonpath"}:
             results.append(_evaluate_json_path_assertion(assertion, payload))
+        elif atype in {"json_type", "type"}:
+            results.append(_evaluate_json_type_assertion(assertion, payload))
         elif atype in {"schema", "schema_valid", "json_schema"}:
             results.append(_evaluate_schema_assertion(assertion, payload, response_schema))
         elif atype in {"body_contains", "contains"}:
@@ -1311,6 +1357,26 @@ async def run(state: AgentState) -> AgentState:
 
     results = []
 
+    if api_cases:
+        if state.get("api_cases_generated"):
+            api_cases, diagnostics = validate_generated_api_cases(
+                api_cases,
+                api_schema,
+                execution_policy=execution_policy,
+                allow_out_of_schema=bool(state.get("allow_out_of_schema_api_cases")),
+                objective=state.get("objective"),
+            )
+        else:
+            api_cases, diagnostics = sanitize_api_case_assertions(
+                api_cases,
+                api_schema,
+                objective=state.get("objective"),
+                downgrade_ungrounded_jsonpath=False,
+            )
+        if diagnostics:
+            state.setdefault("agent_case_diagnostics", []).extend(diagnostics)
+        state["api_cases"] = api_cases
+
     request_candidates = []
     selection_source = "fallback_url"
     fallback_reason = None
@@ -1683,6 +1749,7 @@ async def run(state: AgentState) -> AgentState:
                     assertion_tool = {
                         "status_code": "api.status_assert",
                         "json_path": "api.json_path_assert",
+                        "json_type": "api.schema_assert",
                         "schema": "api.schema_assert",
                     }.get(assertion_result.get("type"), "api.json_path_assert")
                     assertion_status = "success" if assertion_result.get("passed") in {True, None} else "failed"

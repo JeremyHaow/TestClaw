@@ -15,11 +15,12 @@ from app.agent.nodes import (
     tc_generator,
 )
 from app.agent.nodes.ui_runner import _build_ui_case_batches
-from app.agent.progress import build_execution_log_payload
+from app.agent.progress import build_execution_log_payload, determine_final_status
 from app.agent.tool_registry import build_tool_registry, select_skills_for_state
 from app.core.llm_gateway import LLMGateway
 from app.core.redaction import REDACTED_VALUE
 from app.models.llm_provider import LLMProvider, ProviderType
+from app.models.task import TaskStatus
 from app.services.api_auth import AuthResolution
 from app.services import vector_store
 from app.services.embedding_service import EmbeddingService, EmbeddingUnavailableError
@@ -648,6 +649,180 @@ async def test_generated_api_cases_are_bounded_to_openapi_scope_before_execution
     assert reported["final_report"]["overall_verdict"] == "PASS"
     assert reported["final_report"]["bugs_found"] == []
     assert reported["final_report"]["agent_diagnostics"]["case_diagnostics"]
+
+
+@pytest.mark.asyncio
+async def test_generated_root_meta_json_path_assertion_is_advisory_without_schema(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        text = '{"ok": true}'
+        content = text.encode()
+
+        def json(self) -> dict:
+            return {"ok": True}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            assert "/missing" not in url
+            return FakeResponse()
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    executed = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "objective": "Verify agent worker session planning stability without inventing product fields.",
+            "api_cases_generated": True,
+            "api_execution_policy": "safe_read_only",
+            "parsed_api_schema": [
+                {"method": "GET", "path": "/health", "response_status": "200"},
+            ],
+            "api_cases": [
+                {
+                    "title": "health response shape",
+                    "request_template": {"method": "GET", "path": "/health"},
+                    "assertions": [
+                        {"type": "status_code", "expected": 200},
+                        {
+                            "type": "json_path",
+                            "path": "$",
+                            "operator": "equals",
+                            "expected": "is_object",
+                        },
+                    ],
+                },
+                {
+                    "title": "invented stability endpoint",
+                    "request_template": {"method": "GET", "path": "/missing"},
+                    "assertions": [{"type": "status_code", "expected": 200}],
+                },
+            ],
+            "workflow_steps": [],
+        }
+    )
+    reported = await reporter.run(executed)
+
+    api_result = reported["api_execution_result"]
+    assertion_results = api_result["results"][0]["assertion_results"]
+
+    assert [call["url"] for call in calls] == ["https://api.example.test/health"]
+    assert api_result["passed"] == 1
+    assert api_result["failed"] == 0
+    assert any(
+        item["type"] == "json_path"
+        and item["path"] == "$"
+        and item["blocking"] is False
+        and item["advisory"] is True
+        and item["passed"] is False
+        for item in assertion_results
+    )
+    assert any(
+        item["kind"] == "unsupported_api_assertion" and item["action"] == "downgraded"
+        for item in reported["agent_case_diagnostics"]
+    )
+    assert any(
+        item["kind"] == "out_of_scope_api_case" and item["action"] == "dropped"
+        for item in reported["agent_case_diagnostics"]
+    )
+    assert reported["final_report"]["overall_verdict"] == "PASS"
+    assert reported["final_report"]["bugs_found"] == []
+    assert determine_final_status(reported) == TaskStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_generated_grounded_json_path_assertion_still_blocks_when_false(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        text = '{"user": {"name": "Grace"}}'
+        content = text.encode()
+
+        def json(self) -> dict:
+            return {"user": {"name": "Grace"}}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    executed = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "objective": "Verify profile user name is Ada.",
+            "api_cases_generated": True,
+            "parsed_api_schema": [
+                {
+                    "method": "GET",
+                    "path": "/profile",
+                    "response_status": "200",
+                    "response_schema": {
+                        "type": "object",
+                        "properties": {
+                            "user": {
+                                "type": "object",
+                                "properties": {"name": {"type": "string"}},
+                            }
+                        },
+                    },
+                },
+            ],
+            "api_cases": [
+                {
+                    "title": "profile contract",
+                    "request_template": {"method": "GET", "path": "/profile"},
+                    "assertions": [
+                        {"type": "status_code", "expected": 200},
+                        {"type": "json_path", "path": "$.user.name", "expected": "Ada"},
+                    ],
+                }
+            ],
+            "workflow_steps": [],
+        }
+    )
+    reported = await reporter.run(executed)
+
+    api_result = reported["api_execution_result"]
+    assertion_results = api_result["results"][0]["assertion_results"]
+
+    assert api_result["passed"] == 0
+    assert api_result["failed"] == 1
+    assert any(
+        item["type"] == "json_path"
+        and item["path"] == "$.user.name"
+        and item["blocking"] is True
+        and item["passed"] is False
+        for item in assertion_results
+    )
+    assert reported["final_report"]["overall_verdict"] == "FAIL"
+    assert reported["final_report"]["bugs_found"]
+    assert determine_final_status(reported) == TaskStatus.FAILED
 
 
 @pytest.mark.asyncio

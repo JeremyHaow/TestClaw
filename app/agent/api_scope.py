@@ -7,6 +7,52 @@ from urllib.parse import urlsplit
 
 SAFE_API_METHODS = {"GET", "HEAD", "OPTIONS"}
 WRITE_API_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_JSON_PATH_TOKEN_RE = re.compile(r"([A-Za-z0-9_\-]+)|\[(\d+)\]")
+_JSON_TYPE_ALIASES = {
+    "is_object": "object",
+    "object": "object",
+    "json_object": "object",
+    "is_array": "array",
+    "array": "array",
+    "list": "array",
+    "is_string": "string",
+    "string": "string",
+    "str": "string",
+    "text": "string",
+    "is_number": "number",
+    "number": "number",
+    "numeric": "number",
+    "is_integer": "integer",
+    "integer": "integer",
+    "int": "integer",
+    "is_boolean": "boolean",
+    "boolean": "boolean",
+    "bool": "boolean",
+    "is_null": "null",
+    "null": "null",
+    "none": "null",
+}
+_TYPE_ASSERTION_OPERATORS = {"", "equals", "==", "is", "type", "json_type"}
+_MISSION_CONTROL_ASSERTION_TERMS = {
+    "agent",
+    "worker",
+    "session",
+    "planning",
+    "planner",
+    "mission",
+    "orchestration",
+    "react",
+    "delegation",
+    "subgoal",
+    "tool_call",
+    "tool calls",
+    "db_session",
+    "database session",
+    "event loop",
+    "asyncpg",
+    "celery",
+    "langgraph",
+}
 
 
 def _normalize_method(value: Any) -> str:
@@ -86,17 +132,17 @@ def _response_schema_property(schema: dict[str, Any], name: str) -> dict[str, An
     return None
 
 
-def _json_path_grounded_in_schema(path_expr: str, schema: dict[str, Any] | None) -> bool:
+def _schema_for_json_path(path_expr: str, schema: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(schema, dict):
-        return False
+        return None
     path = str(path_expr or "").strip()
     if path in {"", "$"}:
-        return True
+        return schema
     if path.startswith("$"):
         path = path[1:]
     path = path.lstrip(".")
     if not path:
-        return True
+        return schema
 
     current = schema
     for raw_part in path.split("."):
@@ -107,9 +153,158 @@ def _json_path_grounded_in_schema(path_expr: str, schema: dict[str, Any] | None)
             current = current["items"]
         child = _response_schema_property(current, part)
         if child is None:
-            return False
+            return None
         current = child
-    return True
+    return current
+
+
+def _json_path_grounded_in_schema(path_expr: str, schema: dict[str, Any] | None) -> bool:
+    return _schema_for_json_path(path_expr, schema) is not None
+
+
+def _json_path_is_root(path_expr: str) -> bool:
+    path = str(path_expr or "").strip()
+    return path in {"", "$"}
+
+
+def _json_path_get(payload: Any, path_expr: str, missing: object) -> Any:
+    path = str(path_expr or "").strip()
+    if path.startswith("$"):
+        path = path[1:]
+    path = path.lstrip(".")
+    if not path:
+        return payload
+
+    current = payload
+    for raw_part in path.split("."):
+        if not raw_part:
+            continue
+        matches = list(_JSON_PATH_TOKEN_RE.finditer(raw_part))
+        if not matches:
+            return missing
+        for match in matches:
+            key, index = match.groups()
+            if key is not None:
+                if not isinstance(current, dict) or key not in current:
+                    return missing
+                current = current[key]
+            else:
+                if not isinstance(current, list):
+                    return missing
+                idx = int(index)
+                if idx >= len(current):
+                    return missing
+                current = current[idx]
+    return current
+
+
+def _json_path_grounded_in_example(path_expr: str, example: Any) -> bool:
+    if example is None or _json_path_is_root(path_expr):
+        return False
+    missing = object()
+    return _json_path_get(example, path_expr, missing) is not missing
+
+
+def _json_path_field_names(path_expr: str) -> list[str]:
+    path = str(path_expr or "").strip()
+    if path.startswith("$"):
+        path = path[1:]
+    path = path.lstrip(".")
+    if not path:
+        return []
+
+    fields: list[str] = []
+    for raw_part in path.split("."):
+        for match in _JSON_PATH_TOKEN_RE.finditer(raw_part):
+            key, index = match.groups()
+            if key is not None:
+                fields.append(key)
+            elif index is None:
+                continue
+    return fields
+
+
+def _normalized_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").lower()).strip()
+
+
+def _expected_json_type(expected: Any) -> str | None:
+    if not isinstance(expected, str):
+        return None
+    token = expected.strip().lower().replace("-", "_").replace(" ", "_")
+    return _JSON_TYPE_ALIASES.get(token)
+
+
+def _schema_json_type(schema: dict[str, Any] | None) -> str | None:
+    if not isinstance(schema, dict):
+        return None
+    raw_type = schema.get("type")
+    if isinstance(raw_type, list):
+        for item in raw_type:
+            normalized = _expected_json_type(str(item))
+            if normalized:
+                return normalized
+    if isinstance(raw_type, str):
+        normalized = _expected_json_type(raw_type)
+        if normalized:
+            return normalized
+    if isinstance(schema.get("properties"), dict) or isinstance(schema.get("required"), list):
+        return "object"
+    if isinstance(schema.get("items"), dict):
+        return "array"
+    return None
+
+
+def _type_matches_schema(expected_type: str, schema_type: str | None) -> bool:
+    if schema_type is None:
+        return True
+    if expected_type == schema_type:
+        return True
+    return expected_type == "number" and schema_type == "integer"
+
+
+def _looks_like_mission_control_assertion(
+    path_expr: str,
+    expected: Any,
+    objective: str | None,
+) -> bool:
+    text = _normalized_text(f"{path_expr} {expected} {objective or ''}")
+    return any(term in text for term in _MISSION_CONTROL_ASSERTION_TERMS)
+
+
+def _json_path_grounded_in_objective(
+    path_expr: str,
+    assertion: dict[str, Any],
+    objective: str | None,
+) -> bool:
+    if not objective or _json_path_is_root(path_expr):
+        return False
+    if _looks_like_mission_control_assertion(
+        path_expr,
+        assertion.get("expected"),
+        objective,
+    ):
+        return False
+
+    fields = _json_path_field_names(path_expr)
+    if not fields:
+        return False
+
+    objective_text = _normalized_text(objective)
+    field = fields[-1].lower()
+    field_tokens = [field, *[token for token in re.split(r"[_\-.]+", field) if len(token) >= 2]]
+    if not any(token and token in objective_text for token in field_tokens):
+        return False
+
+    operator = str(assertion.get("operator") or assertion.get("op") or "").strip().lower()
+    expected = assertion.get("expected")
+    if operator in {"exists", "present", "not_null", "non_null"} or expected in {None, "not_null"}:
+        return True
+    if _expected_json_type(expected):
+        return False
+    if isinstance(expected, (str, int, float, bool)):
+        return str(expected).strip().lower() in objective_text
+    return False
 
 
 def _status_expected_values(expected: Any) -> set[int]:
@@ -158,9 +353,79 @@ def _diagnostic(
     return diag
 
 
+def _assertion_response_example(
+    case: dict[str, Any],
+    tmpl: dict[str, Any],
+    endpoint: dict[str, Any] | None,
+) -> Any:
+    for source in (case, tmpl, endpoint or {}):
+        if not isinstance(source, dict):
+            continue
+        for key in ("example_response", "response_example"):
+            if key in source:
+                return source.get(key)
+    return None
+
+
+def _downgrade_assertion(
+    assertion: dict[str, Any],
+    *,
+    reason: str,
+    case: dict[str, Any],
+    diagnostics: list[dict[str, Any]],
+) -> dict[str, Any]:
+    assertion["blocking"] = False
+    assertion["advisory"] = True
+    assertion["source"] = "agent_scope_guard"
+    diagnostics.append(
+        _diagnostic(
+            kind="unsupported_api_assertion",
+            action="downgraded",
+            case=case,
+            reason=reason,
+            assertion=assertion,
+        )
+    )
+    return assertion
+
+
+def _rewrite_json_type_assertion(
+    assertion: dict[str, Any],
+    *,
+    path_expr: str,
+    expected_type: str,
+    case: dict[str, Any],
+    diagnostics: list[dict[str, Any]],
+) -> dict[str, Any]:
+    rewritten = {
+        "type": "json_type",
+        "path": path_expr,
+        "expected": expected_type,
+        "blocking": assertion.get("blocking", True),
+        "source": "agent_scope_guard",
+    }
+    diagnostics.append(
+        _diagnostic(
+            kind="unsupported_api_assertion",
+            action="rewritten",
+            case=case,
+            reason=(
+                "Generated JSON-path equality used a JSON type meta token; it was "
+                "rewritten to an executable response type assertion grounded in the "
+                "OpenAPI response schema."
+            ),
+            assertion=assertion,
+        )
+    )
+    return rewritten
+
+
 def _sanitize_assertions(
     case: dict[str, Any],
     endpoint: dict[str, Any] | None,
+    *,
+    objective: str | None = None,
+    downgrade_ungrounded_jsonpath: bool = True,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     sanitized = deepcopy(case)
     diagnostics: list[dict[str, Any]] = []
@@ -170,6 +435,7 @@ def _sanitize_assertions(
         or tmpl.get("response_schema")
         or (endpoint or {}).get("response_schema")
     )
+    response_example = _assertion_response_example(sanitized, tmpl, endpoint)
     documented_status = _documented_success_status(endpoint)
     category = str(sanitized.get("category") or "SMOKE").upper()
 
@@ -185,6 +451,9 @@ def _sanitize_assertions(
         if not isinstance(raw_assertion, dict):
             continue
         assertion = deepcopy(raw_assertion)
+        if assertion.get("source") == "agent_scope_guard" and assertion.get("advisory"):
+            next_assertions.append(assertion)
+            continue
         atype = str(assertion.get("type") or "").lower()
         if atype in {"status_code", "status"}:
             expected = assertion.get("expected", documented_status)
@@ -213,27 +482,91 @@ def _sanitize_assertions(
 
         if atype in {"json_path", "jsonpath"}:
             path_expr = assertion.get("path") or assertion.get("json_path") or "$"
-            if _json_path_grounded_in_schema(str(path_expr), response_schema):
+            operator = str(assertion.get("operator") or assertion.get("op") or "").strip().lower()
+            expected_type = _expected_json_type(assertion.get("expected"))
+            if expected_type and operator in _TYPE_ASSERTION_OPERATORS:
+                path_schema = _schema_for_json_path(str(path_expr), response_schema)
+                schema_type = _schema_json_type(path_schema)
+                if path_schema and _type_matches_schema(expected_type, schema_type):
+                    next_assertions.append(
+                        _rewrite_json_type_assertion(
+                            assertion,
+                            path_expr=str(path_expr),
+                            expected_type=expected_type,
+                            case=sanitized,
+                            diagnostics=diagnostics,
+                        )
+                    )
+                    continue
+                assertion["type"] = "json_path"
+                next_assertions.append(
+                    _downgrade_assertion(
+                        assertion,
+                        reason=(
+                            "Generated JSON-path assertion compared a response value to a "
+                            "JSON type meta token without matching OpenAPI response schema "
+                            "grounding; it was kept as advisory evidence only."
+                        ),
+                        case=sanitized,
+                        diagnostics=diagnostics,
+                    )
+                )
+                continue
+
+            grounded = (
+                _json_path_grounded_in_schema(str(path_expr), response_schema)
+                or _json_path_grounded_in_example(str(path_expr), response_example)
+                or _json_path_grounded_in_objective(str(path_expr), assertion, objective)
+            )
+            if grounded:
+                assertion["type"] = "json_path"
+                next_assertions.append(assertion)
+                continue
+            if not downgrade_ungrounded_jsonpath:
                 assertion["type"] = "json_path"
                 next_assertions.append(assertion)
                 continue
             assertion["type"] = "json_path"
-            assertion["blocking"] = False
-            assertion["advisory"] = True
-            assertion["source"] = "agent_scope_guard"
-            diagnostics.append(
-                _diagnostic(
-                    kind="unsupported_api_assertion",
-                    action="downgraded",
-                    case=sanitized,
+            next_assertions.append(
+                _downgrade_assertion(
+                    assertion,
                     reason=(
                         "Generated JSON-path assertion was not grounded in the OpenAPI "
-                        "response schema; it was kept as advisory evidence only."
+                        "response schema, a documented response example, or a directly "
+                        "named user objective field/value; it was kept as advisory "
+                        "evidence only."
                     ),
-                    assertion=assertion,
+                    case=sanitized,
+                    diagnostics=diagnostics,
                 )
             )
-            next_assertions.append(assertion)
+            continue
+
+        if atype in {"json_type", "type"}:
+            path_expr = assertion.get("path") or "$"
+            expected_type = _expected_json_type(assertion.get("expected"))
+            path_schema = _schema_for_json_path(str(path_expr), response_schema)
+            schema_type = _schema_json_type(path_schema)
+            if expected_type and path_schema and _type_matches_schema(expected_type, schema_type):
+                assertion["type"] = "json_type"
+                assertion["expected"] = expected_type
+                next_assertions.append(assertion)
+                continue
+            if not downgrade_ungrounded_jsonpath:
+                assertion["type"] = "json_type"
+                next_assertions.append(assertion)
+                continue
+            next_assertions.append(
+                _downgrade_assertion(
+                    assertion,
+                    reason=(
+                        "Generated JSON type assertion was not grounded in a matching "
+                        "OpenAPI response schema; it was kept as advisory evidence only."
+                    ),
+                    case=sanitized,
+                    diagnostics=diagnostics,
+                )
+            )
             continue
 
         if atype in {"schema", "schema_valid", "json_schema"} and response_schema:
@@ -288,6 +621,7 @@ def validate_generated_api_cases(
     *,
     execution_policy: str = "safe_read_only",
     allow_out_of_schema: bool = False,
+    objective: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     schema_endpoints = [
         endpoint for endpoint in (parsed_api_schema or []) if isinstance(endpoint, dict)
@@ -335,11 +669,49 @@ def validate_generated_api_cases(
             )
             continue
 
-        sanitized, assertion_diagnostics = _sanitize_assertions(case, endpoint)
+        sanitized, assertion_diagnostics = _sanitize_assertions(
+            case,
+            endpoint,
+            objective=objective,
+            downgrade_ungrounded_jsonpath=True,
+        )
         diagnostics.extend(assertion_diagnostics)
         valid_cases.append(sanitized)
 
     return valid_cases, diagnostics
+
+
+def sanitize_api_case_assertions(
+    api_cases: list[dict[str, Any]],
+    parsed_api_schema: list[dict[str, Any]] | None,
+    *,
+    objective: str | None = None,
+    downgrade_ungrounded_jsonpath: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Sanitize assertions without changing case method/path scope.
+
+    The API runner uses this as a runtime safety net for generated/meta assertions.
+    Full generated-case validation still belongs in validate_generated_api_cases,
+    which may drop out-of-schema or unsafe generated requests before execution.
+    """
+    schema_endpoints = [
+        endpoint for endpoint in (parsed_api_schema or []) if isinstance(endpoint, dict)
+    ]
+    diagnostics: list[dict[str, Any]] = []
+    sanitized_cases: list[dict[str, Any]] = []
+    for case in api_cases:
+        if not isinstance(case, dict):
+            continue
+        endpoint = _endpoint_match(case, schema_endpoints) if schema_endpoints else None
+        sanitized, assertion_diagnostics = _sanitize_assertions(
+            case,
+            endpoint,
+            objective=objective,
+            downgrade_ungrounded_jsonpath=downgrade_ungrounded_jsonpath,
+        )
+        diagnostics.extend(assertion_diagnostics)
+        sanitized_cases.append(sanitized)
+    return sanitized_cases, diagnostics
 
 
 def documented_api_scope_text(
