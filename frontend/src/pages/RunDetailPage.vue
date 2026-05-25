@@ -1115,8 +1115,8 @@ watch(
         </div>
       </div>
 
-      <div class="grid gap-0 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.75fr)]">
-        <div class="border-b border-gray-100 p-4 lg:border-b-0 lg:border-r">
+      <div class="grid gap-0 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.75fr)] lg:items-stretch">
+        <div class="min-h-0 border-b border-gray-100 p-4 lg:border-b-0 lg:border-r">
           <div
             class="grid gap-3"
             :class="hasApiSurface && hasUiSurface ? 'sm:grid-cols-2' : 'sm:grid-cols-1'"
@@ -1184,23 +1184,25 @@ watch(
           </div>
         </div>
 
-        <div class="bg-gray-950 p-4 text-gray-100">
-          <div class="mb-3 flex items-center justify-between">
-            <h3 class="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-gray-400">
-              <Terminal :size="14" /> 实时日志
-            </h3>
-            <span v-if="isActiveRun" class="flex items-center gap-1.5 text-[10px] font-bold text-amber-300">
-              <span class="h-1.5 w-1.5 rounded-full bg-amber-400"></span>
-              LIVE
-            </span>
-          </div>
-          <pre
-            v-if="liveRawLog || run.execution_log"
-            class="max-h-[420px] overflow-auto whitespace-pre-wrap rounded-lg border border-white/10 bg-black/30 p-4 text-[11px] leading-relaxed text-gray-100"
-          >{{ liveRawLog ? formatPreview(liveRawLog) : formatPreview(run.execution_log) }}</pre>
-          <div v-else class="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-white/10 bg-black/20 px-4 text-center text-xs text-gray-500">
-            <span v-if="isActiveRun">等待第一条执行日志...</span>
-            <span v-else>暂无实时日志</span>
+        <div class="min-h-0 overflow-hidden bg-gray-950 p-4 text-gray-100 lg:relative lg:p-0">
+          <div class="flex min-h-0 flex-col lg:absolute lg:inset-4">
+            <div class="mb-3 flex items-center justify-between">
+              <h3 class="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-gray-400">
+                <Terminal :size="14" /> 实时日志
+              </h3>
+              <span v-if="isActiveRun" class="flex items-center gap-1.5 text-[10px] font-bold text-amber-300">
+                <span class="h-1.5 w-1.5 rounded-full bg-amber-400"></span>
+                LIVE
+              </span>
+            </div>
+            <pre
+              v-if="liveRawLog || run.execution_log"
+              class="min-h-48 max-h-[420px] overflow-auto whitespace-pre-wrap rounded-lg border border-white/10 bg-black/30 p-4 text-[11px] leading-relaxed text-gray-100 lg:min-h-0 lg:max-h-none lg:flex-1 lg:basis-0"
+            >{{ liveRawLog ? formatPreview(liveRawLog) : formatPreview(run.execution_log) }}</pre>
+            <div v-else class="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-white/10 bg-black/20 px-4 text-center text-xs text-gray-500 lg:min-h-0 lg:flex-1 lg:basis-0">
+              <span v-if="isActiveRun">等待第一条执行日志...</span>
+              <span v-else>暂无实时日志</span>
+            </div>
           </div>
         </div>
       </div>
