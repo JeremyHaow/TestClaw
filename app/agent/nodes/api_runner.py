@@ -376,7 +376,29 @@ def _expected_status_values(expected_status) -> set[int]:
 def _is_auth_negative_probe(req: dict) -> bool:
     if str(req.get("category") or "").upper() != "AUTH":
         return False
-    return bool(_expected_status_values(req.get("expected_status", 200)) & {401, 403})
+    if _expected_status_values(req.get("expected_status", 200)) & {401, 403}:
+        return True
+    for assertion in req.get("assertions") or []:
+        if not isinstance(assertion, dict):
+            continue
+        if str(assertion.get("type") or "").strip().lower() != "status_code":
+            continue
+        if _expected_status_values(assertion.get("expected")) & {401, 403}:
+            return True
+    label = str(req.get("label") or "").lower()
+    return any(
+        marker in label
+        for marker in (
+            "missing token",
+            "without token",
+            "no token",
+            "unauthorized",
+            "缺少token",
+            "无token",
+            "未授权",
+            "鉴权失败",
+        )
+    )
 
 
 def _strip_auth_like_headers(headers: dict | None) -> dict:

@@ -1535,6 +1535,60 @@ async def test_api_runner_write_allowed_blocks_mutating_curated_case(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_api_runner_auth_negative_case_assertion_strips_default_auth_header(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"code": 500, "msg": "unauthenticated"}'
+        headers = {"content-type": "application/json"}
+        content = text.encode()
+
+        def json(self) -> dict:
+            return {"code": 500, "msg": "unauthenticated"}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "api_execution_policy": "safe_read_only",
+            "auth_headers": {"Authorization": "Bearer real-token"},
+            "api_cases": [
+                {
+                    "title": "缺少Token访问受限资源",
+                    "category": "AUTH",
+                    "request_template": {"method": "GET", "path": "/private"},
+                    "assertions": [{"type": "status_code", "expected": 401}],
+                }
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    assert calls[0].get("headers") in (None, {})
+    api_result = result["api_execution_result"]
+    assert api_result["failed"] == 0
+    assert api_result["advisory"] == 1
+    assert api_result["results"][0]["skip_type"] == "auth_advisory"
+
+
+@pytest.mark.asyncio
 async def test_api_runner_generates_mock_body_for_authenticated_write_schema(monkeypatch) -> None:
     calls = []
 
