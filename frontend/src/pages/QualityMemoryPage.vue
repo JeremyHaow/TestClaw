@@ -1,5 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type {
+  TrendChart,
+  TrendChartOption,
+} from '../lib/qualityTrendChart'
 import api from '../lib/api'
 import { useToast } from '../composables/useToast'
 import {
@@ -12,16 +16,40 @@ import {
   TrendingUp,
 } from 'lucide-vue-next'
 
+type TrendBucket = {
+  date: string
+  succeeded?: number
+  failed?: number
+  bug_found?: number
+  active?: number
+  total?: number
+}
+
+type TrendChartModule = typeof import('../lib/qualityTrendChart')
+
+const trendSegments = [
+  { key: 'succeeded', label: '通过', tooltipLabel: '通过', color: '#10b981' },
+  { key: 'failed', label: '失败', tooltipLabel: '失败', color: '#f59e0b' },
+  { key: 'bug_found', label: '缺陷', tooltipLabel: '缺陷', color: '#f43f5e' },
+  { key: 'active', label: '进行中', tooltipLabel: '进行中', color: '#60a5fa' },
+] as const
+
 const toast = useToast()
 const insights = ref<any | null>(null)
 const loading = ref(false)
 const hasLoaded = ref(false)
 const error = ref('')
+const trendChartEl = ref<HTMLDivElement | null>(null)
+let trendChart: TrendChart | null = null
+let trendResizeObserver: ResizeObserver | null = null
+let observedTrendEl: HTMLDivElement | null = null
+let trendChartModule: TrendChartModule | null = null
+let trendChartModulePromise: Promise<TrendChartModule> | null = null
+let isUnmounted = false
 
 const statusCounts = computed(() => insights.value?.status_counts || {})
 const trend = computed(() => insights.value?.quality_trend || {})
-const trendBuckets = computed(() => (trend.value?.buckets || []).slice(-14))
-const maxTrendTotal = computed(() => Math.max(...trendBuckets.value.map((item: any) => item.total || 0), 1))
+const trendBuckets = computed<TrendBucket[]>(() => (trend.value?.buckets || []).slice(-14))
 const affectedTargets = computed(() => (insights.value?.affected_targets || []).slice(0, 4))
 const affectedSurfaces = computed(() => (insights.value?.affected_surfaces || []).slice(0, 5))
 const recurringThemes = computed(() => (insights.value?.recurring_themes || []).slice(0, 4))
@@ -70,6 +98,196 @@ function formatNumber(value: any) {
   return Number.isInteger(numeric) ? String(numeric) : numeric.toFixed(1)
 }
 
+function countValue(value: unknown) {
+  const numeric = Number(value || 0)
+  return Number.isFinite(numeric) ? numeric : 0
+}
+
+function escapeHtml(value: unknown) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => {
+    const replacements: Record<string, string> = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    }
+    return replacements[char]
+  })
+}
+
+function formatBucketDateLabel(value: string) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value.slice(5) : value
+}
+
+async function loadTrendChartModule() {
+  if (trendChartModule) return trendChartModule
+  if (!trendChartModulePromise) {
+    trendChartModulePromise = import('../lib/qualityTrendChart').then((module) => {
+      trendChartModule = module
+      return module
+    })
+  }
+  return trendChartModulePromise
+}
+
+function buildTrendTooltip(bucket: TrendBucket) {
+  const rows = trendSegments.map((segment) => {
+    const value = countValue(bucket[segment.key])
+    return `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:18px;margin-top:4px;">
+        <span style="display:flex;align-items:center;gap:6px;color:#4b5563;">
+          <span style="width:8px;height:8px;border-radius:999px;background:${segment.color};display:inline-block;"></span>
+          ${segment.tooltipLabel}
+        </span>
+        <strong style="color:#111827;">${value}</strong>
+      </div>
+    `
+  }).join('')
+
+  return `
+    <div style="min-width:170px;">
+      <div style="font-weight:700;color:#111827;margin-bottom:6px;">${escapeHtml(bucket.date)}</div>
+      ${rows}
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:18px;margin-top:7px;padding-top:7px;border-top:1px solid #e5e7eb;">
+        <span style="color:#4b5563;">合计</span>
+        <strong style="color:#111827;">${countValue(bucket.total)}</strong>
+      </div>
+    </div>
+  `
+}
+
+function buildTrendChartOption(buckets: TrendBucket[]): TrendChartOption {
+  return {
+    color: trendSegments.map((segment) => segment.color),
+    tooltip: {
+      trigger: 'axis',
+      confine: true,
+      axisPointer: {
+        type: 'shadow',
+        shadowStyle: {
+          color: 'rgba(15, 23, 42, 0.06)',
+        },
+      },
+      borderColor: '#e5e7eb',
+      borderWidth: 1,
+      padding: 10,
+      textStyle: {
+        fontSize: 12,
+      },
+      formatter: (params: any) => {
+        const item = Array.isArray(params) ? params[0] : params
+        const bucket = buckets[item?.dataIndex ?? 0]
+        return buildTrendTooltip(bucket || { date: '' })
+      },
+    },
+    legend: {
+      top: 0,
+      right: 0,
+      itemWidth: 8,
+      itemHeight: 8,
+      icon: 'circle',
+      data: trendSegments.map((segment) => segment.label),
+      textStyle: {
+        color: '#6b7280',
+        fontSize: 11,
+        fontWeight: 600,
+      },
+    },
+    grid: {
+      top: 34,
+      right: 8,
+      bottom: 28,
+      left: 8,
+      containLabel: true,
+    },
+    xAxis: {
+      type: 'category',
+      data: buckets.map((bucket) => formatBucketDateLabel(bucket.date)),
+      axisTick: { show: false },
+      axisLine: {
+        lineStyle: {
+          color: '#e5e7eb',
+        },
+      },
+      axisLabel: {
+        color: '#9ca3af',
+        fontSize: 10,
+        hideOverlap: true,
+        margin: 10,
+      },
+    },
+    yAxis: {
+      type: 'value',
+      minInterval: 1,
+      axisTick: { show: false },
+      axisLine: { show: false },
+      splitLine: {
+        lineStyle: {
+          color: '#f3f4f6',
+        },
+      },
+      axisLabel: {
+        color: '#9ca3af',
+        fontSize: 10,
+      },
+    },
+    series: trendSegments.map((segment) => ({
+      name: segment.label,
+      type: 'bar',
+      stack: 'quality',
+      barMaxWidth: 30,
+      emphasis: {
+        focus: 'series',
+      },
+      data: buckets.map((bucket) => countValue(bucket[segment.key])),
+    })),
+  }
+}
+
+function resizeTrendChart() {
+  trendChart?.resize()
+}
+
+function syncTrendResizeObserver() {
+  const element = trendChartEl.value
+  if (!element || observedTrendEl === element || typeof ResizeObserver === 'undefined') return
+  trendResizeObserver?.disconnect()
+  trendResizeObserver = new ResizeObserver(() => resizeTrendChart())
+  trendResizeObserver.observe(element)
+  observedTrendEl = element
+}
+
+function disposeTrendChart() {
+  trendResizeObserver?.disconnect()
+  trendResizeObserver = null
+  observedTrendEl = null
+  trendChart?.dispose()
+  trendChart = null
+}
+
+async function renderTrendChart() {
+  const buckets = trendBuckets.value
+  if (!buckets.length) {
+    disposeTrendChart()
+    return
+  }
+
+  await nextTick()
+  const element = trendChartEl.value
+  if (!element) return
+
+  const chartModule = await loadTrendChartModule()
+  if (isUnmounted || !trendBuckets.value.length || trendChartEl.value !== element) return
+
+  if (!trendChart) {
+    trendChart = chartModule.initTrendChart(element)
+  }
+  syncTrendResizeObserver()
+  trendChart.setOption(buildTrendChartOption(trendBuckets.value), true)
+  resizeTrendChart()
+}
+
 function trendToneClass(direction: string | undefined) {
   if (direction === 'improving') return 'bg-emerald-50 text-emerald-700 border-emerald-100'
   if (direction === 'regressing') return 'bg-rose-50 text-rose-700 border-rose-100'
@@ -104,8 +322,20 @@ async function fetchInsights() {
 }
 
 onMounted(() => {
+  isUnmounted = false
+  window.addEventListener('resize', resizeTrendChart)
   fetchInsights()
 })
+
+onBeforeUnmount(() => {
+  isUnmounted = true
+  window.removeEventListener('resize', resizeTrendChart)
+  disposeTrendChart()
+})
+
+watch(trendBuckets, () => {
+  renderTrendChart()
+}, { deep: true, flush: 'post' })
 </script>
 
 <template>
@@ -162,36 +392,8 @@ onMounted(() => {
             </div>
           </div>
 
-          <div v-if="trendBuckets.length" class="h-36 flex items-end gap-2">
-            <div v-for="bucket in trendBuckets" :key="bucket.date" class="flex-1 h-full flex flex-col items-center justify-end gap-2 min-w-0">
-              <div class="text-[10px] text-gray-400 font-semibold">{{ bucket.total || 0 }}</div>
-              <div
-                class="w-full max-w-8 bg-gray-100 rounded-sm overflow-hidden flex flex-col justify-end"
-                :style="{ height: Math.max(((bucket.total || 0) / maxTrendTotal) * 100, bucket.total ? 10 : 4) + '%' }"
-              >
-                <div
-                  v-if="bucket.bug_found"
-                  class="w-full bg-rose-500"
-                  :style="{ height: Math.max((bucket.bug_found / Math.max(bucket.total, 1)) * 100, 12) + '%' }"
-                />
-                <div
-                  v-if="bucket.failed"
-                  class="w-full bg-amber-500"
-                  :style="{ height: Math.max((bucket.failed / Math.max(bucket.total, 1)) * 100, 12) + '%' }"
-                />
-                <div
-                  v-if="bucket.succeeded"
-                  class="w-full bg-emerald-500"
-                  :style="{ height: Math.max((bucket.succeeded / Math.max(bucket.total, 1)) * 100, 12) + '%' }"
-                />
-                <div
-                  v-if="bucket.active"
-                  class="w-full bg-blue-400"
-                  :style="{ height: Math.max((bucket.active / Math.max(bucket.total, 1)) * 100, 12) + '%' }"
-                />
-              </div>
-              <span class="text-[10px] text-gray-400 font-mono truncate">{{ bucket.date }}</span>
-            </div>
+          <div v-if="trendBuckets.length" class="min-h-56 h-64 sm:h-72 w-full">
+            <div ref="trendChartEl" class="h-full w-full"></div>
           </div>
           <div v-else class="h-36 flex items-center justify-center text-gray-400 text-sm">暂无趋势数据</div>
         </div>

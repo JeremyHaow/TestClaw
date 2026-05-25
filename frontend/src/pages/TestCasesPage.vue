@@ -343,18 +343,18 @@ onMounted(async () => {
     </div>
 
     <div class="rounded-lg border border-gray-200 bg-white p-3 shadow-sm">
-      <div class="flex flex-wrap items-center gap-3">
-        <div class="min-w-[220px] flex-1">
+      <div class="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+        <div class="w-full min-w-0 sm:min-w-[16rem] sm:flex-1">
           <SearchInput v-model="search" placeholder="搜索标题、分类或来源..." />
         </div>
-        <StyledSelect v-model="filterPriority" class="min-w-[136px]" size="sm">
+        <StyledSelect v-model="filterPriority" class="w-full sm:w-40 sm:flex-none" size="sm">
           <option value="">全部优先级</option>
           <option value="P0">P0</option>
           <option value="P1">P1</option>
           <option value="P2">P2</option>
           <option value="P3">P3</option>
         </StyledSelect>
-        <StyledSelect v-model="filterCategory" class="min-w-[148px]" size="sm">
+        <StyledSelect v-model="filterCategory" class="w-full sm:w-48 sm:flex-none" size="sm">
           <option value="">全部分类</option>
           <option value="FUNCTIONAL">FUNCTIONAL</option>
           <option value="UI">UI</option>
@@ -363,12 +363,12 @@ onMounted(async () => {
           <option value="SECURITY">SECURITY</option>
         </StyledSelect>
         <button v-if="selectedIds.size > 0" @click="runSelectedSuite" :disabled="suiteRunning"
-          class="flex items-center gap-2 rounded-lg bg-gray-950 px-4 py-2 text-xs font-bold text-white shadow-sm transition-all hover:bg-gray-800 disabled:opacity-50">
+          class="flex w-full items-center justify-center gap-2 rounded-lg bg-gray-950 px-4 py-2 text-xs font-bold text-white shadow-sm transition-all hover:bg-gray-800 disabled:opacity-50 sm:w-auto sm:flex-none">
           <Play :size="14" />
           {{ suiteRunning ? '提交中...' : `运行选中 (${selectedIds.size})` }}
         </button>
         <button v-if="selectedIds.size > 0" @click="confirmBulkDelete = true"
-          class="flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-red-700">
+          class="flex w-full items-center justify-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-red-700 sm:w-auto sm:flex-none">
           <Trash2 :size="14" />
           删除选中 ({{ selectedIds.size }})
         </button>
