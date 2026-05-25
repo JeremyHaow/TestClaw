@@ -471,6 +471,9 @@ def _merge_decisions(
                 ]))
         return decision
 
+    if guardrail.get("sufficient_evidence") is False:
+        return guardrail
+
     if model_decision and model_decision["next_action"] in {_REPLAN_API, _REPLAN_UI}:
         target_stage = "api" if model_decision["next_action"] == _REPLAN_API else "ui"
         if target_stage == stage and _can_replan(state, stage):

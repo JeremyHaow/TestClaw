@@ -199,6 +199,60 @@ async def test_execution_evaluator_continues_to_ui_after_api_evidence() -> None:
 
 
 @pytest.mark.asyncio
+async def test_execution_evaluator_does_not_continue_to_ui_after_api_replan_limit(monkeypatch) -> None:
+    class FakeMessage:
+        content = json.dumps(
+            {
+                "sufficient_evidence": True,
+                "confidence": "high",
+                "next_action": "continue_to_ui",
+                "reason": "Continue to UI.",
+                "diagnostics": [],
+                "missing_evidence": [],
+                "replan_instructions": "",
+            }
+        )
+
+    class FakePlanner:
+        async def ainvoke(self, _messages):
+            return FakeMessage()
+
+    async def fake_get_planner(_db):
+        return FakePlanner()
+
+    monkeypatch.setattr(execution_evaluator.settings, "AGENT_MAX_REPLAN_ATTEMPTS", 1)
+    monkeypatch.setattr(execution_evaluator.llm_gateway, "get_planner", fake_get_planner)
+
+    state = await execution_evaluator.run(
+        {
+            "db_session": object(),
+            "agent_execution_stage": "api",
+            "test_type": "full",
+            "input_type": "url",
+            "objective": "Full smoke",
+            "target_url": "https://app.example.test",
+            "ui_seed_url": "https://app.example.test",
+            "parsed_api_schema": [{"method": "GET", "path": "/health"}],
+            "api_execution_result": {
+                "total": 0,
+                "executed": 0,
+                "passed": 0,
+                "failed": 0,
+                "skipped": 0,
+                "complete": True,
+            },
+            "agent_replan_counts": {"api": 1},
+            "workflow_steps": [],
+        }
+    )
+
+    assert state["agent_next_node"] == "reporter"
+    assert state["evidence_evaluation"]["next_action"] == "report"
+    assert state["evidence_evaluation"]["sufficient_evidence"] is False
+    assert "Replan limit reached" in state["evidence_evaluation"]["reason"]
+
+
+@pytest.mark.asyncio
 async def test_execution_evaluator_replans_ui_after_single_shallow_failure(monkeypatch) -> None:
     monkeypatch.setattr(execution_evaluator.settings, "AGENT_MAX_REPLAN_ATTEMPTS", 2)
 

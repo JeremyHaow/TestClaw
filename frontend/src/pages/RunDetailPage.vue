@@ -702,7 +702,7 @@ const toolSummary = computed(() => run.value?.tool_summary || run.value?.final_r
 const agentEvaluations = computed(() => ensureList(run.value?.agent_evaluations || run.value?.final_report?.agent_diagnostics?.evaluations))
 const latestAgentEvaluation = computed(() => run.value?.evidence_evaluation || run.value?.final_report?.agent_diagnostics?.latest_evaluation || agentEvaluations.value.at(-1) || null)
 const agentReplanCounts = computed(() => run.value?.agent_replan_counts || run.value?.final_report?.agent_diagnostics?.replan_counts || {})
-const agentReplanTotal = computed(() => Object.values(agentReplanCounts.value).reduce((total: number, value: any) => total + Number(value || 0), 0))
+const agentReplanTotal = computed(() => Object.values(agentReplanCounts.value || {}).reduce((total: number, value: any) => total + Number(value || 0), 0))
 const ragRetrieval = computed(() => run.value?.rag_retrieval || null)
 const ragSources = computed(() => ensureList(ragRetrieval.value?.sources))
 const ragDisplayStatus = computed(() => ragRetrieval.value?.status || 'metadata_unavailable')
