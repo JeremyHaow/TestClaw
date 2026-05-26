@@ -83,7 +83,9 @@ const editingMessageId = ref<string | null>(null)
 const draft = ref('')
 const executeError = ref('')
 const chatEnd = ref<HTMLElement | null>(null)
+const draftInput = ref<HTMLTextAreaElement | null>(null)
 const processEvents = ref<PlannerProcessEvent[]>([])
+const editingRollbackSnapshot = ref<PlanningSession | null>(null)
 let streamAbortController: AbortController | null = null
 
 const messages = computed(() => activeSession.value?.messages || [])
@@ -123,7 +125,7 @@ function messageQuestionOptions(message: PlanMessage) {
   return Array.isArray(questionOptions)
     ? questionOptions
         .filter((group) => group?.question && Array.isArray(group.options) && group.options.length)
-        .slice(0, 6)
+        .slice(0, 2)
     : []
 }
 
@@ -162,6 +164,7 @@ function errorMessage(error: any, fallback: string) {
 function setActiveSession(session: PlanningSession) {
   upsertSession(session)
   activeSession.value = session
+  editingRollbackSnapshot.value = null
 }
 
 function upsertSession(session: PlanningSession) {
@@ -177,6 +180,11 @@ function upsertSession(session: PlanningSession) {
 function resetConversationUi() {
   processEvents.value = []
   editingMessageId.value = null
+  editingRollbackSnapshot.value = null
+}
+
+function clonePlanningSession(session: PlanningSession): PlanningSession {
+  return JSON.parse(JSON.stringify(session)) as PlanningSession
 }
 
 function mergeProcessEvent(event: PlannerProcessEvent) {
@@ -203,6 +211,26 @@ function clearStalePlanState() {
     current_plan: null,
     current_run_payload: null,
   }
+}
+
+function applyEditRollback(messageId: string, content?: string) {
+  if (!activeSession.value) return false
+  const sourceMessages = editingRollbackSnapshot.value?.messages || activeSession.value.messages || []
+  const index = sourceMessages.findIndex((message) => message.id === messageId)
+  if (index < 0) return false
+  const retained = sourceMessages.slice(0, index + 1).map((message) => ({ ...message }))
+  if (content !== undefined) {
+    retained[index] = { ...retained[index], content }
+  }
+  activeSession.value = {
+    ...activeSession.value,
+    status: 'collecting',
+    ready_to_execute: false,
+    current_plan: null,
+    current_run_payload: null,
+    messages: retained,
+  }
+  return true
 }
 
 function appendAssistantDelta(messageId: string, delta: string) {
@@ -258,6 +286,11 @@ function applyOptimisticEdit(messageId: string, content: string) {
 async function scrollChat() {
   await nextTick()
   chatEnd.value?.scrollIntoView({ block: 'end' })
+}
+
+async function focusDraftInput() {
+  await nextTick()
+  draftInput.value?.focus()
 }
 
 function parseSseBlock(block: string) {
@@ -454,11 +487,11 @@ async function sendMessage() {
   }
 }
 
-async function sendChoice(option: PlannerQuestionChoice) {
-  if (!option.message.trim() || sending.value) return
-  editingMessageId.value = null
-  draft.value = option.message
-  await sendMessage()
+async function applyChoiceToDraft(option: PlannerQuestionChoice) {
+  const message = option.message.trim()
+  if (!message || sending.value || !canModifyActiveSession.value) return
+  draft.value = draft.value.trim() ? `${draft.value.trim()}\n${message}` : message
+  await focusDraftInput()
 }
 
 async function resendEditedMessage(content: string) {
@@ -481,8 +514,9 @@ async function resendEditedMessage(content: string) {
     )
   } catch (error: any) {
     draft.value = content
-    await selectSession(sessionId).catch(() => undefined)
     editingMessageId.value = messageId
+    applyEditRollback(messageId, content)
+    await scrollChat()
     toast.error(errorMessage(error, '重新生成失败'))
   } finally {
     sending.value = false
@@ -490,13 +524,24 @@ async function resendEditedMessage(content: string) {
 }
 
 function startEditMessage(message: PlanMessage) {
-  if (message.role !== 'user' || sending.value || !canModifyActiveSession.value) return
+  if (!activeSession.value || message.role !== 'user' || sending.value || !canModifyActiveSession.value) return
+  editingRollbackSnapshot.value = clonePlanningSession(activeSession.value)
   editingMessageId.value = message.id
   draft.value = message.content
   executeError.value = ''
+  processEvents.value = []
+  applyEditRollback(message.id)
+  scrollChat()
+  focusDraftInput()
 }
 
 function cancelEdit() {
+  if (editingRollbackSnapshot.value && activeSession.value?.id === editingRollbackSnapshot.value.id) {
+    const restored = clonePlanningSession(editingRollbackSnapshot.value)
+    upsertSession(restored)
+    activeSession.value = restored
+  }
+  editingRollbackSnapshot.value = null
   editingMessageId.value = null
   draft.value = ''
 }
@@ -767,7 +812,7 @@ onBeforeUnmount(() => {
                       class="rounded-full border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:border-gray-400 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
                       :title="option.message"
                       :disabled="sending"
-                      @click="sendChoice(option)"
+                      @click="applyChoiceToDraft(option)"
                     >
                       {{ option.label }}
                     </button>
@@ -816,6 +861,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="flex gap-2">
           <textarea
+            ref="draftInput"
             v-model="draft"
             rows="2"
             class="min-h-[52px] flex-1 resize-none rounded-lg border border-gray-200 px-3 py-2 text-sm leading-5 outline-none transition focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
@@ -897,7 +943,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="space-y-1.5">
               <div v-for="item in safetyItems" :key="item" class="text-xs leading-5 text-gray-700">{{ item }}</div>
-              <div class="text-xs leading-5 text-gray-700">{{ currentPlan.auth }}</div>
+              <div class="text-xs leading-5 text-gray-700">{{ currentPlan.auth_summary || currentPlan.auth }}</div>
             </div>
           </div>
 

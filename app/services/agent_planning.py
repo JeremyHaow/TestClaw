@@ -30,6 +30,8 @@ ALLOWED_TEST_TYPES = {"api", "ui"}
 ALLOWED_AUTH_MODES = {"auto", "manual", "none_confirmed"}
 ALLOWED_CAPTCHA_MODES = {"none", "static", "dynamic"}
 ALLOWED_API_POLICIES = {"safe_read_only", "safe_with_auth", "write_allowed"}
+MAX_LLM_QUESTION_OPTION_GROUPS = 2
+MAX_FALLBACK_QUESTION_OPTION_GROUPS = 1
 
 _URL_RE = re.compile(r"https?://[^\s<>'\"`)\]},，;；。]+", re.I)
 _LABEL_SEPARATOR_RE = r"(?:\s*(?:[:=：]|是|为)\s*|\s+)"
@@ -66,6 +68,21 @@ _WRITE_ALLOWED_RE = re.compile(
     r"\btest environment\b.*\b(create|modify|delete|write)\b|"
     r"允许写入|允许.*(创建|修改|删除)|测试环境.*可以.*(创建|修改|删除)|可以.*(创建|修改|删除)"
 )
+_UNSUPPORTED_TARGET_OPTION_RE = re.compile(
+    r"(?i)\b(?:desktop(?:\s+(?:software|app|application|client))?|"
+    r"native(?:\s+(?:app|application|mobile\s+app))?|"
+    r"mobile(?:\s+(?:app|application|client))?|"
+    r"ios(?:\s+(?:app|application|client))?|"
+    r"android(?:\s+(?:app|application|client))?|"
+    r"iphone(?:\s+(?:app|application))?|ipad(?:\s+(?:app|application))?|"
+    r"windows\s+app|macos\s+app|electron\s+app)\b|"
+    r"桌面(?:软件|应用|客户端)|手机\s*(?:App|应用|客户端)|"
+    r"移动\s*(?:App|应用|客户端|端)|原生\s*(?:App|应用|客户端)|"
+    r"安卓(?:App|应用|客户端)?|苹果(?:App|应用|客户端)?|"
+    r"iOS\s*(?:App|应用|客户端)?|Android\s*(?:App|应用|客户端)?|"
+    r"桌面端|手机端|原生端|PC\s*客户端|本地客户端",
+)
+_CUSTOM_CHOICE_RE = re.compile(r"(?i)\b(?:custom|other|something else)\b|补充说明|自定义|其他")
 
 
 class PlannerAuthCredentials(BaseModel):
@@ -552,7 +569,7 @@ def _build_basic_plan(payload: PlannerRunPayload, raw_plan: dict[str, Any] | Non
             "除非已明确允许写入，否则 API 执行默认采用安全只读策略。",
             "运行创建和鉴权验证会复用现有 TestClaw 预检流程。",
         ],
-        "auth": _plan_auth_summary(payload),
+        "auth_summary": _plan_auth_summary(payload),
         "blockers": [],
     }
 
@@ -579,8 +596,39 @@ def _question_options(
     )
 
 
+def _is_unsupported_target_option(label: str, message: str) -> bool:
+    return bool(_UNSUPPORTED_TARGET_OPTION_RE.search(f"{label} {message}"))
+
+
+def _is_custom_choice(label: str, message: str) -> bool:
+    return bool(_CUSTOM_CHOICE_RE.search(label) or "补充关于" in message)
+
+
+def _custom_choice_for_question(question: str) -> PlannerQuestionChoice:
+    question_hint = question.strip("？?。.")[:60] or "这个问题"
+    return _choice(
+        label="补充说明",
+        message=f"我会补充关于“{question_hint}”的具体说明。",
+    )
+
+
+def _supported_target_choices() -> list[PlannerQuestionChoice]:
+    return [
+        _choice(
+            label="API / 接口",
+            message="我要测试 API、接口文档或 OpenAPI/Swagger 来源。",
+        ),
+        _choice(
+            label="Web UI / 网页",
+            message="我要测试浏览器里的 Web UI 页面。",
+        ),
+    ]
+
+
 def _dedupe_question_options(
     question_options: list[PlannerQuestionOptions],
+    *,
+    max_groups: int = MAX_LLM_QUESTION_OPTION_GROUPS,
 ) -> list[dict[str, Any]]:
     seen_questions: set[str] = set()
     seen_options: set[tuple[str, str, str]] = set()
@@ -590,25 +638,41 @@ def _dedupe_question_options(
         if not question or question in seen_questions:
             continue
         choices: list[PlannerQuestionChoice] = []
+        removed_unsupported_target = False
         for option in group.options:
             label = redact_sensitive_text(option.label).strip()
             message = redact_sensitive_text(option.message).strip()
             if not label or not message:
+                continue
+            if _is_unsupported_target_option(label, message):
+                removed_unsupported_target = True
                 continue
             option_key = (question, label, message)
             if option_key in seen_options:
                 continue
             seen_options.add(option_key)
             choices.append(PlannerQuestionChoice(label=label, message=message))
+        if removed_unsupported_target and not choices:
+            choices.extend(_supported_target_choices())
         if choices:
+            custom_choices = [
+                choice for choice in choices if _is_custom_choice(choice.label, choice.message)
+            ]
+            standard_choices = [
+                choice for choice in choices if not _is_custom_choice(choice.label, choice.message)
+            ]
+            if custom_choices:
+                choices = standard_choices[:4] + [custom_choices[0]]
+            else:
+                choices = standard_choices[:4] + [_custom_choice_for_question(question)]
             seen_questions.add(question)
             normalized.append(
-                PlannerQuestionOptions(question=question, options=choices[:5]).model_dump(
+                PlannerQuestionOptions(question=question, options=choices).model_dump(
                     mode="json",
                     exclude_none=True,
                 )
             )
-    return normalized[:8]
+    return normalized[:max_groups]
 
 
 def _question_options_from_llm(raw_groups: list[dict[str, Any]]) -> list[PlannerQuestionOptions]:
@@ -735,7 +799,10 @@ def _fallback_question_options(
             ),
         ]
     )
-    return _dedupe_question_options(question_options)
+    return _dedupe_question_options(
+        question_options,
+        max_groups=MAX_FALLBACK_QUESTION_OPTION_GROUPS,
+    )
 
 
 def _planner_question_options(
@@ -744,11 +811,21 @@ def _planner_question_options(
     questions: list[str],
 ) -> list[dict[str, Any]]:
     llm_question_options = _dedupe_question_options(
-        _question_options_from_llm(llm_output.question_options)
+        _question_options_from_llm(llm_output.question_options),
+        max_groups=MAX_LLM_QUESTION_OPTION_GROUPS,
     )
     if llm_question_options:
         return llm_question_options
     return _fallback_question_options(payload, questions)
+
+
+def _sanitize_question_options_payload(raw_groups: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_groups, list):
+        return []
+    return _dedupe_question_options(
+        _question_options_from_llm(raw_groups),
+        max_groups=MAX_LLM_QUESTION_OPTION_GROUPS,
+    )
 
 
 def _sanitize_llm_output(raw: dict[str, Any]) -> PlannerLLMOutput | None:
@@ -1130,6 +1207,9 @@ class AgentPlanningService:
             "objects with question and options. Each option has label and message. Option messages "
             "must be reusable testing choices such as target type, scope, auth/login boundary, "
             "safety boundary, or success criteria. Do not make product-specific option branches.\n"
+            "TestClaw currently supports only API testing and browser-based Web UI testing. "
+            "Never offer desktop software, native app, mobile app, iOS app, or Android app as "
+            "target type options.\n"
             "Allowed run_payload fields: source, test_type, objective, base_url, auth_mode, "
             "captcha_mode, auth_credentials, auth_config, token, headers, api_execution_policy, "
             "allow_out_of_schema_api_cases, setup_instructions.\n"
@@ -1174,8 +1254,20 @@ def _latest_question_options(messages: list[AgentPlanningMessage] | None) -> lis
             plan_data.get("question_options") if isinstance(plan_data, dict) else None
         )
         if isinstance(question_options, list):
-            return redact_sensitive_data(question_options)
+            return _sanitize_question_options_payload(question_options)
     return []
+
+
+def _redacted_message_plan(plan_json: str | None) -> dict[str, Any] | None:
+    plan_data = parse_json_object_text(plan_json)
+    if not plan_data:
+        return None
+    safe_plan = redact_sensitive_data(plan_data)
+    if isinstance(safe_plan, dict) and "question_options" in safe_plan:
+        safe_plan["question_options"] = _sanitize_question_options_payload(
+            safe_plan.get("question_options")
+        )
+    return safe_plan
 
 
 def redacted_plan_session_payload(
@@ -1209,7 +1301,7 @@ def redacted_plan_session_payload(
                 "id": message.id,
                 "role": message.role,
                 "content": redact_sensitive_text(message.content),
-                "plan": redact_sensitive_data(parse_json_object_text(message.plan_json)),
+                "plan": _redacted_message_plan(message.plan_json),
                 "created_at": message.created_at.isoformat() if message.created_at else None,
             }
             for message in messages

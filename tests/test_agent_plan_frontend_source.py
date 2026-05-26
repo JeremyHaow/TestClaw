@@ -63,4 +63,11 @@ def test_agent_plan_uses_streaming_and_live_message_controls() -> None:
     assert "PlannerQuestionOption" in source
     assert "messageQuestionOptions" in source
     assert "latestOptionMessageId" in source
-    assert "sendChoice(option)" in source
+    assert ".slice(0, 2)" in source
+    assert "applyChoiceToDraft(option)" in source
+    assert "sendChoice" not in source
+    assert "await sendMessage()" not in source
+    assert "draftInput" in source
+    assert "editingRollbackSnapshot" in source
+    assert "applyEditRollback" in source
+    assert "sourceMessages.slice(0, index + 1)" in source

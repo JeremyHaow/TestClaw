@@ -35,6 +35,7 @@ _HEADER_CONTAINER_KEYS = {
 _SAFE_SENSITIVE_METADATA_KEYS = {
     "allow_out_of_schema_api_cases",
     "api_execution_policy",
+    "auth_summary",
     "auth_mode",
     "auth_required",
     "auth_refreshed",

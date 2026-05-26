@@ -117,7 +117,12 @@
 - Executed planning sessions are immutable chat transcripts: adding, editing, deleting, or streaming a message after execution must return `400 Executed plan cannot be changed` so the session cannot lose `executed` status or stale run linkage.
 - Streaming message and edit endpoints must use the same persistence path as non-streaming message and edit endpoints. They may progressively chunk a completed assistant response until true model token streaming is available, but the final event must contain the normalized/redacted session payload.
 - Process events are visible operational summaries only (`analyzing_requirement`, `checking_missing_info`, `normalizing_target`, `preparing_plan`, `waiting_for_confirmation`). Do not expose hidden chain-of-thought.
-- Clarifying questions may include selectable `question_options`. Each entry is a generic elicitation object with `question` and `options[].label`/`options[].message`. Option messages must represent reusable testing choices such as target type, scope, auth/login boundary, safety boundary, or success criteria. Do not create product-specific option branches.
+- Clarifying questions may include selectable `question_options`. Each entry is a generic elicitation object with `question` and `options[].label`/`options[].message`. Option messages must represent reusable testing choices such as supported target type, scope, auth/login boundary, safety boundary, or success criteria. Do not create product-specific option branches.
+- Plan Mode options are draft-construction aids, not submit buttons. Selecting an option must fill or append to the input draft and focus the input; the user must explicitly send before a new planner turn starts.
+- TestClaw Plan Mode supports only API testing and browser-based Web UI testing. Local normalization must filter or replace planner options for unsupported target types such as desktop software, native apps, mobile apps, iOS apps, or Android apps before API/SSE payloads reach the frontend.
+- Each `question_options` group must include a free-form path such as `补充说明`/custom input so users are not limited to presets.
+- Fallback collecting turns should expose only the highest-priority current option group. The frontend should render only the latest assistant message's first one or two high-quality option groups to avoid flooding the chat.
+- Editing an older user message is an immediate UI rollback boundary: later messages and stale plan state must disappear locally as soon as editing starts, before the backend regeneration completes.
 - Plan execution must call the existing run creation path or shared lower-level run functions. It must not duplicate auth preflight, task creation, Celery dispatch, or synchronous fallback behavior.
 - API responses and stream final payloads must redact tokens, passwords, cookies, captcha/MFA/OTP values, sessions, API keys, auth headers, setup text, and question option messages before returning sessions/messages/plans.
 
@@ -144,7 +149,8 @@
 - Good: user describes a Swagger URL and objective, receives a plan card, approves it, and `/agent-plans/{id}/execute` creates the run through `/runs` behavior.
 - Good: user rejects a UI plan, types "use API read-only checks instead", and the regenerated payload uses the later target/mode.
 - Good: user edits an earlier target message, later messages disappear, stale plan/run payload is cleared, and a regenerated assistant turn reflects the edited target.
-- Good: planner asks for auth boundary and returns selectable generic `question_options` such as no login, provide account, or manual token; clicking an option appends that option message as the next user message and continues planning.
+- Good: planner asks for auth boundary and returns selectable generic `question_options` such as no login, provide account, manual token, or free-form clarification; clicking an option places that text in the draft and lets the user combine choices before sending.
+- Good: user edits an older message and the UI immediately shows only messages up to that rollback point while waiting for the user to send the revised prompt.
 - Good: streaming planner turn emits process events, token events, and a final redacted session payload without requiring a page refresh.
 - Good: user describes a public UI target and explicitly says no login is required, receives a ready UI plan.
 - Good: user writes `请测试管理后台页面 ... 用户名 ... 密码 ... 固定验证码 ...` and fallback extraction normalizes UI mode, auto auth credentials, static captcha, and the requested API policy without product-specific branches.
@@ -153,7 +159,9 @@
 - Base: user gives only a UI URL and objective; fallback asks for login boundary instead of surfacing an executable plan that preflight will immediately block.
 - Bad: executing a plan manually creates `Task` rows and dispatches workers from the planning route, bypassing auth preflight.
 - Bad: plan/session/list responses echo raw `token=...`, `password=...`, `Cookie`, `Authorization`, captcha, session, or API-key values.
-- Bad: editing a previous user message leaves later assistant/user messages or stale executable payloads attached to the session.
+- Bad: clicking a choice immediately sends a planner message without letting the user combine options or add text.
+- Bad: question options offer unsupported target types such as desktop software, mobile app, iOS app, Android app, or native app.
+- Bad: editing a previous user message leaves later assistant/user messages or stale executable payloads visible in the UI.
 - Bad: SSE streams hidden chain-of-thought or omits the final normalized session payload.
 
 ### 6. Tests Required
@@ -167,7 +175,8 @@
 - Regression: edit prior user message removes later messages and regenerates from the edited conversation.
 - Regression: executed planning sessions reject later message add/edit/delete requests without changing `executed_run_id`.
 - Regression: streaming planner message returns `text/event-stream`, process events, token events, and final redacted session payload.
-- Regression: planner output and fallback collecting turns expose generic selectable `question_options`, and frontend source renders clickable choice buttons.
+- Regression: planner output and fallback collecting turns expose generic selectable `question_options`, include a free-form choice, filter unsupported target types, and keep fallback to the highest-priority group.
+- Regression: frontend source renders choice buttons that fill/append the draft without calling message send/stream, and editing an old message immediately hides later messages through a rollback snapshot.
 - Regression: slow planner LLM calls time out and fall back without hanging the planning request.
 - Execute path: monkeypatch or otherwise isolate run creation/preflight and assert planning execution delegates to the existing run creation path.
 - Frontend build: Plan Mode route and navigation compile with the session/message/plan response shape.

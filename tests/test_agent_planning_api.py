@@ -177,10 +177,16 @@ def test_planning_message_asks_missing_source(monkeypatch) -> None:
     assert body["current_plan"] is None
     assert any("目标" in message["content"] for message in body["messages"])
     assert body["question_options"]
+    assert len(body["question_options"]) == 1
     assert body["messages"][-1]["plan"]["question_options"] == body["question_options"]
     assert all(group["question"] for group in body["question_options"])
     assert all(
         option["label"] and option["message"]
+        for group in body["question_options"]
+        for option in group["options"]
+    )
+    assert any(
+        option["label"] == "补充说明"
         for group in body["question_options"]
         for option in group["options"]
     )
@@ -228,7 +234,137 @@ def test_planning_message_exposes_model_provided_choice_options(monkeypatch) -> 
                 {
                     "label": "关键路径",
                     "message": "范围：先覆盖关键路径和发布阻断风险。",
+                },
+                {
+                    "label": "补充说明",
+                    "message": "我会补充关于“希望先覆盖哪个测试范围”的具体说明。",
+                },
+            ],
+        }
+    ]
+
+
+def test_planning_message_limits_model_provided_choice_groups(monkeypatch) -> None:
+    async def fake_llm(*args: Any, **kwargs: Any) -> PlannerLLMOutput:
+        return PlannerLLMOutput(
+            response="请选择本轮规划方式。",
+            status="collecting",
+            questions=["请选择本轮规划方式。"],
+            question_options=[
+                {
+                    "question": "先按哪个目标类型规划？",
+                    "options": [
+                        {
+                            "label": "接口",
+                            "message": "我要测试 API 或 OpenAPI/Swagger 来源。",
+                        }
+                    ],
+                },
+                {
+                    "question": "先按哪个测试范围规划？",
+                    "options": [
+                        {
+                            "label": "冒烟",
+                            "message": "范围：先做关键路径冒烟检查。",
+                        }
+                    ],
+                },
+                {
+                    "question": "安全边界是什么？",
+                    "options": [
+                        {
+                            "label": "只读",
+                            "message": "安全边界：只做只读检查。",
+                        }
+                    ],
+                },
+            ],
+            ready_to_execute=False,
+            run_payload={},
+        )
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        response = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "先帮我规划测试方式。"},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    question_options = response.json()["question_options"]
+    assert len(question_options) == 2
+    assert [group["question"] for group in question_options] == [
+        "先按哪个目标类型规划？",
+        "先按哪个测试范围规划？",
+    ]
+    assert all(
+        any(option["label"] == "补充说明" for option in group["options"])
+        for group in question_options
+    )
+
+
+def test_planning_message_filters_unsupported_target_choice_options(monkeypatch) -> None:
+    async def fake_llm(*args: Any, **kwargs: Any) -> PlannerLLMOutput:
+        return PlannerLLMOutput(
+            response="请选择要测试的目标类型。",
+            status="collecting",
+            questions=["请选择要测试的目标类型。"],
+            question_options=[
+                {
+                    "question": "请选择要测试的目标类型。",
+                    "options": [
+                        {"label": "桌面软件", "message": "我要测试桌面软件客户端。"},
+                        {"label": "手机 App", "message": "我要测试 native mobile app。"},
+                        {"label": "Native app", "message": "Test an iOS app."},
+                    ],
                 }
+            ],
+            ready_to_execute=False,
+            run_payload={},
+        )
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        response = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "先规划一个测试目标。"},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    question_options = body["question_options"]
+    serialized = response.text
+    assert "桌面软件" not in serialized
+    assert "手机 App" not in serialized
+    assert "native mobile" not in serialized
+    assert "Native app" not in serialized
+    assert body["messages"][-1]["plan"]["question_options"] == question_options
+    assert question_options == [
+        {
+            "question": "请选择要测试的目标类型。",
+            "options": [
+                {
+                    "label": "API / 接口",
+                    "message": "我要测试 API、接口文档或 OpenAPI/Swagger 来源。",
+                },
+                {
+                    "label": "Web UI / 网页",
+                    "message": "我要测试浏览器里的 Web UI 页面。",
+                },
+                {
+                    "label": "补充说明",
+                    "message": "我会补充关于“请选择要测试的目标类型”的具体说明。",
+                },
             ],
         }
     ]
@@ -607,6 +743,9 @@ def test_edit_prior_user_message_rolls_back_and_regenerates(monkeypatch) -> None
     assert body["status"] == "ready"
     assert body["current_run_payload"]["source"] == "https://new.example.test/openapi.json"
     assert body["current_run_payload"]["test_type"] == "api"
+    assert body["current_plan"]["auth_summary"]
+    assert body["current_plan"]["auth_summary"] != "[REDACTED]"
+    assert "auth" not in body["current_plan"]
 
 
 def test_stream_edit_validates_message_before_opening_stream(monkeypatch) -> None:
