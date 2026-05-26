@@ -89,6 +89,7 @@
 - Local normalization, not the model, owns allowed values for `test_type`, auth/captcha modes, API execution policy, and secret extraction.
 - Local fallback extraction must be generic and multilingual enough for normal Chinese/English tester messages: Chinese labels such as username/account/password/captcha, API/UI intent, no-auth phrases, captcha mode phrases, and safe/write policy phrases should normalize into the same `run_payload` contract as English messages.
 - When several user messages contain sources, the latest user-provided source wins over older sources and over stale structured LLM `run_payload.source` values. Rejection/regeneration must not keep the first target forever.
+- After rejection, generated `objective`, `setup_instructions`, credentials, and tokens must be derived from the active user messages after the rejection boundary, not from the full rejected conversation history.
 - Fallback planning must ask for missing target/source and may produce a safe basic plan when enough generic target information exists. Do not add product-specific target branches.
 - Plan rejection clears `current_plan` and `current_run_payload`, records a rejection reason, and leaves the session open for later user messages to regenerate a plan.
 - Plan execution must call the existing run creation path or shared lower-level run functions. It must not duplicate auth preflight, task creation, Celery dispatch, or synchronous fallback behavior.

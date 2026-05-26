@@ -229,6 +229,19 @@ def _latest_user_text(messages: list[AgentPlanningMessage]) -> str:
     return ""
 
 
+def _active_user_text_after_rejection(messages: list[AgentPlanningMessage]) -> tuple[str, bool]:
+    start_index = 0
+    for index, message in enumerate(messages):
+        if message.role == "system" and (
+            "计划已拒绝" in message.content or "Plan rejected" in message.content
+        ):
+            start_index = index + 1
+    active_messages = [
+        message.content for message in messages[start_index:] if message.role == "user"
+    ]
+    return "\n".join(active_messages), start_index > 0
+
+
 def _candidate_source(
     raw_payload: dict[str, Any],
     messages: list[AgentPlanningMessage],
@@ -388,6 +401,8 @@ def normalize_planner_run_payload(
     conversation_text = "\n".join(
         message.content for message in messages if message.role in {"user", "system"}
     )
+    active_user_text, has_rejection_boundary = _active_user_text_after_rejection(messages)
+    active_context_text = active_user_text or conversation_text
     latest_user_text = _latest_user_text(messages)
     source = _candidate_source(payload, messages, conversation_text)
     source_input_type = classify_input(source) if source else "unknown"
@@ -399,8 +414,8 @@ def normalize_planner_run_payload(
         else conversation_text
     )
     test_type = _infer_test_type(payload, source, test_type_text)
-    credentials = _merge_credentials(payload, conversation_text)
-    token = _token_from_payload_or_text(payload, conversation_text)
+    credentials = _merge_credentials(payload, active_context_text)
+    token = _token_from_payload_or_text(payload, active_context_text)
     headers = _headers_from_payload(payload.get("headers"))
     auth_config = _auth_config_from_payload(payload.get("auth_config"), credentials)
     auth_mode = _infer_auth_mode(
@@ -410,11 +425,16 @@ def normalize_planner_run_payload(
         credentials=credentials,
         text=intent_text,
     )
-    objective = _clean_text(payload.get("objective") or redact_sensitive_text(conversation_text), limit=500)
+    objective_text = active_context_text if has_rejection_boundary else payload.get("objective")
+    objective = _clean_text(
+        objective_text or redact_sensitive_text(active_context_text),
+        limit=500,
+    )
     if not objective:
         objective = "对目标执行安全的 TestClaw 智能体检查。"
     setup_instructions = _clean_text(
-        payload.get("setup_instructions") or redact_sensitive_text(conversation_text),
+        (active_context_text if has_rejection_boundary else payload.get("setup_instructions"))
+        or redact_sensitive_text(active_context_text),
         limit=2000,
     )
 

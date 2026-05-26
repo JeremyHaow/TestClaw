@@ -322,6 +322,10 @@ def test_reject_then_regenerate_plan(monkeypatch) -> None:
     assert body["status"] == "ready"
     assert body["current_run_payload"]["test_type"] == "api"
     assert body["current_run_payload"]["source"] == "https://api.example.test/openapi.json"
+    assert "UI" not in body["current_run_payload"]["objective"]
+    assert "Use API mode instead" not in body["current_run_payload"]["objective"]
+    assert "UI" not in body["current_run_payload"]["setup_instructions"]
+    assert "Use API mode instead" not in body["current_run_payload"]["setup_instructions"]
 
 
 def test_execute_current_plan_uses_run_creation_path(monkeypatch) -> None:
