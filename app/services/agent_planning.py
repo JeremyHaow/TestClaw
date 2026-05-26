@@ -32,6 +32,13 @@ ALLOWED_CAPTCHA_MODES = {"none", "static", "dynamic"}
 ALLOWED_API_POLICIES = {"safe_read_only", "safe_with_auth", "write_allowed"}
 MAX_LLM_QUESTION_OPTION_GROUPS = 2
 MAX_FALLBACK_QUESTION_OPTION_GROUPS = 1
+PLAN_INTAKE_STEPS = {
+    "target_kind": "测试目标",
+    "coverage_scope": "覆盖范围",
+    "auth_boundary": "登录方式/凭证",
+    "safety_boundary": "安全边界",
+    "success_criteria": "成功标准",
+}
 
 _URL_RE = re.compile(r"https?://[^\s<>'\"`)\]},，;；。]+", re.I)
 _LABEL_SEPARATOR_RE = r"(?:\s*(?:[:=：]|是|为)\s*|\s+)"
@@ -83,6 +90,11 @@ _UNSUPPORTED_TARGET_OPTION_RE = re.compile(
     r"桌面端|手机端|原生端|PC\s*客户端|本地客户端",
 )
 _CUSTOM_CHOICE_RE = re.compile(r"(?i)\b(?:custom|other|something else)\b|补充说明|自定义|其他")
+_PLACEHOLDER_CHOICE_RE = re.compile(
+    r"稍后补充具体地址|我会补充关于.+具体说明|我会直接粘贴目标\s*URL|"
+    r"我会补充这份\s*API\s*文档对应的基础\s*URL",
+    re.I,
+)
 
 
 class PlannerAuthCredentials(BaseModel):
@@ -148,12 +160,22 @@ class PlannerQuestionChoice(BaseModel):
 
     label: str
     message: str
+    title: str | None = None
+    description: str | None = None
+    field: str | None = None
+    value: str | None = None
+    step: str | None = None
+    allows_defer: bool = True
+    allows_skip: bool = False
+    optional: bool = False
 
 
 class PlannerQuestionOptions(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     question: str
+    step: str | None = None
+    required: bool = True
     options: list[PlannerQuestionChoice] = Field(default_factory=list)
 
 
@@ -578,10 +600,32 @@ def _choice(
     *,
     label: str,
     message: str,
+    title: str | None = None,
+    description: str | None = None,
+    field: str | None = None,
+    value: str | None = None,
+    step: str | None = None,
+    allows_defer: bool = True,
+    allows_skip: bool = False,
+    optional: bool = False,
 ) -> PlannerQuestionChoice:
+    clean_label = _clean_text(label, limit=40)
+    clean_message = _clean_text(message, limit=300)
+    clean_title = _clean_text(title or clean_label, limit=60)
+    clean_description = _clean_text(description or clean_message, limit=220)
+    normalized_step = _normalize_plan_step(step or field)
+    normalized_field = _normalize_plan_step(field) or normalized_step
     return PlannerQuestionChoice(
-        label=_clean_text(label, limit=40),
-        message=_clean_text(message, limit=300),
+        label=clean_label,
+        message=clean_message,
+        title=clean_title,
+        description=clean_description,
+        field=_clean_text(normalized_field or field or "", limit=60) or None,
+        value=_clean_text(value or "", limit=80) or None,
+        step=normalized_step,
+        allows_defer=allows_defer,
+        allows_skip=allows_skip,
+        optional=optional,
     )
 
 
@@ -589,26 +633,76 @@ def _question_options(
     *,
     question: str,
     options: list[PlannerQuestionChoice],
+    step: str | None = None,
+    required: bool = True,
 ) -> PlannerQuestionOptions:
+    normalized_step = _normalize_plan_step(step) or _infer_plan_step_from_question(question)
     return PlannerQuestionOptions(
         question=_clean_text(question, limit=180),
+        step=normalized_step,
+        required=required,
         options=options,
     )
+
+
+def _normalize_plan_step(value: str | None) -> str | None:
+    normalized = str(value or "").strip().lower()
+    aliases = {
+        "target": "target_kind",
+        "target_type": "target_kind",
+        "source": "target_kind",
+        "scope": "coverage_scope",
+        "coverage": "coverage_scope",
+        "auth": "auth_boundary",
+        "login": "auth_boundary",
+        "credentials": "auth_boundary",
+        "safety": "safety_boundary",
+        "policy": "safety_boundary",
+        "success": "success_criteria",
+        "criteria": "success_criteria",
+    }
+    normalized = aliases.get(normalized, normalized)
+    return normalized if normalized in PLAN_INTAKE_STEPS else None
+
+
+def _infer_plan_step_from_question(question: str) -> str | None:
+    text = question.strip()
+    if "目标" in text or "URL" in text or "OpenAPI" in text or "Swagger" in text:
+        return "target_kind"
+    if "范围" in text or "覆盖" in text:
+        return "coverage_scope"
+    if any(marker in text for marker in ("登录", "账号", "Token", "Header", "鉴权", "凭证")):
+        return "auth_boundary"
+    if "安全" in text or "只读" in text or "写入" in text:
+        return "safety_boundary"
+    if "成功" in text or "结果" in text or "断言" in text:
+        return "success_criteria"
+    return None
 
 
 def _is_unsupported_target_option(label: str, message: str) -> bool:
     return bool(_UNSUPPORTED_TARGET_OPTION_RE.search(f"{label} {message}"))
 
 
-def _is_custom_choice(label: str, message: str) -> bool:
-    return bool(_CUSTOM_CHOICE_RE.search(label) or "补充关于" in message)
+def _is_placeholder_choice(label: str, message: str) -> bool:
+    return bool(_PLACEHOLDER_CHOICE_RE.search(f"{label} {message}"))
 
 
-def _custom_choice_for_question(question: str) -> PlannerQuestionChoice:
-    question_hint = question.strip("？?。.")[:60] or "这个问题"
+def _is_custom_choice(label: str, message: str, value: str | None = None) -> bool:
+    return bool(_CUSTOM_CHOICE_RE.search(label) or str(value or "").lower() == "custom")
+
+
+def _custom_choice_for_question(question: str, step: str | None = None) -> PlannerQuestionChoice:
+    normalized_step = _normalize_plan_step(step) or _infer_plan_step_from_question(question)
+    step_label = PLAN_INTAKE_STEPS.get(normalized_step or "", "当前问题")
     return _choice(
-        label="补充说明",
-        message=f"我会补充关于“{question_hint}”的具体说明。",
+        label="自定义",
+        title="自定义说明",
+        description="在补充说明里写明这一项的具体约束、判断标准或例外情况。",
+        message=f"{step_label}：自定义，由补充说明提供具体内容。",
+        field=normalized_step,
+        value="custom",
+        step=normalized_step,
     )
 
 
@@ -616,11 +710,30 @@ def _supported_target_choices() -> list[PlannerQuestionChoice]:
     return [
         _choice(
             label="API / 接口",
-            message="我要测试 API、接口文档或 OpenAPI/Swagger 来源。",
+            title="API / OpenAPI",
+            description="用于接口文档、接口契约、只读接口覆盖或指定接口回归。",
+            message="测试目标类型：API / OpenAPI/Swagger 接口来源。",
+            field="target_kind",
+            value="api_openapi",
+            step="target_kind",
         ),
         _choice(
             label="Web UI / 网页",
-            message="我要测试浏览器里的 Web UI 页面。",
+            title="Web UI 页面",
+            description="用于浏览器页面、登录后业务流程、表单和页面可用性检查。",
+            message="测试目标类型：浏览器 Web UI 页面。",
+            field="target_kind",
+            value="web_page",
+            step="target_kind",
+        ),
+        _choice(
+            label="自定义",
+            title="自定义目标",
+            description="用补充说明描述具体目标，但仍限定在 API 或浏览器 Web UI 范围内。",
+            message="测试目标类型：自定义 API/Web UI 目标，由补充说明限定。",
+            field="target_kind",
+            value="custom",
+            step="target_kind",
         ),
     ]
 
@@ -637,12 +750,17 @@ def _dedupe_question_options(
         question = redact_sensitive_text(group.question).strip()
         if not question or question in seen_questions:
             continue
+        group_step = _normalize_plan_step(group.step) or _infer_plan_step_from_question(question)
         choices: list[PlannerQuestionChoice] = []
         removed_unsupported_target = False
+        removed_placeholder_choice = False
         for option in group.options:
             label = redact_sensitive_text(option.label).strip()
             message = redact_sensitive_text(option.message).strip()
             if not label or not message:
+                continue
+            if _is_placeholder_choice(label, message):
+                removed_placeholder_choice = True
                 continue
             if _is_unsupported_target_option(label, message):
                 removed_unsupported_target = True
@@ -651,26 +769,48 @@ def _dedupe_question_options(
             if option_key in seen_options:
                 continue
             seen_options.add(option_key)
-            choices.append(PlannerQuestionChoice(label=label, message=message))
-        if removed_unsupported_target and not choices:
+            option_step = _normalize_plan_step(option.step or option.field) or group_step
+            option_field = _normalize_plan_step(option.field) or option_step
+            choices.append(
+                PlannerQuestionChoice(
+                    label=label,
+                    message=message,
+                    title=redact_sensitive_text(option.title or label).strip()[:60] or label,
+                    description=redact_sensitive_text(option.description or message).strip()[:220]
+                    or message,
+                    field=_clean_text(option_field or option.field or "", limit=60) or None,
+                    value=_clean_text(option.value or "", limit=80) or None,
+                    step=option_step,
+                    allows_defer=bool(option.allows_defer),
+                    allows_skip=bool(option.allows_skip),
+                    optional=bool(option.optional),
+                )
+            )
+        if (removed_unsupported_target or removed_placeholder_choice) and not choices and group_step == "target_kind":
             choices.extend(_supported_target_choices())
         if choices:
             custom_choices = [
-                choice for choice in choices if _is_custom_choice(choice.label, choice.message)
+                choice
+                for choice in choices
+                if _is_custom_choice(choice.label, choice.message, choice.value)
             ]
             standard_choices = [
-                choice for choice in choices if not _is_custom_choice(choice.label, choice.message)
+                choice
+                for choice in choices
+                if not _is_custom_choice(choice.label, choice.message, choice.value)
             ]
             if custom_choices:
                 choices = standard_choices[:4] + [custom_choices[0]]
             else:
-                choices = standard_choices[:4] + [_custom_choice_for_question(question)]
+                choices = standard_choices[:4] + [_custom_choice_for_question(question, group_step)]
             seen_questions.add(question)
             normalized.append(
-                PlannerQuestionOptions(question=question, options=choices).model_dump(
-                    mode="json",
-                    exclude_none=True,
-                )
+                PlannerQuestionOptions(
+                    question=question,
+                    step=group_step,
+                    required=bool(group.required),
+                    options=choices,
+                ).model_dump(mode="json", exclude_none=True)
             )
     return normalized[:max_groups]
 
@@ -681,22 +821,48 @@ def _question_options_from_llm(raw_groups: list[dict[str, Any]]) -> list[Planner
         if not isinstance(raw, dict):
             continue
         question = str(raw.get("question") or "").strip()
+        group_step = _normalize_plan_step(str(raw.get("step") or raw.get("field") or ""))
+        if not group_step:
+            group_step = _infer_plan_step_from_question(question)
         raw_options = raw.get("options")
         if not question or not isinstance(raw_options, list):
             continue
-        choices = [
-            _choice(
-                label=str(option.get("label") or "").strip(),
-                message=str(option.get("message") or option.get("value") or "").strip(),
+        choices: list[PlannerQuestionChoice] = []
+        for option in raw_options:
+            if not isinstance(option, dict):
+                continue
+            label = str(option.get("label") or option.get("title") or "").strip()
+            description = str(option.get("description") or "").strip()
+            message = str(option.get("message") or option.get("summary") or "").strip()
+            value = str(option.get("value") or "").strip()
+            option_step = _normalize_plan_step(
+                str(option.get("step") or option.get("field") or group_step or "")
             )
-            for option in raw_options
-            if isinstance(option, dict)
-            and str(option.get("label") or "").strip()
-            and str(option.get("message") or option.get("value") or "").strip()
-        ]
+            field = str(option.get("field") or option_step or group_step or "").strip()
+            if not message and label:
+                step_label = PLAN_INTAKE_STEPS.get(option_step or group_step or "", "选择")
+                message = f"{step_label}：{label}。{description}".strip("。")
+            if not label or not message:
+                continue
+            choices.append(
+                _choice(
+                    label=label,
+                    title=str(option.get("title") or label).strip(),
+                    description=description or message,
+                    message=message,
+                    field=field,
+                    value=value,
+                    step=option_step or group_step,
+                    allows_defer=bool(option.get("allows_defer", True)),
+                    allows_skip=bool(option.get("allows_skip", False)),
+                    optional=bool(option.get("optional", False)),
+                )
+            )
         groups.append(
             _question_options(
                 question=question,
+                step=group_step,
+                required=bool(raw.get("required", True)),
                 options=choices,
             )
         )
@@ -712,30 +878,33 @@ def _fallback_question_options(
         question_options.append(
             _question_options(
                 question="要先确定哪类测试目标？",
-                options=[
-                    _choice(
-                        label="接口文档",
-                        message="我要测试 API 或 OpenAPI/Swagger 来源，稍后补充具体地址。",
-                    ),
-                    _choice(
-                        label="网页界面",
-                        message="我要测试网页 UI，稍后补充具体地址。",
-                    ),
-                    _choice(
-                        label="粘贴目标",
-                        message="我会直接粘贴目标 URL 或 OpenAPI/Swagger 来源。",
-                    ),
-                ],
+                step="target_kind",
+                options=_supported_target_choices(),
             )
         )
     if any("基础 URL" in question for question in questions):
         question_options.append(
             _question_options(
                 question="这份 API 文档对应哪个基础 URL？",
+                step="target_kind",
                 options=[
                     _choice(
-                        label="补充基础 URL",
-                        message="我会补充这份 API 文档对应的基础 URL。",
+                        label="使用文档地址",
+                        title="使用文档 servers",
+                        description="优先采用 OpenAPI/Swagger 文档里的 servers、host 或 basePath。",
+                        message="基础 URL：优先使用接口文档内声明的 servers、host 或 basePath。",
+                        field="target_kind",
+                        value="document_servers",
+                        step="target_kind",
+                    ),
+                    _choice(
+                        label="指定基础 URL",
+                        title="指定 API 基础 URL",
+                        description="用补充说明提供完整 API 基础 URL，例如测试环境网关地址。",
+                        message="基础 URL：使用补充说明中的完整 API 基础 URL。",
+                        field="target_kind",
+                        value="base_url_override",
+                        step="target_kind",
                     )
                 ],
             )
@@ -744,18 +913,34 @@ def _fallback_question_options(
         question_options.append(
             _question_options(
                 question="目标的登录或鉴权边界是什么？",
+                step="auth_boundary",
                 options=[
                     _choice(
                         label="无需登录",
-                        message="确认目标是公开访问，无需登录或鉴权。",
+                        title="公开访问",
+                        description="目标可匿名访问，计划按无需登录或鉴权处理。",
+                        message="登录方式/凭证：目标公开访问，无需登录或鉴权。",
+                        field="auth_boundary",
+                        value="no_auth",
+                        step="auth_boundary",
                     ),
                     _choice(
                         label="提供账号",
-                        message="目标需要登录，我会提供测试账号、密码和必要的登录说明。",
+                        title="登录流程",
+                        description="使用测试账号、密码、验证码说明或登录步骤完成浏览器登录。",
+                        message="登录方式/凭证：目标需要登录流程和测试账号。",
+                        field="auth_boundary",
+                        value="login_flow",
+                        step="auth_boundary",
                     ),
                     _choice(
                         label="手动鉴权",
-                        message="我会提供 Token、Cookie 或 Header 作为手动鉴权材料。",
+                        title="Token / Header",
+                        description="使用 Token、Cookie 或 Header 作为 API/UI 访问凭证。",
+                        message="登录方式/凭证：使用手动提供的 Token、Cookie 或 Header。",
+                        field="auth_boundary",
+                        value="manual_auth",
+                        step="auth_boundary",
                     ),
                 ],
             )
@@ -764,36 +949,103 @@ def _fallback_question_options(
         [
             _question_options(
                 question="先按哪个测试范围规划？",
+                step="coverage_scope",
+                required=False,
                 options=[
                     _choice(
                         label="冒烟范围",
-                        message="范围：先做关键路径和基础可用性冒烟检查。",
+                        title="冒烟检查",
+                        description="优先覆盖关键入口、基础可用性和发布前阻断风险。",
+                        message="覆盖范围：关键路径和基础可用性冒烟检查。",
+                        field="coverage_scope",
+                        value="smoke",
+                        step="coverage_scope",
+                        allows_skip=True,
+                        optional=True,
                     ),
                     _choice(
                         label="回归范围",
-                        message="范围：覆盖主要回归风险、核心流程和历史问题。",
+                        title="回归范围",
+                        description="覆盖核心流程、主要回归风险和历史问题区域。",
+                        message="覆盖范围：核心流程、主要回归风险和历史问题。",
+                        field="coverage_scope",
+                        value="regression",
+                        step="coverage_scope",
+                        allows_skip=True,
+                        optional=True,
+                    ),
+                    _choice(
+                        label="接口契约",
+                        title="接口契约",
+                        description="适合 OpenAPI/Swagger 输入，关注文档契约、状态码和响应结构。",
+                        message="覆盖范围：接口契约、状态码和响应结构检查。",
+                        field="coverage_scope",
+                        value="api_contract",
+                        step="coverage_scope",
+                        allows_skip=True,
+                        optional=True,
                     ),
                 ],
             ),
             _question_options(
                 question="安全边界是什么？",
+                step="safety_boundary",
                 options=[
                     _choice(
                         label="只读边界",
+                        title="只读检查",
+                        description="不创建、修改或删除数据；API 默认限制为安全只读方法。",
                         message="安全边界：只做只读检查，不创建、修改或删除数据。",
+                        field="safety_boundary",
+                        value="safe_read_only",
+                        step="safety_boundary",
                     ),
                     _choice(
                         label="测试环境写入",
-                        message="这是测试环境，允许在约定范围内创建、修改或删除测试数据。",
+                        title="允许测试写入",
+                        description="仅限测试环境，并在约定范围内创建、修改或删除测试数据。",
+                        message="安全边界：测试环境允许在约定范围内写入测试数据。",
+                        field="safety_boundary",
+                        value="write_allowed",
+                        step="safety_boundary",
+                    ),
+                    _choice(
+                        label="鉴权只读",
+                        title="带鉴权只读",
+                        description="允许携带凭证访问受保护资源，但仍不执行写入动作。",
+                        message="安全边界：允许带鉴权只读访问，不执行写入动作。",
+                        field="safety_boundary",
+                        value="safe_with_auth",
+                        step="safety_boundary",
                     ),
                 ],
             ),
             _question_options(
                 question="结果怎样才算成功？",
+                step="success_criteria",
+                required=False,
                 options=[
                     _choice(
                         label="证据充分",
+                        title="证据充分",
+                        description="每个覆盖点都需要结果、证据、失败原因或明确跳过原因。",
                         message="成功标准：每个覆盖点都有结果、证据、失败原因或明确跳过原因。",
+                        field="success_criteria",
+                        value="evidence_complete",
+                        step="success_criteria",
+                        allows_skip=True,
+                        optional=True,
+                    ),
+                    _choice(
+                        label="阻断优先",
+                        title="阻断问题优先",
+                        description="优先发现发布阻断问题，并给出可复现步骤和证据。",
+                        message="成功标准：优先发现发布阻断问题，并提供可复现证据。",
+                        field="success_criteria",
+                        value="blocking_findings",
+                        step="success_criteria",
+                        allows_skip=True,
+                        optional=True,
                     ),
                 ],
             ),
@@ -1204,9 +1456,12 @@ class AgentPlanningService:
             "Required JSON fields: response, status, questions, question_options, "
             "ready_to_execute, plan, run_payload.\n"
             "When asking questions, include generic selectable question_options as an array of "
-            "objects with question and options. Each option has label and message. Option messages "
-            "must be reusable testing choices such as target type, scope, auth/login boundary, "
-            "safety boundary, or success criteria. Do not make product-specific option branches.\n"
+            "objects with question, optional step, required, and options. Each option has label, "
+            "message, and may include title, description, field, value, step, allows_defer, "
+            "allows_skip, and optional. Option messages must be concrete selected-answer summaries "
+            "for target_kind, coverage_scope, auth_boundary, safety_boundary, or success_criteria. "
+            "Do not use placeholder choices like 'I will provide details later' or ask for the same "
+            "missing URL as an option message. Do not make product-specific option branches.\n"
             "TestClaw currently supports only API testing and browser-based Web UI testing. "
             "Never offer desktop software, native app, mobile app, iOS app, or Android app as "
             "target type options.\n"

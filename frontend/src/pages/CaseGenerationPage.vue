@@ -240,7 +240,7 @@ onMounted(async () => {
               <div class="text-[9px] font-bold uppercase tracking-widest text-gray-400">步骤</div>
               <ul class="space-y-1">
                 <li v-for="(s, i) in tc.steps" :key="i" class="text-xs flex gap-2">
-                  <span class="text-blue-500 font-mono font-bold text-[9px] mt-0.5">{{ i + 1 }}</span>
+                  <span class="text-blue-500 font-mono font-bold text-[9px] mt-0.5">{{ Number(i) + 1 }}</span>
                   <span class="text-gray-600">{{ s }}</span>
                 </li>
               </ul>
@@ -337,7 +337,7 @@ onMounted(async () => {
               <div class="text-[9px] font-bold uppercase tracking-widest text-gray-400">步骤</div>
               <ul class="space-y-1">
                 <li v-for="(s, i) in item.steps" :key="i" class="text-xs flex gap-2">
-                  <span class="text-blue-500 font-mono font-bold text-[9px] mt-0.5">{{ i + 1 }}</span>
+                  <span class="text-blue-500 font-mono font-bold text-[9px] mt-0.5">{{ Number(i) + 1 }}</span>
                   <span class="text-gray-600">{{ typeof s === 'string' ? s : JSON.stringify(s) }}</span>
                 </li>
               </ul>

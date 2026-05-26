@@ -67,6 +67,18 @@ def _sse_events(text: str) -> list[tuple[str, dict[str, Any]]]:
     return events
 
 
+def _assert_no_placeholder_option_messages(question_options: list[dict[str, Any]]) -> None:
+    banned = [
+        "稍后补充具体地址",
+        "我会补充关于",
+        "我会直接粘贴目标 URL",
+    ]
+    for group in question_options:
+        for option in group["options"]:
+            message = option["message"]
+            assert all(text not in message for text in banned)
+
+
 def test_chinese_message_extraction_for_ui_credentials_and_write_policy() -> None:
     payload = normalize_planner_run_payload(
         None,
@@ -154,6 +166,314 @@ def test_create_planning_session() -> None:
     assert body["messages"] == []
 
 
+def test_create_agent_plan_session_alias_returns_current_step() -> None:
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={"title": "Alias checkout plan"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"]
+    assert body["title"] == "Alias checkout plan"
+    assert body["current_step"] == "target"
+
+
+def test_list_agent_plan_session_aliases_for_current_user() -> None:
+    other_username = f"plan-list-user-{uuid.uuid4().hex}"
+    other_password = "other-password"
+    first_title = f"Alias list first {uuid.uuid4().hex}"
+    second_title = f"Alias list second {uuid.uuid4().hex}"
+    other_title = f"Alias list other {uuid.uuid4().hex}"
+
+    with TestClient(app) as client:
+        asyncio.run(_create_test_user(other_username, other_password))
+        token = _token(client)
+        other_token = _login_token(client, other_username, other_password)
+        headers = {"Authorization": f"Bearer {token}"}
+        other_headers = {"Authorization": f"Bearer {other_token}"}
+        first = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={"title": first_title},
+            headers=headers,
+        ).json()
+        second = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={"title": second_title},
+            headers=headers,
+        ).json()
+        other = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={"title": other_title},
+            headers=other_headers,
+        ).json()
+        response = client.get("/api/v1/agent-plans/sessions", headers=headers)
+
+    assert response.status_code == 200
+    sessions = response.json()
+    ids = {session["id"] for session in sessions}
+    assert first["id"] in ids
+    assert second["id"] in ids
+    assert other["id"] not in ids
+    assert all(session["current_step"] for session in sessions)
+
+
+def test_get_agent_plan_session_alias_returns_owner_details() -> None:
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={"title": "Alias detail plan"},
+            headers=headers,
+        ).json()
+        response = client.get(
+            f"/api/v1/agent-plans/sessions/{created['id']}",
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == created["id"]
+    assert body["title"] == "Alias detail plan"
+    assert body["current_step"] == "target"
+    assert body["messages"] == []
+
+
+def test_get_agent_plan_session_alias_hides_other_user_session() -> None:
+    other_username = f"plan-get-user-{uuid.uuid4().hex}"
+    other_password = "other-password"
+
+    with TestClient(app) as client:
+        asyncio.run(_create_test_user(other_username, other_password))
+        token = _token(client)
+        other_token = _login_token(client, other_username, other_password)
+        headers = {"Authorization": f"Bearer {token}"}
+        other_headers = {"Authorization": f"Bearer {other_token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={"title": "Alias owner-only plan"},
+            headers=headers,
+        ).json()
+        response = client.get(
+            f"/api/v1/agent-plans/sessions/{created['id']}",
+            headers=other_headers,
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Planning session not found"
+
+
+def test_intake_agent_plan_session_missing_source_collects_and_persists_messages(
+    monkeypatch,
+) -> None:
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={},
+            headers=headers,
+        ).json()
+        response = client.post(
+            f"/api/v1/agent-plans/sessions/{created['id']}/intake",
+            json={"message": "Run a checkout smoke test."},
+            headers=headers,
+        )
+        detail = client.get(
+            f"/api/v1/agent-plans/sessions/{created['id']}",
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session"]["id"] == created["id"]
+    assert body["session"]["status"] == "collecting"
+    assert body["draft"]["target"]["status"] == "missing"
+    assert body["next_question"]["step"] == "target"
+    assert body["next_question"]["title"]
+    assert any(item["key"] == "target" for item in body["missing_info"])
+    assert [message["role"] for message in body["session"]["messages"]] == [
+        "user",
+        "assistant",
+    ]
+    assert body["session"]["messages"][0]["content"] == "Run a checkout smoke test."
+    assert detail.status_code == 200
+    assert [message["role"] for message in detail.json()["messages"]] == [
+        "user",
+        "assistant",
+    ]
+
+
+def test_intake_agent_plan_session_ready_api_target_returns_payload(
+    monkeypatch,
+) -> None:
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={},
+            headers=headers,
+        ).json()
+        response = client.post(
+            f"/api/v1/agent-plans/sessions/{created['id']}/intake",
+            json={"message": "Test API https://api.example.test/openapi.json."},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session"]["status"] == "ready"
+    assert (
+        body["session"]["current_run_payload"]["source"]
+        == "https://api.example.test/openapi.json"
+    )
+    assert body["next_question"] is None
+
+
+def test_generate_agent_plan_session_before_ready_returns_400() -> None:
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={"title": "Not ready generate plan"},
+            headers=headers,
+        ).json()
+        response = client.post(
+            f"/api/v1/agent-plans/sessions/{created['id']}/generate",
+            headers=headers,
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "No executable plan is ready"
+
+
+def test_generate_agent_plan_session_after_ready_api_intake_returns_plan_payload(
+    monkeypatch,
+) -> None:
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={},
+            headers=headers,
+        ).json()
+        ready = client.post(
+            f"/api/v1/agent-plans/sessions/{created['id']}/intake",
+            json={"message": "Test API https://api.example.test/openapi.json."},
+            headers=headers,
+        )
+        response = client.post(
+            f"/api/v1/agent-plans/sessions/{created['id']}/generate",
+            headers=headers,
+        )
+
+    assert ready.status_code == 200
+    assert response.status_code == 200
+    body = response.json()
+    assert body["plan_id"] == created["id"]
+    assert body["status"] == "ready"
+    assert body["summary"]
+    assert body["recommended_run_payload"]["source"] == "https://api.example.test/openapi.json"
+    assert body["api_plan"]
+    assert body["ui_plan"] == {}
+    assert body["session"]["id"] == created["id"]
+
+
+def test_generate_agent_plan_session_hides_other_user_session() -> None:
+    other_username = f"plan-generate-user-{uuid.uuid4().hex}"
+    other_password = "other-password"
+
+    with TestClient(app) as client:
+        asyncio.run(_create_test_user(other_username, other_password))
+        token = _token(client)
+        other_token = _login_token(client, other_username, other_password)
+        headers = {"Authorization": f"Bearer {token}"}
+        other_headers = {"Authorization": f"Bearer {other_token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={"title": "Owner generate plan"},
+            headers=headers,
+        ).json()
+        response = client.post(
+            f"/api/v1/agent-plans/sessions/{created['id']}/generate",
+            headers=other_headers,
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Planning session not found"
+
+
+def test_intake_agent_plan_session_hides_other_user_session(monkeypatch) -> None:
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    other_username = f"plan-intake-user-{uuid.uuid4().hex}"
+    other_password = "other-password"
+
+    with TestClient(app) as client:
+        asyncio.run(_create_test_user(other_username, other_password))
+        token = _token(client)
+        other_token = _login_token(client, other_username, other_password)
+        headers = {"Authorization": f"Bearer {token}"}
+        other_headers = {"Authorization": f"Bearer {other_token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={"title": "Owner intake plan"},
+            headers=headers,
+        ).json()
+        response = client.post(
+            f"/api/v1/agent-plans/sessions/{created['id']}/intake",
+            json={"message": "Test API https://api.example.test/openapi.json."},
+            headers=other_headers,
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Planning session not found"
+
+
+def test_intake_agent_plan_session_empty_payload_requires_message() -> None:
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={},
+            headers=headers,
+        ).json()
+        response = client.post(
+            f"/api/v1/agent-plans/sessions/{created['id']}/intake",
+            json={},
+            headers=headers,
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "message is required"
+
+
 def test_planning_message_asks_missing_source(monkeypatch) -> None:
     async def fake_llm(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("planner unavailable")
@@ -185,11 +505,17 @@ def test_planning_message_asks_missing_source(monkeypatch) -> None:
         for group in body["question_options"]
         for option in group["options"]
     )
-    assert any(
-        option["label"] == "补充说明"
+    assert all(
+        option.get("field") and option.get("value")
         for group in body["question_options"]
         for option in group["options"]
     )
+    assert any(
+        option["label"] == "自定义"
+        for group in body["question_options"]
+        for option in group["options"]
+    )
+    _assert_no_placeholder_option_messages(body["question_options"])
 
 
 def test_planning_message_exposes_model_provided_choice_options(monkeypatch) -> None:
@@ -227,21 +553,15 @@ def test_planning_message_exposes_model_provided_choice_options(monkeypatch) -> 
 
     assert response.status_code == 200
     question_options = response.json()["question_options"]
-    assert question_options == [
-        {
-            "question": "希望先覆盖哪个测试范围？",
-            "options": [
-                {
-                    "label": "关键路径",
-                    "message": "范围：先覆盖关键路径和发布阻断风险。",
-                },
-                {
-                    "label": "补充说明",
-                    "message": "我会补充关于“希望先覆盖哪个测试范围”的具体说明。",
-                },
-            ],
-        }
-    ]
+    assert len(question_options) == 1
+    assert question_options[0]["question"] == "希望先覆盖哪个测试范围？"
+    assert question_options[0]["step"] == "coverage_scope"
+    assert question_options[0]["options"][0]["label"] == "关键路径"
+    assert question_options[0]["options"][0]["message"] == "范围：先覆盖关键路径和发布阻断风险。"
+    assert question_options[0]["options"][0]["field"] == "coverage_scope"
+    assert question_options[0]["options"][-1]["label"] == "自定义"
+    assert question_options[0]["options"][-1]["value"] == "custom"
+    _assert_no_placeholder_option_messages(question_options)
 
 
 def test_planning_message_limits_model_provided_choice_groups(monkeypatch) -> None:
@@ -303,9 +623,10 @@ def test_planning_message_limits_model_provided_choice_groups(monkeypatch) -> No
         "先按哪个测试范围规划？",
     ]
     assert all(
-        any(option["label"] == "补充说明" for option in group["options"])
+        any(option["label"] == "自定义" for option in group["options"])
         for group in question_options
     )
+    _assert_no_placeholder_option_messages(question_options)
 
 
 def test_planning_message_filters_unsupported_target_choice_options(monkeypatch) -> None:
@@ -349,25 +670,79 @@ def test_planning_message_filters_unsupported_target_choice_options(monkeypatch)
     assert "native mobile" not in serialized
     assert "Native app" not in serialized
     assert body["messages"][-1]["plan"]["question_options"] == question_options
-    assert question_options == [
-        {
-            "question": "请选择要测试的目标类型。",
-            "options": [
-                {
-                    "label": "API / 接口",
-                    "message": "我要测试 API、接口文档或 OpenAPI/Swagger 来源。",
-                },
-                {
-                    "label": "Web UI / 网页",
-                    "message": "我要测试浏览器里的 Web UI 页面。",
-                },
-                {
-                    "label": "补充说明",
-                    "message": "我会补充关于“请选择要测试的目标类型”的具体说明。",
-                },
-            ],
-        }
+    assert question_options[0]["question"] == "请选择要测试的目标类型。"
+    assert question_options[0]["step"] == "target_kind"
+    assert [option["value"] for option in question_options[0]["options"]] == [
+        "api_openapi",
+        "web_page",
+        "custom",
     ]
+    assert [option["label"] for option in question_options[0]["options"]] == [
+        "API / 接口",
+        "Web UI / 网页",
+        "自定义",
+    ]
+    _assert_no_placeholder_option_messages(question_options)
+
+
+def test_planning_message_filters_placeholder_choice_messages(monkeypatch) -> None:
+    async def fake_llm(*args: Any, **kwargs: Any) -> PlannerLLMOutput:
+        return PlannerLLMOutput(
+            response="请选择要测试的目标类型。",
+            status="collecting",
+            questions=["请选择要测试的目标类型。"],
+            question_options=[
+                {
+                    "question": "请选择要测试的目标类型。",
+                    "step": "target_kind",
+                    "options": [
+                        {
+                            "label": "接口",
+                            "message": "我要测试 API 或 OpenAPI/Swagger 来源，稍后补充具体地址。",
+                        },
+                        {
+                            "label": "网页",
+                            "message": "我要测试网页 UI，稍后补充具体地址。",
+                        },
+                        {
+                            "label": "粘贴目标",
+                            "message": "我会直接粘贴目标 URL 或 OpenAPI/Swagger 来源。",
+                        },
+                        {
+                            "label": "补充说明",
+                            "message": "我会补充关于“要先确定哪类测试目标”的具体说明。",
+                        },
+                    ],
+                }
+            ],
+            ready_to_execute=False,
+            run_payload={},
+        )
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        response = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "先规划一个测试目标。"},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    serialized = response.text
+    assert "稍后补充具体地址" not in serialized
+    assert "我会补充关于" not in serialized
+    assert "我会直接粘贴目标 URL" not in serialized
+    question_options = response.json()["question_options"]
+    assert [option["value"] for option in question_options[0]["options"]] == [
+        "api_openapi",
+        "web_page",
+        "custom",
+    ]
+    _assert_no_placeholder_option_messages(question_options)
 
 
 def test_planning_message_times_out_slow_llm_and_uses_fallback(monkeypatch) -> None:
@@ -565,6 +940,171 @@ def test_reject_then_regenerate_plan(monkeypatch) -> None:
     assert "Use API mode instead" not in body["current_run_payload"]["objective"]
     assert "UI" not in body["current_run_payload"]["setup_instructions"]
     assert "Use API mode instead" not in body["current_run_payload"]["setup_instructions"]
+
+
+def test_create_run_after_ready_api_intake_marks_executed_and_returns_link(
+    monkeypatch,
+) -> None:
+    execute_payloads: list[dict[str, Any]] = []
+
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    async def fake_execute(payload: dict[str, Any], db: Any, user: Any) -> Task:
+        execute_payloads.append(payload)
+        task = Task(
+            objective=payload["objective"],
+            target_url=payload["source"],
+            status=TaskStatus.QUEUED,
+            test_type=TaskTestType.API,
+            retry_count=0,
+            execution_log=json.dumps({}),
+            created_at=datetime.utcnow(),
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        return task
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+    monkeypatch.setattr(agent_plans, "_execute_run_payload", fake_execute)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={},
+            headers=headers,
+        ).json()
+        ready = client.post(
+            f"/api/v1/agent-plans/sessions/{created['id']}/intake",
+            json={"message": "Test API https://api.example.test/openapi.json."},
+            headers=headers,
+        )
+        response = client.post(
+            f"/api/v1/agent-plans/{created['id']}/create-run",
+            headers=headers,
+        )
+        idempotent_response = client.post(
+            f"/api/v1/agent-plans/{created['id']}/create-run",
+            headers=headers,
+        )
+        session_response = client.get(
+            f"/api/v1/agent-plans/sessions/{created['id']}",
+            headers=headers,
+        )
+
+    assert ready.status_code == 200
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"]
+    assert body["detail_url"] == f"/runs/{body['run_id']}"
+    assert idempotent_response.status_code == 200
+    assert idempotent_response.json() == body
+    assert len(execute_payloads) == 1
+    assert execute_payloads[0]["source"] == "https://api.example.test/openapi.json"
+    session_body = session_response.json()
+    assert session_body["status"] == "executed"
+    assert session_body["current_step"] == "executed"
+    assert session_body["executed_run_id"] == body["run_id"]
+
+
+def test_execute_after_create_run_reuses_existing_run(monkeypatch) -> None:
+    execute_payloads: list[dict[str, Any]] = []
+
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    async def fake_execute(payload: dict[str, Any], db: Any, user: Any) -> Task:
+        execute_payloads.append(payload)
+        task = Task(
+            objective=payload["objective"],
+            target_url=payload["source"],
+            status=TaskStatus.QUEUED,
+            test_type=TaskTestType.API,
+            retry_count=0,
+            execution_log=json.dumps({}),
+            created_at=datetime.utcnow(),
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        return task
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+    monkeypatch.setattr(agent_plans, "_execute_run_payload", fake_execute)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={},
+            headers=headers,
+        ).json()
+        ready = client.post(
+            f"/api/v1/agent-plans/sessions/{created['id']}/intake",
+            json={"message": "Test API https://api.example.test/openapi.json."},
+            headers=headers,
+        )
+        created_run = client.post(
+            f"/api/v1/agent-plans/{created['id']}/create-run",
+            headers=headers,
+        )
+        legacy_execute = client.post(
+            f"/api/v1/agent-plans/{created['id']}/execute",
+            headers=headers,
+        )
+
+    assert ready.status_code == 200
+    assert created_run.status_code == 200
+    assert legacy_execute.status_code == 200
+    assert legacy_execute.json()["run"]["id"] == created_run.json()["run_id"]
+    assert legacy_execute.json()["session"]["executed_run_id"] == created_run.json()["run_id"]
+    assert len(execute_payloads) == 1
+
+
+def test_create_run_before_ready_returns_400() -> None:
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={"title": "Not ready create run"},
+            headers=headers,
+        ).json()
+        response = client.post(
+            f"/api/v1/agent-plans/{created['id']}/create-run",
+            headers=headers,
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "No executable plan is ready"
+
+
+def test_create_run_hides_other_user_session() -> None:
+    other_username = f"plan-create-run-user-{uuid.uuid4().hex}"
+    other_password = "other-password"
+
+    with TestClient(app) as client:
+        asyncio.run(_create_test_user(other_username, other_password))
+        token = _token(client)
+        other_token = _login_token(client, other_username, other_password)
+        headers = {"Authorization": f"Bearer {token}"}
+        other_headers = {"Authorization": f"Bearer {other_token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={"title": "Owner create run plan"},
+            headers=headers,
+        ).json()
+        response = client.post(
+            f"/api/v1/agent-plans/{created['id']}/create-run",
+            headers=other_headers,
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Planning session not found"
 
 
 def test_execute_current_plan_uses_run_creation_path(monkeypatch) -> None:

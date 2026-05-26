@@ -14,7 +14,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="flex min-h-screen bg-[#f4f6f5] text-gray-900 font-sans">
+  <div class="flex min-h-screen bg-[#F5F7FB] text-gray-900 font-sans">
     <AppSidebar />
     <main class="flex-1 flex min-w-0 flex-col h-screen overflow-hidden">
       <AppHeader />

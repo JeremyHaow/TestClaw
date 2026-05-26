@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, type Component } from 'vue'
 import api from '../lib/api'
 import { useToast } from '../composables/useToast'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
@@ -7,12 +7,18 @@ import EmptyState from '../components/EmptyState.vue'
 import StyledSelect from '../components/StyledSelect.vue'
 import {
   Bot,
+  BrainCircuit,
+  Code2,
+  Compass,
   Edit3,
+  Eye,
   KeyRound,
   Plus,
   Save,
   Search,
   Server,
+  ShieldCheck,
+  Sparkles,
   Trash2,
   X,
   Zap,
@@ -44,6 +50,8 @@ interface ProviderGroup {
   models: ProviderModel[]
 }
 
+type ProviderRole = 'planner' | 'coder' | 'vision'
+
 const toast = useToast()
 const loading = ref(false)
 const items = ref<ProviderModel[]>([])
@@ -70,6 +78,74 @@ const modelForm = reactive({
   system_prompt: '',
   agent_type: '',
 })
+
+const roleDefinitions: Array<{
+  role: ProviderRole
+  title: string
+  description: string
+  emptyHint: string
+  icon: Component
+  accentClass: string
+}> = [
+  {
+    role: 'planner',
+    title: 'Planner Model',
+    description: '用于生成测试计划和用例',
+    emptyHint: '未配置 Planner 默认模型',
+    icon: BrainCircuit,
+    accentClass: 'bg-emerald-50 text-emerald-700',
+  },
+  {
+    role: 'coder',
+    title: 'Executor(Coder) Model',
+    description: '用于生成可执行脚本、断言和修复建议',
+    emptyHint: '未配置 Executor(Coder) 默认模型',
+    icon: Code2,
+    accentClass: 'bg-blue-50 text-blue-700',
+  },
+  {
+    role: 'vision',
+    title: 'Vision Model',
+    description: '用于读取截图、页面状态和视觉证据',
+    emptyHint: '未配置 Vision 默认模型',
+    icon: Eye,
+    accentClass: 'bg-indigo-50 text-indigo-700',
+  },
+]
+
+const agentStrategyModes: Array<{
+  name: string
+  policy: string
+  description: string
+  items: string[]
+  icon: Component
+  accentClass: string
+}> = [
+  {
+    name: '保守模式',
+    policy: 'safe_read_only',
+    description: '默认任务边界，适合未知系统和真实环境。',
+    items: ['默认只读', '不执行删除/修改', '失败后优先询问用户'],
+    icon: ShieldCheck,
+    accentClass: 'bg-emerald-50 text-emerald-700',
+  },
+  {
+    name: '平衡模式',
+    policy: 'safe_with_auth',
+    description: '适合有测试账号和可控测试数据的常规回归。',
+    items: ['允许临时测试数据', '自动重试', '自动补充边界用例'],
+    icon: Sparkles,
+    accentClass: 'bg-blue-50 text-blue-700',
+  },
+  {
+    name: '探索模式',
+    policy: 'write_allowed',
+    description: '适合隔离测试环境下的主动路径发现。',
+    items: ['更主动发现路径', '更高工具调用次数', '适合测试环境'],
+    icon: Compass,
+    accentClass: 'bg-amber-50 text-amber-700',
+  },
+]
 
 function providerKeyFor(item: Pick<ProviderModel, 'name' | 'type' | 'base_url' | 'api_key_masked'>) {
   return [
@@ -106,6 +182,17 @@ const selectedProvider = computed(() => {
   if (!providerGroups.value.length) return null
   return providerGroups.value.find((group) => group.key === selectedProviderKey.value) || providerGroups.value[0]
 })
+
+function defaultModelForRole(role: ProviderRole) {
+  if (role === 'planner') return items.value.find((item) => item.is_default_planner) || null
+  if (role === 'coder') return items.value.find((item) => item.is_default_coder) || null
+  return items.value.find((item) => item.is_default_vision) || null
+}
+
+const agentRoleCards = computed(() => roleDefinitions.map((role) => ({
+  ...role,
+  model: defaultModelForRole(role.role),
+})))
 
 function resetModelForm() {
   const firstModel = items.value.length === 0
@@ -305,6 +392,11 @@ function roleLabels(item: ProviderModel) {
   return roles
 }
 
+function modelStatusLabel(model: ProviderModel | null) {
+  if (!model) return '未配置'
+  return model.is_active ? 'Active' : 'Inactive'
+}
+
 onMounted(fetchItems)
 </script>
 
@@ -328,11 +420,130 @@ onMounted(fetchItems)
 
     <LoadingSpinner v-if="loading" text="加载模型列表中..." />
 
-    <div v-else-if="!providerGroups.length" class="rounded-lg border border-gray-200 bg-white">
-      <EmptyState :icon="Bot" title="还没有 AI Provider" description="新增 Provider 并添加第一个模型后，Agent 运行预检才能选择可用模型。" />
-    </div>
+    <template v-else>
+      <section class="grid gap-3 lg:grid-cols-3">
+        <article
+          v-for="role in agentRoleCards"
+          :key="role.role"
+          data-testid="provider-role-card"
+          class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm"
+        >
+          <div class="flex items-start gap-3">
+            <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg" :class="role.accentClass">
+              <component :is="role.icon" :size="18" />
+            </div>
+            <div class="min-w-0 flex-1">
+              <h3 class="text-sm font-semibold text-gray-950">{{ role.title }}</h3>
+              <p class="mt-1 text-xs leading-5 text-gray-500">{{ role.description }}</p>
+            </div>
+          </div>
 
-    <div v-else class="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
+          <div class="mt-4 space-y-2 border-t border-gray-100 pt-3 text-xs">
+            <div class="flex items-center justify-between gap-3">
+              <span class="text-gray-400">当前</span>
+              <span class="min-w-0 truncate font-mono font-semibold text-gray-800">
+                {{ role.model?.model_name || role.emptyHint }}
+              </span>
+            </div>
+            <div class="flex items-center justify-between gap-3">
+              <span class="text-gray-400">状态</span>
+              <span
+                class="rounded-full border px-2 py-0.5 text-[10px] font-bold"
+                :class="role.model?.is_active ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-700'"
+              >
+                {{ modelStatusLabel(role.model) }}
+              </span>
+            </div>
+            <div v-if="role.model" class="truncate text-[11px] text-gray-400">
+              {{ role.model.name }} / {{ role.model.type }}
+            </div>
+          </div>
+
+          <div class="mt-4 flex flex-wrap items-center gap-2">
+            <template v-if="role.model">
+              <button
+                type="button"
+                class="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-bold text-gray-700 transition-all hover:border-gray-300 hover:bg-gray-50"
+                @click="setDefault(role.model.id, role.role)"
+              >
+                设为默认
+              </button>
+              <button
+                type="button"
+                :disabled="testingId === role.model.id"
+                class="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-700 transition-all hover:bg-amber-100 disabled:opacity-50"
+                @click="testProvider(role.model.id)"
+              >
+                <Zap :size="13" /> 测试连接
+              </button>
+              <button
+                type="button"
+                class="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-bold text-blue-700 transition-all hover:bg-blue-100"
+                @click="startEdit(role.model)"
+              >
+                <Edit3 :size="13" /> 编辑
+              </button>
+            </template>
+            <button
+              v-else
+              type="button"
+              class="inline-flex items-center gap-1.5 rounded-lg bg-gray-950 px-3 py-1.5 text-xs font-bold text-white transition-all hover:bg-gray-800"
+              @click="openNewProvider"
+            >
+              <Plus :size="13" /> 配置模型
+            </button>
+          </div>
+        </article>
+      </section>
+
+      <section class="space-y-3">
+        <div class="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h3 class="text-sm font-bold text-gray-900">Agent 策略</h3>
+            <p class="mt-1 text-xs text-gray-500">
+              策略在智能计划和任务委派中落到 api_execution_policy，本页只展示行为边界，不伪造未持久化的全局开关。
+            </p>
+          </div>
+          <span class="rounded-full border border-gray-200 bg-white px-3 py-1 text-[10px] font-bold uppercase text-gray-500">
+            Strategy Modes
+          </span>
+        </div>
+        <div class="grid gap-3 lg:grid-cols-3">
+          <article
+            v-for="mode in agentStrategyModes"
+            :key="mode.name"
+            data-testid="agent-strategy-card"
+            class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm"
+          >
+            <div class="flex items-start gap-3">
+              <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg" :class="mode.accentClass">
+                <component :is="mode.icon" :size="18" />
+              </div>
+              <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                  <h4 class="text-sm font-semibold text-gray-950">{{ mode.name }}</h4>
+                  <span class="rounded border border-gray-200 bg-gray-50 px-2 py-0.5 font-mono text-[10px] font-bold text-gray-500">
+                    {{ mode.policy }}
+                  </span>
+                </div>
+                <p class="mt-1 text-xs leading-5 text-gray-500">{{ mode.description }}</p>
+              </div>
+            </div>
+            <ul class="mt-4 space-y-1.5 border-t border-gray-100 pt-3 text-xs text-gray-600">
+              <li v-for="item in mode.items" :key="item" class="flex gap-2">
+                <span class="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-gray-300" />
+                <span>{{ item }}</span>
+              </li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <div v-if="!providerGroups.length" class="rounded-lg border border-gray-200 bg-white">
+        <EmptyState :icon="Bot" title="还没有 AI Provider" description="新增 Provider 并添加第一个模型后，Agent 运行预检才能选择可用模型。" />
+      </div>
+
+      <div v-else class="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
       <aside class="space-y-3 lg:sticky lg:top-4 lg:max-h-[calc(100vh-9rem)] lg:overflow-y-auto">
         <div class="rounded-lg border border-gray-200 bg-white p-3 shadow-sm">
           <div class="mb-3 flex items-center justify-between">
@@ -447,7 +658,8 @@ onMounted(fetchItems)
           </table>
         </div>
       </section>
-    </div>
+      </div>
+    </template>
 
     <div v-if="showModelForm" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div class="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-xl">

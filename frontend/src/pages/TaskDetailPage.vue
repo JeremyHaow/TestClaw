@@ -159,7 +159,7 @@ watch(() => route.params.id, (id) => { if (id) loadTask(String(id)) })
         >
           <div class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold shrink-0"
             :class="step.status === 'done' ? 'bg-emerald-600 text-white' : step.status === 'failed' ? 'bg-red-600 text-white' : 'bg-gray-200 text-gray-600'">
-            {{ idx + 1 }}
+            {{ Number(idx) + 1 }}
           </div>
           <div class="flex-1">
             <div class="text-sm font-bold text-gray-900">{{ step.node }}</div>
@@ -179,7 +179,7 @@ watch(() => route.params.id, (id) => { if (id) loadTask(String(id)) })
           <div class="text-xs text-gray-500 mt-1">类型: {{ plan.test_type }} | 阶段: {{ plan.phase }}</div>
           <ul v-if="plan.steps?.length" class="mt-3 space-y-2">
             <li v-for="(s, i) in plan.steps" :key="i" class="text-xs flex gap-2">
-              <span class="text-blue-500 font-mono font-bold text-[9px] mt-0.5">{{ i + 1 }}</span>
+              <span class="text-blue-500 font-mono font-bold text-[9px] mt-0.5">{{ Number(i) + 1 }}</span>
               <span class="text-gray-600">{{ s }}</span>
             </li>
           </ul>
@@ -197,7 +197,7 @@ watch(() => route.params.id, (id) => { if (id) loadTask(String(id)) })
             <span class="text-[10px] font-mono text-gray-400">{{ tc.category }} / {{ tc.priority }}</span>
           </div>
           <ul class="mt-2 space-y-1">
-            <li v-for="(s, i) in tc.steps" :key="i" class="text-xs text-gray-500">{{ i + 1 }}. {{ s }}</li>
+            <li v-for="(s, i) in tc.steps" :key="i" class="text-xs text-gray-500">{{ Number(i) + 1 }}. {{ s }}</li>
           </ul>
         </div>
       </div>

@@ -42,6 +42,7 @@ def test_runs_list_uses_lightweight_payload_with_filters_and_pagination() -> Non
     now = datetime.utcnow()
     newest_failed_id = str(uuid.uuid4())
     older_failed_id = str(uuid.uuid4())
+    successful_ui_id = str(uuid.uuid4())
     heavy_secret = "list-heavy-secret"
     heavy_log = {
         "last_error": f"Authorization: Bearer {heavy_secret}",
@@ -78,7 +79,7 @@ def test_runs_list_uses_lightweight_payload_with_filters_and_pagination() -> Non
                         "updated_at": now - timedelta(minutes=9),
                     },
                     {
-                        "id": str(uuid.uuid4()),
+                        "id": successful_ui_id,
                         "objective": "successful ui",
                         "target_url": "https://app.example.test",
                         "status": TaskStatus.SUCCEEDED,
@@ -117,6 +118,41 @@ def test_runs_list_uses_lightweight_payload_with_filters_and_pagination() -> Non
         assert next_page.status_code == 200
         assert next_page.headers["x-total-count"] == "2"
         assert next_page.json()[0]["id"] == older_failed_id
+
+        search_response = client.get(
+            "/api/v1/runs",
+            params={"page": 1, "page_size": 10, "search": "older"},
+            headers=headers,
+        )
+        assert search_response.status_code == 200
+        assert search_response.headers["x-total-count"] == "1"
+        assert search_response.json()[0]["id"] == older_failed_id
+
+        window_response = client.get(
+            "/api/v1/runs",
+            params={
+                "page": 1,
+                "page_size": 10,
+                "created_after": (now - timedelta(minutes=6)).isoformat(),
+            },
+            headers=headers,
+        )
+        assert window_response.status_code == 200
+        assert window_response.headers["x-total-count"] == "2"
+        assert {item["id"] for item in window_response.json()} == {newest_failed_id, successful_ui_id}
+
+        before_response = client.get(
+            "/api/v1/runs",
+            params={
+                "page": 1,
+                "page_size": 10,
+                "created_before": (now - timedelta(minutes=6)).isoformat(),
+            },
+            headers=headers,
+        )
+        assert before_response.status_code == 200
+        assert before_response.headers["x-total-count"] == "1"
+        assert before_response.json()[0]["id"] == older_failed_id
 
         detail = client.get(f"/api/v1/runs/{newest_failed_id}", headers=headers)
         assert detail.status_code == 200

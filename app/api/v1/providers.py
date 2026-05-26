@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, update
 
 from app.core.dependencies import CurrentUser, DbSession
+from app.core.redaction import redact_sensitive_text
 from app.core.security import decrypt_value, encrypt_value, mask_secret
 from app.models.llm_provider import LLMProvider, ProviderType
 from app.schemas.provider import ProviderCreate, ProviderRead, ProviderUpdate
@@ -148,7 +149,7 @@ async def test_provider(provider_id: str, db: DbSession, _: CurrentUser):
             "provider_id": provider_id,
             "status": "ok",
             "latency_ms": latency,
-            "model_response": str(resp.content)[:100],
+            "model_response": redact_sensitive_text(str(resp.content))[:100],
         }
     except Exception as e:
         latency = int((time.time() - start) * 1000)
@@ -156,7 +157,7 @@ async def test_provider(provider_id: str, db: DbSession, _: CurrentUser):
             "provider_id": provider_id,
             "status": "error",
             "latency_ms": latency,
-            "detail": str(e)[:200],
+            "detail": redact_sensitive_text(str(e))[:200],
         }
 
 

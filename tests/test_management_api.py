@@ -312,3 +312,51 @@ def test_provider_role_defaults_are_unique_on_create_and_update() -> None:
         finally:
             client.delete(f"/api/v1/providers/{second_id}", headers=headers)
             client.delete(f"/api/v1/providers/{first_id}", headers=headers)
+
+
+def test_provider_connection_test_redacts_sensitive_error_detail(monkeypatch) -> None:
+    provider_secret = "sk-provider-secret-redaction"
+    bearer_secret = "provider-bearer-token-redaction"
+    password_secret = "provider-password-redaction"
+
+    class FailingChatOpenAI:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def ainvoke(self, _: object) -> object:
+            raise RuntimeError(
+                f"upstream failed api_key={provider_secret} "
+                f"Authorization: Bearer {bearer_secret} password={password_secret}"
+            )
+
+    import langchain_openai
+
+    monkeypatch.setattr(langchain_openai, "ChatOpenAI", FailingChatOpenAI)
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        created = client.post(
+            "/api/v1/providers",
+            headers=headers,
+            json={
+                "name": f"provider-redaction-{uuid.uuid4()}",
+                "type": "openai",
+                "api_key": provider_secret,
+                "model_name": "gpt-4o-mini",
+            },
+        )
+        assert created.status_code == 200
+        provider_id = created.json()["id"]
+
+        try:
+            response = client.post(f"/api/v1/providers/{provider_id}/test", headers=headers)
+            assert response.status_code == 200
+            body = response.json()
+            assert body["status"] == "error"
+            detail = body["detail"]
+            assert provider_secret not in detail
+            assert bearer_secret not in detail
+            assert password_secret not in detail
+            assert REDACTED_VALUE in detail
+        finally:
+            client.delete(f"/api/v1/providers/{provider_id}", headers=headers)

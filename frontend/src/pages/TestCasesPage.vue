@@ -12,7 +12,6 @@ import StyledSelect from '../components/StyledSelect.vue'
 import {
   Check,
   CheckSquare,
-  Eye,
   FileCode,
   MinusSquare,
   Pencil,
@@ -22,6 +21,8 @@ import {
   Trash2,
   X,
 } from 'lucide-vue-next'
+import TestCaseAssetCard from '../components/assets/TestCaseAssetCard.vue'
+import { compactLines, redactSensitiveText } from '../lib/assetHandoff'
 
 const toast = useToast()
 const router = useRouter()
@@ -311,6 +312,38 @@ function previewText(item: any) {
   return steps.slice(0, 2).map(formatStep).join(' / ')
 }
 
+function compactCaseList(values: any, limit = 4) {
+  const items = Array.isArray(values) ? values : parseListText(arrayText(values))
+  return items.slice(0, limit).map((item: any, index: number) => `${index + 1}. ${formatStep(item)}`).join('；')
+}
+
+function useCaseForPlan(item: any) {
+  const runId = sourceRunId(item)
+  const context = compactLines([
+    '从 TestClaw 用例资产创建新测试计划。',
+    `用例：${item.title}`,
+    `类型：${caseType(item).toUpperCase()}`,
+    `优先级：${item.priority || 'P1'}`,
+    `来源：${sourceKind(item)}`,
+    runId ? `来源运行：${runId}` : '',
+    sourceProject(item) ? `目标/项目：${sourceProject(item)}` : '',
+    sourceSuiteNames(item).length ? `所属套件：${sourceSuiteNames(item).join(', ')}` : '',
+    `步骤：${compactCaseList(item.steps) || '未记录'}`,
+    `预期：${compactCaseList(item.expected) || '未记录'}`,
+    '请把该用例加入新计划，可扩展相邻场景；默认保持只读安全边界。',
+  ])
+  router.push({
+    path: '/agent-plan',
+    query: {
+      from: 'asset',
+      asset_type: 'test-case',
+      asset_id: item.id,
+      title: item.title,
+      context: redactSensitiveText(context),
+    },
+  })
+}
+
 watch([search, filterPriority, filterCategory], () => {
   page.value = 1
   fetchItems()
@@ -381,97 +414,37 @@ onMounted(async () => {
         <EmptyState :icon="FileCode" title="暂无用例" description="还没有任何测试用例，请稍后再试或调整筛选条件。" />
       </template>
       <template v-else>
-        <div class="max-h-[calc(100vh-18rem)] overflow-auto">
-          <table class="w-full text-left text-sm">
-            <thead>
-              <tr class="border-b border-gray-100 bg-gray-50 text-gray-500">
-                <th class="w-10 px-4 py-3">
-                  <button
-                    type="button"
-                    :aria-label="selectAllLabel"
-                    :title="selectAllLabel"
-                    @click="toggleSelectAll"
-                    class="text-gray-400 transition-colors hover:text-blue-600"
-                  >
-                    <CheckSquare v-if="allSelected" :size="16" />
-                    <MinusSquare v-else-if="someSelected" :size="16" />
-                    <Square v-else :size="16" />
-                  </button>
-                </th>
-                <th class="px-4 py-3 text-[10px] font-bold uppercase tracking-widest">标题</th>
-                <th class="px-4 py-3 text-[10px] font-bold uppercase tracking-widest">归类</th>
-                <th class="px-4 py-3 text-[10px] font-bold uppercase tracking-widest">来源</th>
-                <th class="px-4 py-3 text-[10px] font-bold uppercase tracking-widest">套件</th>
-                <th class="px-4 py-3 text-right text-[10px] font-bold uppercase tracking-widest">操作</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-gray-100">
-              <tr v-for="item in items" :key="item.id" class="transition-colors hover:bg-gray-50" :class="{ 'bg-blue-50/40': selectedIds.has(item.id) }">
-                <td class="px-4 py-3">
-                  <button
-                    type="button"
-                    :aria-label="rowSelectLabel(item)"
-                    :title="rowSelectLabel(item)"
-                    @click="toggleSelect(item.id)"
-                    class="text-gray-400 transition-colors hover:text-blue-600"
-                  >
-                    <CheckSquare v-if="selectedIds.has(item.id)" :size="16" class="text-blue-600" />
-                    <Square v-else :size="16" />
-                  </button>
-                </td>
-                <td class="min-w-[260px] px-4 py-3">
-                  <div class="font-medium text-gray-900">{{ item.title }}</div>
-                  <div class="mt-1 max-w-md truncate text-xs text-gray-500">{{ previewText(item) }}</div>
-                </td>
-                <td class="px-4 py-3">
-                  <div class="flex flex-wrap gap-1.5">
-                    <span class="rounded px-2 py-0.5 text-[10px] font-bold uppercase"
-                      :class="caseType(item) === 'api' ? 'bg-blue-50 text-blue-700' : caseType(item) === 'ui' ? 'bg-indigo-50 text-indigo-700' : 'bg-gray-100 text-gray-600'">
-                      {{ caseType(item) }}
-                    </span>
-                    <span class="rounded border border-gray-200 bg-white px-2 py-0.5 text-[10px] font-bold uppercase text-gray-500">{{ item.category }}</span>
-                    <span class="rounded px-2 py-0.5 text-[10px] font-bold"
-                      :class="{
-                        'bg-red-100 text-red-700': item.priority === 'P0',
-                        'bg-orange-100 text-orange-700': item.priority === 'P1',
-                        'bg-yellow-100 text-yellow-700': item.priority === 'P2',
-                        'bg-gray-100 text-gray-600': item.priority === 'P3',
-                      }">
-                      {{ item.priority }}
-                    </span>
-                  </div>
-                </td>
-                <td class="max-w-[260px] px-4 py-3 text-xs text-gray-500">
-                  <div class="font-semibold text-gray-700">{{ sourceKind(item) }}</div>
-                  <div class="mt-1 truncate font-mono text-[11px] text-gray-400">{{ sourceDetail(item) }}</div>
-                  <div v-if="sourceRunId(item)" class="mt-1 truncate font-mono text-[11px] text-gray-400">run {{ sourceRunId(item).slice(0, 8) }}</div>
-                  <div v-if="sourceProject(item)" class="mt-1 truncate font-mono text-[11px] text-gray-400">{{ sourceProject(item) }}</div>
-                </td>
-                <td class="max-w-[220px] px-4 py-3">
-                  <div v-if="sourceSuiteNames(item).length" class="flex flex-wrap gap-1">
-                    <span v-for="suite in sourceSuiteNames(item).slice(0, 2)" :key="suite" class="max-w-[180px] truncate rounded border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700">
-                      {{ suite }}
-                    </span>
-                    <span v-if="sourceSuiteNames(item).length > 2" class="text-[10px] text-gray-400">+{{ sourceSuiteNames(item).length - 2 }}</span>
-                  </div>
-                  <span v-else class="text-xs text-gray-400">未入套件</span>
-                </td>
-                <td class="px-4 py-3 text-right">
-                  <div class="flex items-center justify-end gap-1">
-                    <button @click="openDetail(item)" class="rounded-lg p-1.5 text-gray-400 transition-all hover:bg-gray-100 hover:text-gray-700" title="查看详情">
-                      <Eye :size="14" />
-                    </button>
-                    <button @click="startEdit(item)" class="rounded-lg p-1.5 text-gray-400 transition-all hover:bg-blue-50 hover:text-blue-600" title="编辑">
-                      <Pencil :size="14" />
-                    </button>
-                    <button @click="confirmDelete = item.id" class="rounded-lg p-1.5 text-gray-400 transition-all hover:bg-red-50 hover:text-red-600" title="删除">
-                      <Trash2 :size="14" />
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+        <div class="flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 bg-gray-50 px-4 py-3">
+          <div class="flex items-center gap-3">
+            <button
+              type="button"
+              :aria-label="selectAllLabel"
+              :title="selectAllLabel"
+              @click="toggleSelectAll"
+              class="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-bold text-gray-600 transition-colors hover:border-blue-200 hover:text-blue-700"
+            >
+              <CheckSquare v-if="allSelected" :size="15" />
+              <MinusSquare v-else-if="someSelected" :size="15" />
+              <Square v-else :size="15" />
+              当前页
+            </button>
+            <span class="text-xs text-gray-500">卡片视图，当前页 {{ items.length }} 条</span>
+          </div>
+          <span class="font-mono text-xs text-gray-400">{{ selectedIds.size }} selected</span>
+        </div>
+        <div class="grid max-h-[calc(100vh-18rem)] gap-3 overflow-auto p-3 xl:grid-cols-2">
+          <TestCaseAssetCard
+            v-for="item in items"
+            :key="item.id"
+            :item="item"
+            :selected="selectedIds.has(item.id)"
+            :suite-names="sourceSuiteNames(item)"
+            @select="toggleSelect(item.id)"
+            @detail="openDetail(item)"
+            @plan="useCaseForPlan(item)"
+            @edit="startEdit(item)"
+            @delete="confirmDelete = item.id"
+          />
         </div>
         <Pagination :page="page" :page-size="pageSize" :total="total" @update:page="page = $event" />
       </template>
@@ -552,7 +525,7 @@ onMounted(async () => {
                 <h4 class="mb-2 text-xs font-bold uppercase tracking-widest text-gray-400">步骤</h4>
                 <div class="max-h-80 space-y-2 overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-3">
                   <div v-for="(step, index) in (detailItem.steps || [])" :key="index" class="grid grid-cols-[28px_minmax(0,1fr)] gap-2 text-sm">
-                    <span class="font-mono text-xs text-gray-400">{{ index + 1 }}</span>
+                    <span class="font-mono text-xs text-gray-400">{{ Number(index) + 1 }}</span>
                     <p class="whitespace-pre-wrap break-words text-gray-700">{{ formatStep(step) }}</p>
                   </div>
                   <p v-if="!(detailItem.steps || []).length" class="text-xs text-gray-400">未记录步骤</p>

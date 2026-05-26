@@ -168,6 +168,8 @@ await db.commit()
 - Environment list responses return masked variable values only.
 - Environment updates must preserve an existing encrypted value when the submitted value equals the current masked display value. This allows editing names/base URLs without replacing a secret with its mask.
 - Provider create/update and `/providers/{id}/set-default` must keep at most one active default model per role (`planner`, `coder`, `vision`). Duplicate role defaults can break runtime model lookup and make UI defaults misleading.
+- Provider connection tests must redact both success payload summaries and error details before returning them to the UI. Upstream provider errors may echo API keys, bearer tokens, passwords, or request bodies.
+- Asset pages may hand off document, environment, test-case, and quality-memory context to Agent Plan through route query parameters only after frontend redaction. Agent Plan must consume those query fields once, submit them through the normal planner path, and clear the consumed query keys. Environment handoff may include variable keys but never variable values.
 - UI actions must not display fake capabilities: do not show arbitrary headers for providers if the backend cannot store them, do not show a global environment run action without a base URL, and do not label knowledge as vector-ready unless `embedding_available=true`.
 
 ### 4. Validation & Error Matrix
@@ -177,15 +179,20 @@ await db.commit()
 - `PUT /knowledge/{id}` with blank content -> `400 content is required`.
 - `PUT /knowledge/{id}` when embedding provider is missing -> `200` with updated content and `embedding_available=false`.
 - `PUT /environments/{id}` with `variables.TOKEN` equal to the masked value returned by `GET /environments` -> keep the existing encrypted secret.
+- `/providers/{id}/test` upstream response contains `Bearer raw-token`, `api_key=raw-key`, or `password=raw-pass` -> response `model_response` / `detail` contains only redacted values.
+- Asset handoff query contains `from=asset`, `context=...`, and optional target/source metadata -> Agent Plan creates a normal session/turn, then removes those query keys.
 
 ### 5. Good/Base/Bad Cases
 
 - Good: a case asset table pages through filtered API rows, opens long steps in a detail panel, and uses backend totals for pagination.
 - Good: editing a knowledge entry updates the content and reports true vector status based on regenerated embedding.
 - Base: no embedding provider is configured; knowledge editing still works and the UI says no vector is available.
+- Base: an environment card sends `base_url` to Run Page as a UI run and sends only variable names to Agent Plan for planning context.
 - Bad: frontend paginates a full unbounded `/test-cases` response while claiming backend pagination.
 - Bad: saving an environment after editing only `base_url` stores `********1234` as the real token.
 - Bad: knowledge UI displays "Vector RAG ready" for rows where `embedding_available=false`.
+- Bad: Provider test returns raw upstream exception text or model output directly to the settings page.
+- Bad: Asset-to-plan handoff includes environment variable values, cookies, bearer tokens, or Playwright `fill/type` credential values in query params or planner messages.
 
 ### 6. Tests Required
 
@@ -194,6 +201,8 @@ await db.commit()
 - Regression: knowledge update succeeds without embeddings and reports `embedding_available=false`.
 - Regression: environment update preserves existing encrypted values when submitted values match the masked display value.
 - Regression: provider create/update with a role default clears conflicting defaults for that role.
+- Regression: provider connection-test responses redact provider error text and model response text.
+- Regression: asset handoff redacts secret-looking context, omits environment variable values, and Agent Plan consumes query context only once.
 - Frontend build/type-check: provider, environment, case asset, and knowledge pages compile against the real API contracts.
 
 ### 7. Wrong vs Correct
@@ -234,8 +243,82 @@ else:
 ## Migrations
 
 - Alembic for migrations: `alembic/versions/`
-- Auto-create tables on startup via `Base.metadata.create_all` in lifespan
+- SQLite local/test startup may auto-create tables via `Base.metadata.create_all` in lifespan.
+- Non-SQLite production databases must rely on Alembic migrations, not startup `create_all`.
 - Run migrations: `alembic upgrade head`
+
+## Scenario: Run Operational Schema Migration Boundary
+
+### 1. Scope / Trigger
+
+- Trigger: run timeline, intervention, tool-call, evidence, finding, target memory, artifact, and durable plan tables are added or changed.
+- Applies to SQLAlchemy models under `app/models/`, Alembic revisions under `alembic/versions/`, and startup migration behavior in `app/main.py`.
+- Purpose: keep local SQLite bootstrap convenient while ensuring PostgreSQL schema changes are captured by Alembic.
+
+### 2. Signatures
+
+- Startup guard:
+  ```python
+  def _should_create_all_on_startup(database_url: str) -> bool
+  ```
+- Revision chain:
+  ```text
+  0005_agent_planning_sessions -> 0006_run_operational_tables
+  ```
+- Operational tables:
+  ```text
+  agent_plans, run_events, run_interventions, run_tool_calls,
+  run_evidence, run_findings, target_memories, artifacts
+  ```
+
+### 3. Contracts
+
+- `app/main.py` may call `Base.metadata.create_all` only when the configured SQLAlchemy URL driver starts with `sqlite`.
+- PostgreSQL and other non-SQLite deployments must fail fast if Alembic migrations have not been applied; startup must not silently create or drift production tables.
+- New persistent tables need both SQLAlchemy metadata coverage and an Alembic revision after the current head.
+- Run operational tables use `String(36)` ids, portable `JSON`, `DateTime` timestamps, and indexes on `run_id`, `(run_id, sequence)`, or `target_key` as appropriate.
+- Existing plan session/message tables are `agent_planning_sessions` and `agent_planning_messages`; do not add duplicate `agent_plan_sessions` or `agent_plan_messages` tables.
+- Existing `tasks` / `test_runs` remain the compatible run storage until a separate migration explicitly introduces a first-class `runs` table.
+
+### 4. Validation & Error Matrix
+
+- SQLite local/test URL -> lifespan may run `Base.metadata.create_all`.
+- PostgreSQL URL -> lifespan skips `Base.metadata.create_all`; Alembic is required.
+- Missing operational table in metadata -> migration/model source check fails.
+- Missing operational table in revision source -> migration source check fails.
+- Duplicate plan-session table name in a new revision -> migration source check fails.
+
+### 5. Good/Base/Bad Cases
+
+- Good: add a model, import it from `app/models/__init__.py`, add an idempotent Alembic revision, and test metadata plus migration source.
+- Base: run events are persisted against `tasks.id` as `run_id` without a foreign key to avoid SQLite/PostgreSQL churn during the compatibility phase.
+- Bad: rely on `Base.metadata.create_all` to create PostgreSQL production tables.
+- Bad: add a new `runs` table opportunistically while runtime still uses `tasks` for run identity.
+
+### 6. Tests Required
+
+- Source: migration file exists, has the expected `down_revision`, and references every new table.
+- Metadata: `Base.metadata.tables` includes every operational table after importing `app.models`.
+- Source: `Base.metadata.create_all` is guarded by SQLite URL detection.
+- Regression: existing run stream tests still persist and read `run_events`.
+- Smoke: when practical, `alembic upgrade head` passes against a fresh SQLite database.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+async with engine.begin() as connection:
+    await connection.run_sync(Base.metadata.create_all)
+```
+
+#### Correct
+
+```python
+if _should_create_all_on_startup(settings.DATABASE_URL):
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+```
 
 ## Naming Conventions
 

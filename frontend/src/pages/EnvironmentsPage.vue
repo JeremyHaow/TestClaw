@@ -2,11 +2,13 @@
 import { onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '../lib/api'
-import { Copy, Globe, Pencil, Play, Plus, Shield, Trash2, X } from 'lucide-vue-next'
+import { Globe, Plus, X } from 'lucide-vue-next'
 import { useToast } from '../composables/useToast'
 import EmptyState from '../components/EmptyState.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import EnvironmentAssetCard from '../components/assets/EnvironmentAssetCard.vue'
+import { compactLines, redactSensitiveText } from '../lib/assetHandoff'
 
 interface KeyValue {
   key: string
@@ -49,14 +51,6 @@ function variablesToObject(): Record<string, string> {
 function objectToVariables(obj: Record<string, any>): KeyValue[] {
   if (!obj || typeof obj !== 'object') return []
   return Object.entries(obj).map(([key, value]) => ({ key, value: String(value) }))
-}
-
-function maskedValue(value: any) {
-  const text = String(value ?? '')
-  if (!text) return ''
-  if (text.includes('*')) return text
-  if (text.length <= 4) return '*'.repeat(text.length)
-  return `${'*'.repeat(Math.min(text.length - 4, 12))}${text.slice(-4)}`
 }
 
 function addVariable() {
@@ -161,11 +155,38 @@ function startEnvironmentRun(item: any) {
   router.push({
     path: '/run',
     query: {
-      test_type: 'auto',
       base_url: item.base_url,
       source: item.base_url,
-      objective: `在「${item.name}」环境执行 API/UI 冒烟与回归检查。`,
-      setup_instructions: `使用测试环境「${item.name}」。变量已在环境管理中维护，运行日志只显示脱敏值。${item.is_production ? '这是生产环境，保持安全只读策略。' : ''}`,
+      test_type: 'ui',
+      objective: `在「${item.name}」环境执行页面可达性、关键入口和安全边界冒烟检查。`,
+      setup_instructions: `使用测试环境「${item.name}」。变量已在测试环境资产中维护，运行日志只显示脱敏值。${item.is_production ? '这是生产环境，保持安全只读策略。' : ''}`,
+    },
+  })
+}
+
+function environmentVariableKeys(item: any) {
+  return Object.keys(item?.variables || {}).slice(0, 12)
+}
+
+function useEnvironmentForPlan(item: any) {
+  const variableKeys = environmentVariableKeys(item)
+  const context = compactLines([
+    '从 TestClaw 测试环境资产创建新测试计划。',
+    `环境：${item.name || '未命名环境'}`,
+    item.base_url ? `Base URL：${item.base_url}` : 'Base URL：待补充',
+    `默认策略：${item.is_production ? '生产环境，安全只读' : '测试环境，默认只读'}`,
+    `变量键：${variableKeys.length ? variableKeys.join(', ') : '无'}`,
+    '变量值不进入计划上下文；如需要凭证，请在计划模式中重新提供并由系统脱敏。',
+    '建议范围：先做可达性与鉴权边界确认，再执行 API/UI 冒烟或回归检查。',
+  ])
+  router.push({
+    path: '/agent-plan',
+    query: {
+      from: 'asset',
+      asset_type: 'environment',
+      asset_id: item.id,
+      title: item.name || '测试环境',
+      context: redactSensitiveText(context),
     },
   })
 }
@@ -249,60 +270,17 @@ onMounted(fetchItems)
         </div>
         <LoadingSpinner v-if="loading" text="加载中..." />
         <EmptyState v-else-if="!items.length" :icon="Globe" title="暂无环境配置" description="创建一个包含 Base URL 的环境后，可以直接带入运行页。" />
-        <div v-else class="max-h-[calc(100vh-260px)] divide-y divide-gray-100 overflow-y-auto">
-          <div v-for="item in items" :key="item.id" class="p-5 transition-colors hover:bg-gray-50">
-            <div class="flex flex-wrap items-start justify-between gap-3">
-              <div class="min-w-0">
-                <div class="flex flex-wrap items-center gap-2">
-                  <div class="rounded-lg p-2" :class="item.is_production ? 'bg-amber-50 text-amber-600' : 'bg-blue-50 text-blue-600'">
-                    <Globe :size="16" />
-                  </div>
-                  <div class="min-w-0">
-                    <div class="truncate font-bold text-gray-900">{{ item.name }}</div>
-                    <div class="truncate text-xs font-mono text-gray-400">{{ item.base_url || '未配置 Base URL' }}</div>
-                  </div>
-                  <span v-if="item.is_production" class="inline-flex items-center gap-1 rounded border border-amber-100 bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-700">
-                    <Shield :size="11" /> PROD
-                  </span>
-                </div>
-              </div>
-              <div class="flex flex-wrap items-center gap-1.5">
-                <button
-                  v-if="item.base_url"
-                  @click="startEnvironmentRun(item)"
-                  class="inline-flex items-center gap-1.5 rounded-lg bg-gray-950 px-3 py-1.5 text-xs font-bold text-white transition-all hover:bg-gray-800"
-                >
-                  <Play :size="13" /> 用于运行
-                </button>
-                <button
-                  v-else
-                  @click="startEdit(item)"
-                  class="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-700 transition-all hover:bg-amber-100"
-                >
-                  <Pencil :size="13" /> 补充 Base URL
-                </button>
-                <button @click="startEdit(item)" class="rounded-lg p-1.5 text-gray-400 transition-all hover:bg-blue-50 hover:text-blue-600" title="编辑">
-                  <Pencil :size="14" />
-                </button>
-                <button @click="copyEnvironment(item)" class="rounded-lg p-1.5 text-gray-400 transition-all hover:bg-emerald-50 hover:text-emerald-600" title="复制结构">
-                  <Copy :size="14" />
-                </button>
-                <button @click="confirmDelete(item)" class="rounded-lg p-1.5 text-gray-400 transition-all hover:bg-red-50 hover:text-red-500" title="删除">
-                  <Trash2 :size="14" />
-                </button>
-              </div>
-            </div>
-
-            <div v-if="item.variables && Object.keys(item.variables).length" class="mt-4 max-h-28 overflow-y-auto rounded-lg border border-gray-100 bg-gray-50 p-3">
-              <div v-for="(val, key) in item.variables" :key="key" class="grid grid-cols-[minmax(90px,160px)_minmax(0,1fr)] gap-2 py-0.5 text-xs font-mono">
-                <span class="truncate font-bold text-gray-400">{{ key }}</span>
-                <span class="truncate text-gray-600">{{ maskedValue(val) }}</span>
-              </div>
-            </div>
-            <div v-else class="mt-4 rounded-lg border border-dashed border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-400">
-              未配置变量
-            </div>
-          </div>
+        <div v-else class="max-h-[calc(100vh-260px)] space-y-3 overflow-y-auto p-3">
+          <EnvironmentAssetCard
+            v-for="item in items"
+            :key="item.id"
+            :item="item"
+            @run="startEnvironmentRun(item)"
+            @plan="useEnvironmentForPlan(item)"
+            @edit="startEdit(item)"
+            @copy="copyEnvironment(item)"
+            @delete="confirmDelete(item)"
+          />
         </div>
       </section>
     </div>

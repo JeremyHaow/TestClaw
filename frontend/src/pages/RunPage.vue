@@ -4,10 +4,15 @@ import { useRoute, useRouter } from 'vue-router'
 import api from '../lib/api'
 import { useToast } from '../composables/useToast'
 import StyledSelect from '../components/StyledSelect.vue'
+import RunAuthPreflightCard from '../components/run/RunAuthPreflightCard.vue'
+import RunHandoffPreview from '../components/run/RunHandoffPreview.vue'
+import RunMissionCard from '../components/run/RunMissionCard.vue'
+import RunModeSelector from '../components/run/RunModeSelector.vue'
+import RunPolicySelector from '../components/run/RunPolicySelector.vue'
+import RunPreflightStatusCard from '../components/run/RunPreflightStatusCard.vue'
 import {
   AlertTriangle,
   Bot,
-  CheckCircle2,
   FileJson,
   Globe,
   KeyRound,
@@ -914,140 +919,34 @@ onMounted(() => {
 
     <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
       <section class="space-y-4">
-        <div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
-          <div class="mb-5 flex items-center justify-between gap-3">
-            <div>
-              <h3 class="text-sm font-bold text-gray-900">任务委派</h3>
-              <p class="mt-1 text-xs text-gray-500">告诉智能体要测试什么，以及哪些行为被允许。</p>
-            </div>
-            <span class="rounded bg-gray-100 px-2 py-1 text-[10px] font-bold text-gray-500">{{ localInputType }}</span>
-          </div>
-
-          <div class="space-y-5">
-            <div>
-              <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">测试任务</label>
-              <textarea
-                v-model="form.objective"
-                rows="3"
-                placeholder="例如：验证登录、核心导航、搜索筛选和异常输入，不要删除真实数据。"
-                class="w-full resize-none rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm outline-none transition-all focus:border-blue-500 focus:bg-white"
-                @input="resetPreflight"
-              />
-            </div>
-
-            <div>
-              <div v-if="isApiMode" class="rounded-lg border border-gray-200 bg-gray-50 p-3">
-                <div class="mb-3 flex items-center justify-between gap-3">
-                  <label class="text-xs font-bold uppercase text-gray-500">API 文档</label>
-                  <button
-                    type="button"
-                    @click="router.push('/documents')"
-                    class="shrink-0 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-[11px] font-bold text-gray-700 transition-all hover:border-gray-300 hover:bg-gray-50"
-                  >
-                    接口文档
-                  </button>
-                </div>
-                <template v-if="documents.length || documentsLoading">
-                  <StyledSelect
-                    v-model="selectedDocumentId"
-                    :disabled="documentsLoading || !documents.length"
-                    @change="handleDocumentSelection"
-                  >
-                    <option value="" disabled>{{ documentsLoading ? '加载已保存接口文档...' : '请选择已导入接口文档' }}</option>
-                    <option
-                      v-for="doc in documents"
-                      :key="doc.id"
-                      :value="doc.id"
-                    >
-                      {{ documentDisplayName(doc) }} · {{ documentEndpointCount(doc) }} endpoints
-                    </option>
-                  </StyledSelect>
-                  <div v-if="selectedDocument" class="mt-3 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs">
-                    <div class="flex flex-wrap items-center justify-between gap-2">
-                      <span class="font-bold text-gray-950">{{ documentDisplayName(selectedDocument) }}</span>
-                      <span class="font-bold text-emerald-700">{{ documentEndpointCount(selectedDocument) }} endpoints</span>
-                    </div>
-                    <div class="mt-2 flex flex-wrap gap-2 text-[11px] font-bold text-emerald-700">
-                      <span class="rounded border border-emerald-100 bg-emerald-50 px-2 py-1">来源：已保存接口文档</span>
-                      <span class="rounded border border-emerald-100 bg-emerald-50 px-2 py-1">格式：{{ selectedDocument.format || 'openapi' }}</span>
-                    </div>
-                  </div>
-                  <p v-else class="mt-2 text-xs leading-5 text-gray-600">
-                    API 测试只从已保存接口文档中选择；新增、粘贴 URL 或导入原文请到“接口文档”页面完成。
-                  </p>
-                </template>
-                <div v-else class="rounded-lg border border-dashed border-gray-300 bg-white px-4 py-4 text-sm text-gray-700">
-                  <div class="font-bold">暂无已保存接口文档</div>
-                  <p class="mt-1 text-xs leading-5 text-gray-500">请先在“接口文档”页面导入 OpenAPI/Swagger 文档，再回到这里选择运行。</p>
-                  <button
-                    type="button"
-                    @click="router.push('/documents')"
-                    class="mt-3 rounded-lg bg-gray-950 px-3 py-2 text-xs font-bold text-white transition-all hover:bg-gray-800"
-                  >
-                    去导入接口文档
-                  </button>
-                </div>
-              </div>
-
-              <template v-else>
-                <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">目标入口 / 页面 URL</label>
-                <textarea
-                  v-model="form.source"
-                  rows="5"
-                  placeholder="粘贴要巡检的网页 URL..."
-                  class="w-full resize-none rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 font-mono text-sm outline-none transition-all focus:border-blue-500 focus:bg-white"
-                  @input="handleSourceInput"
-                />
-                <div class="mt-3 flex flex-wrap gap-2">
-                  <button
-                    @click="setExample('https://httpbin.org', '对公开页面做基础可达性和页面结构巡检。', 'ui')"
-                    class="flex items-center gap-1.5 rounded-lg bg-gray-100 px-3 py-1.5 text-xs font-bold text-gray-600 transition-all hover:bg-gray-200"
-                  >
-                    <Globe :size="13" /> UI 巡检示例
-                  </button>
-                </div>
-              </template>
-            </div>
-
-            <div>
-              <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">测试模式</label>
-              <div class="grid gap-3 md:grid-cols-2">
-                <button
-                  v-for="mode in modes"
-                  :key="mode.value"
-                  @click="selectTestType(mode.value)"
-                  class="min-w-0 rounded-lg border p-4 text-left transition-all"
-                  :class="form.test_type === mode.value ? 'border-blue-500 bg-blue-50 text-blue-800' : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300'"
-                >
-                  <div class="mb-1 flex items-center gap-2">
-                    <component :is="mode.icon" :size="16" />
-                    <span class="text-sm font-bold">{{ mode.label }}</span>
-                  </div>
-                  <p class="text-xs leading-5 text-gray-500">{{ mode.desc }}</p>
-                </button>
-              </div>
-            </div>
-
-            <div v-if="isApiMode">
-              <label class="mb-2 block text-xs font-bold uppercase tracking-widest text-gray-400">API 执行策略</label>
-              <div class="grid gap-3 md:grid-cols-3">
-                <button
-                  v-for="policy in apiPolicies"
-                  :key="policy.value"
-                  @click="form.api_execution_policy = policy.value; resetPreflight()"
-                  class="min-w-0 rounded-lg border p-3 text-left transition-all"
-                  :class="form.api_execution_policy === policy.value ? 'border-emerald-500 bg-emerald-50 text-emerald-800' : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300'"
-                >
-                  <div class="text-sm font-bold">{{ policy.label }}</div>
-                  <p class="mt-1 text-xs leading-5 text-gray-500">{{ policy.desc }}</p>
-                </button>
-              </div>
-            </div>
-            <div v-else class="rounded-lg border border-violet-100 bg-violet-50 px-4 py-3 text-sm text-violet-800">
-              UI 巡检会使用浏览器执行路径、截图证据和登录前置说明；API 写入策略不会应用到本次运行。
-            </div>
-          </div>
-        </div>
+        <RunMissionCard
+          v-model:selected-document-id="selectedDocumentId"
+          :form="form"
+          :is-api-mode="isApiMode"
+          :local-input-type="localInputType"
+          :documents="documents"
+          :documents-loading="documentsLoading"
+          :selected-document="selectedDocument"
+          :document-display-name="documentDisplayName"
+          :document-endpoint-count="documentEndpointCount"
+          @reset-preflight="resetPreflight"
+          @document-selection="handleDocumentSelection"
+          @source-input="handleSourceInput"
+          @navigate-documents="router.push('/documents')"
+          @set-example="setExample"
+        >
+          <RunModeSelector
+            :model-value="form.test_type"
+            :modes="modes"
+            @update:model-value="selectTestType"
+          />
+          <RunPolicySelector
+            :model-value="form.api_execution_policy"
+            :is-api-mode="isApiMode"
+            :api-policies="apiPolicies"
+            @update:model-value="form.api_execution_policy = $event; resetPreflight()"
+          />
+        </RunMissionCard>
 
         <div class="grid gap-4 lg:grid-cols-2">
           <div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
@@ -1116,17 +1015,7 @@ onMounted(() => {
           </div>
         </div>
 
-        <div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
-          <div class="mb-4 flex items-start gap-3">
-            <div class="flex items-center gap-2">
-              <KeyRound :size="17" class="text-gray-500" />
-              <div>
-                <h3 class="text-sm font-bold text-gray-900">鉴权预检</h3>
-                <p class="mt-1 text-xs leading-5 text-gray-500">接口测试和 UI 测试都会先确认鉴权路径，再启动任务。</p>
-              </div>
-            </div>
-          </div>
-
+        <RunAuthPreflightCard>
           <div class="rounded-lg border border-blue-100 bg-blue-50/70 px-4 py-3">
             <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div class="flex min-w-0 items-start gap-3">
@@ -1492,7 +1381,7 @@ onMounted(() => {
               </button>
             </div>
           </div>
-        </div>
+        </RunAuthPreflightCard>
 
         <div class="sticky bottom-0 z-20 flex flex-col gap-3 rounded-lg border border-gray-200 bg-white/95 p-4 shadow-sm backdrop-blur sm:flex-row sm:items-center sm:justify-between lg:static lg:bg-white">
           <div class="min-w-0 text-sm text-gray-600">
@@ -1523,54 +1412,14 @@ onMounted(() => {
       </section>
 
       <aside class="space-y-4 xl:sticky xl:top-4 xl:max-h-[calc(100vh-7rem)] xl:overflow-y-auto xl:pr-1">
-        <div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
-          <div class="mb-4 flex items-center justify-between gap-3">
-            <div>
-              <h3 class="text-sm font-bold text-gray-900">预检状态</h3>
-              <p class="mt-1 text-xs text-gray-500">运行前确认输入、模型、Worker、浏览器执行器和环境。</p>
-            </div>
-            <span class="rounded-lg border px-2.5 py-1 text-[10px] font-bold" :class="readinessTone(readiness)">
-              {{ readinessLabel }}
-            </span>
-          </div>
-
-          <div v-if="preflightLoading" class="flex items-center justify-center rounded-lg border border-dashed border-gray-200 bg-gray-50 px-4 py-10 text-sm text-gray-500">
-            <Loader2 :size="18" class="mr-2 animate-spin" /> 正在检查工作区...
-          </div>
-
-          <div v-else class="space-y-3">
-            <div
-              v-for="check in preflight?.checks || []"
-              :key="check.key"
-              class="rounded-lg border px-3 py-3"
-              :class="checkTone(check.status)"
-            >
-              <div class="flex items-start gap-2">
-                <CheckCircle2 v-if="check.status === 'ready'" :size="15" class="mt-0.5 shrink-0" />
-                <AlertTriangle v-else :size="15" class="mt-0.5 shrink-0" />
-                <div class="min-w-0 flex-1">
-                  <div class="text-xs font-bold">{{ check.label }}</div>
-                  <div class="mt-0.5 text-xs leading-5 opacity-90">{{ check.detail }}</div>
-                  <div v-if="check.action" class="mt-1 text-[11px] font-bold opacity-80">{{ check.action }}</div>
-                </div>
-              </div>
-            </div>
-
-            <div v-if="!preflight" class="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-4 py-8 text-center text-sm text-gray-400">
-              输入目标后先运行预检，智能体会展示计划路径和缺失配置。
-            </div>
-          </div>
-
-          <div v-if="preflight?.warnings?.length" class="mt-4 space-y-2">
-            <div
-              v-for="warning in preflight.warnings"
-              :key="warning"
-              class="flex gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800"
-            >
-              <AlertTriangle :size="14" class="mt-0.5 shrink-0" /> {{ warning }}
-            </div>
-          </div>
-        </div>
+        <RunPreflightStatusCard
+          :preflight="preflight"
+          :preflight-loading="preflightLoading"
+          :readiness="readiness"
+          :readiness-label="readinessLabel"
+          :readiness-tone="readinessTone"
+          :check-tone="checkTone"
+        />
 
         <div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
           <div class="mb-4 flex items-center justify-between gap-3">
@@ -1687,112 +1536,20 @@ onMounted(() => {
           </div>
         </div>
 
-        <div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
-          <div class="mb-4 flex items-center justify-between gap-3">
-            <div class="flex items-center gap-2">
-              <Settings2 :size="16" class="text-gray-500" />
-              <h3 class="text-sm font-bold text-gray-900">任务交接预览</h3>
-            </div>
-            <span
-              v-if="missionPreview"
-              class="rounded-lg border px-2.5 py-1 text-[10px] font-bold"
-              :class="readinessTone(missionPreview.readiness)"
-            >
-              {{ readinessLabel }}
-            </span>
-          </div>
-
-          <div v-if="missionPreview" class="space-y-4">
-            <div class="rounded-lg border px-3 py-3 text-xs font-bold" :class="readinessTone(missionPreview.readiness)">
-              {{ missionPreview.handoff }}
-            </div>
-
-            <div class="space-y-3 text-xs text-gray-600">
-              <div class="space-y-1">
-                <span class="block text-gray-400">目标</span>
-                <span class="block break-words font-mono font-bold text-gray-800">{{ missionPreview.target }}</span>
-              </div>
-              <div class="flex items-start justify-between gap-3">
-                <span class="shrink-0 text-gray-400">推断模式</span>
-                <span class="min-w-0 text-right font-bold text-gray-800">{{ missionPreview.input_mode }} / {{ missionPreview.test_mode }}</span>
-              </div>
-              <div class="space-y-1">
-                <span class="block text-gray-400">任务目标</span>
-                <span class="block font-bold leading-5 text-gray-800">{{ missionPreview.objective }}</span>
-              </div>
-              <div class="space-y-1">
-                <span class="block text-gray-400">测试范围</span>
-                <span class="block leading-5 text-gray-700">{{ missionPreview.scope }}</span>
-              </div>
-              <div class="space-y-1">
-                <span class="block text-gray-400">执行策略</span>
-                <span class="block leading-5 text-gray-700">{{ missionPreview.execution_policy }}</span>
-              </div>
-              <div class="space-y-1">
-                <span class="block text-gray-400">安全边界</span>
-                <span class="block leading-5 text-gray-700">{{ missionPreview.safety_boundary }}</span>
-              </div>
-              <div class="space-y-1">
-                <span class="block text-gray-400">鉴权准备</span>
-                <span class="block leading-5" :class="missionAuthTone">{{ missionPreview.auth_readiness }}</span>
-              </div>
-            </div>
-
-            <div class="grid grid-cols-2 gap-2">
-              <div
-                v-for="item in missionCountItems"
-                :key="item.label"
-                class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2"
-              >
-                <div class="text-[10px] font-bold text-gray-400">{{ item.label }}</div>
-                <div class="mt-0.5 text-sm font-bold text-gray-900">{{ item.value }}</div>
-              </div>
-            </div>
-
-            <div v-if="missionPreview.correction_prompts.length" class="space-y-2">
-              <div class="text-xs font-bold text-gray-900">启动前可修正</div>
-              <div
-                v-for="prompt in missionPreview.correction_prompts"
-                :key="prompt.key"
-                class="rounded-lg border px-3 py-2"
-                :class="checkTone(prompt.status)"
-              >
-                <div class="flex items-start gap-2">
-                  <AlertTriangle :size="14" class="mt-0.5 shrink-0" />
-                  <div class="min-w-0">
-                    <div class="text-xs font-bold">{{ prompt.label }}</div>
-                    <div class="mt-0.5 text-xs leading-5 opacity-90">{{ prompt.detail }}</div>
-                    <div v-if="prompt.action" class="mt-1 text-[11px] font-bold opacity-80">{{ prompt.action }}</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div v-else class="space-y-3 text-xs text-gray-600">
-            <div class="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-4 py-6 text-center text-sm text-gray-400">
-              运行预检后，这里会展示智能体准备接收的目标、范围、策略和待修正项。
-            </div>
-            <div class="flex items-start justify-between gap-3">
-              <span class="shrink-0 text-gray-400">输入类型</span>
-              <span class="min-w-0 text-right font-bold text-gray-800">{{ localInputType }}</span>
-            </div>
-            <div class="flex items-start justify-between gap-3">
-              <span class="shrink-0 text-gray-400">测试模式</span>
-              <span class="font-bold uppercase text-gray-800">{{ form.test_type }}</span>
-            </div>
-            <div v-if="isApiMode" class="flex items-start justify-between gap-3">
-              <span class="shrink-0 text-gray-400">API 端点</span>
-              <span class="font-bold text-gray-800">{{ endpointCountLabel }}</span>
-            </div>
-            <div v-if="isApiMode" class="flex items-start justify-between gap-3">
-              <span class="shrink-0 text-gray-400">凭据</span>
-              <span class="flex items-center gap-1 font-bold" :class="authProvidedTone">
-                <KeyRound :size="13" /> {{ authProvidedLabel }}
-              </span>
-            </div>
-          </div>
-        </div>
+        <RunHandoffPreview
+          :mission-preview="missionPreview"
+          :mission-count-items="missionCountItems"
+          :readiness-label="readinessLabel"
+          :readiness-tone="readinessTone"
+          :check-tone="checkTone"
+          :mission-auth-tone="missionAuthTone"
+          :local-input-type="localInputType"
+          :form="form"
+          :is-api-mode="isApiMode"
+          :endpoint-count-label="endpointCountLabel"
+          :auth-provided-tone="authProvidedTone"
+          :auth-provided-label="authProvidedLabel"
+        />
       </aside>
     </div>
   </div>

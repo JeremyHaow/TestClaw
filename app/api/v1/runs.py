@@ -1,14 +1,10 @@
-import asyncio
-import hashlib
 import json
 import logging
 import os
 import re
-import shutil
 import time
-import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -18,7 +14,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse
-from sqlalchemy import case as sql_case, cast, func, select
+from sqlalchemy import case as sql_case, cast, func, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -33,31 +29,18 @@ from app.core.redaction import (
     redact_sensitive_data,
     redact_sensitive_text,
 )
-from app.database import AsyncSessionLocal
-from app.models.environment import Environment
-from app.models.llm_provider import LLMProvider
 from app.models.task import Task, TaskStatus
 from app.models.test_case import TestCase, TestSuite
 from app.schemas.task import TaskListItemRead, TaskRead, parse_task_detail
-from app.services.api_auth import (
-    AuthResolution,
-    CaptchaContextResolution,
-    captcha_required_by_login,
-    coerce_auth_config,
-    fetch_captcha_context,
-    has_auth_like_header,
-    load_auth_endpoints,
-    login_endpoint_for_config,
-    merge_token_header,
-    normalize_headers,
-    resolve_auto_auth_headers,
-)
+from app.services.api_auth import AuthResolution, CaptchaContextResolution
 from app.services.task_service import (
     normalize_agent_test_type,
     normalize_task_status,
     normalize_test_type,
     task_service,
 )
+from app.services.run_stream_service import stream_run_events
+from app.services import auth_preflight_service, preflight_service
 from app.api.v1.test_cases import (
     _extract_playwright_commands,
     _extract_request_template,
@@ -69,12 +52,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-NEW_RUN_TEST_TYPES = {"api", "ui"}
-AUTH_MODES = {"auto", "manual", "none_confirmed"}
-CAPTCHA_MODES = {"none", "static", "dynamic"}
-AUTH_PREFLIGHT_CACHE_TTL_SECONDS = 10 * 60
-AUTH_PREFLIGHT_VALID_STATUSES = {"passed", "warning"}
-_AUTH_PREFLIGHT_CACHE: dict[str, dict[str, Any]] = {}
+NEW_RUN_TEST_TYPES = preflight_service.NEW_RUN_TEST_TYPES
+AUTH_MODES = auth_preflight_service.AUTH_MODES
+CAPTCHA_MODES = auth_preflight_service.CAPTCHA_MODES
+AUTH_PREFLIGHT_CACHE_TTL_SECONDS = auth_preflight_service.AUTH_PREFLIGHT_CACHE_TTL_SECONDS
+AUTH_PREFLIGHT_VALID_STATUSES = auth_preflight_service.AUTH_PREFLIGHT_VALID_STATUSES
+_AUTH_PREFLIGHT_CACHE = auth_preflight_service._AUTH_PREFLIGHT_CACHE
 
 
 class AuthAcquireConfig(BaseModel):
@@ -485,221 +468,57 @@ def _resolve_setup_instructions(payload: RunCreate) -> str | None:
 
 
 def _resolve_run_target_url(source: str, input_type: str, base_url: str | None = None) -> str:
-    if input_type == "url":
-        return source
-    return (base_url or source).strip()
+    return preflight_service.resolve_run_target_url(source, input_type, base_url)
 
 
 def _normalize_new_run_test_type(value: str | None) -> str:
-    normalized = (value or "api").strip().lower()
-    if normalized not in NEW_RUN_TEST_TYPES:
-        allowed = ", ".join(sorted(NEW_RUN_TEST_TYPES))
-        raise ValueError(f"New runs accept test_type values: {allowed}")
-    return normalized
+    return preflight_service.normalize_new_run_test_type(value)
 
 
 def _expected_flow_for(input_type: str, test_type: str, has_base_url: bool = False) -> list[str]:
-    if test_type == "api":
-        return ["识别输入", "解析 API", "生成接口用例", "执行 API 测试", "生成报告"]
-    if test_type == "ui":
-        return ["识别入口", "准备浏览器上下文", "规划 UI 场景", "执行 UI 测试", "生成报告"]
-    if input_type in ("swagger_url", "swagger_json", "swagger_yaml") and not has_base_url:
-        return ["识别 Swagger", "解析 API", "生成接口用例", "执行 API 测试", "生成报告"]
-    if input_type in ("swagger_url", "swagger_json", "swagger_yaml"):
-        return [
-            "识别 Swagger",
-            "解析 API",
-            "执行 API 测试",
-            "如有 UI 入口则继续 UI 测试",
-            "生成报告",
-        ]
-    return ["识别目标", "准备浏览器上下文", "规划 UI 场景", "执行 UI 测试", "生成报告"]
+    return preflight_service.expected_flow_for(input_type, test_type, has_base_url)
 
 
 async def _count_rows(db: DbSession, model: type[Any]) -> int:
-    result = await db.execute(select(func.count()).select_from(model))
-    return int(result.scalar_one())
+    return await preflight_service.count_rows(db, model)
+
+
+def _normalize_query_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
 
 
 async def _count_default_planners(db: DbSession) -> int:
-    result = await db.execute(
-        select(func.count())
-        .select_from(LLMProvider)
-        .where(
-            LLMProvider.is_active.is_(True),
-            LLMProvider.is_default_planner.is_(True),
-        )
-    )
-    return int(result.scalar_one())
+    return await preflight_service.count_default_planners(db)
 
 
 async def _count_default_vision_models(db: DbSession) -> int:
-    result = await db.execute(
-        select(func.count())
-        .select_from(LLMProvider)
-        .where(
-            LLMProvider.is_active.is_(True),
-            LLMProvider.is_default_vision.is_(True),
-        )
-    )
-    return int(result.scalar_one())
+    return await auth_preflight_service.count_default_vision_models(db)
 
 
 async def _best_effort_endpoint_count(source: str, input_type: str) -> int | None:
-    if input_type == "url":
-        return None
-    try:
-        from app.tools.doc_parser import parse_api_document_content
-
-        content = source
-        if input_type == "swagger_url":
-            async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
-                response = await client.get(source)
-                response.raise_for_status()
-                content = response.text
-        endpoints = parse_api_document_content(content)
-        return len(endpoints)
-    except Exception:
-        return None
+    return await preflight_service.best_effort_endpoint_count(source, input_type)
 
 
 async def _best_effort_api_profile(
     source: str, input_type: str, api_execution_policy: str
 ) -> dict[str, Any]:
-    if input_type == "url":
-        return {
-            "endpoint_count": None,
-            "auth_required_count": None,
-            "estimated_executable_count": None,
-            "estimated_skipped_count": None,
-            "target_url": None,
-            "api_path_prefix_rewrite": None,
-        }
-
-    try:
-        from app.agent.nodes.api_runner import (
-            WRITE_API_METHODS,
-            _normalize_api_execution_policy,
-            _policy_allows_write,
-        )
-        from app.agent.nodes.source_loader import (
-            _apply_path_prefix_rewrite,
-            _extract_base_url,
-            _extract_document_base_url,
-            _infer_proxy_prefix_rewrite,
-        )
-        from app.tools.doc_parser import parse_api_document_content
-
-        content = source
-        if input_type == "swagger_url":
-            async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
-                response = await client.get(source)
-                response.raise_for_status()
-                content = response.text
-        endpoints = parse_api_document_content(content)
-        prefix_rewrite = None
-        if input_type == "swagger_url":
-            prefix_rewrite = _infer_proxy_prefix_rewrite(source, endpoints)
-            endpoints = _apply_path_prefix_rewrite(endpoints, prefix_rewrite)
-        inferred_target_url = _extract_document_base_url(
-            content, source_url=source if input_type == "swagger_url" else None
-        ) or (_extract_base_url(source) if input_type == "swagger_url" else None)
-        policy = _normalize_api_execution_policy(api_execution_policy)
-        write_allowed = _policy_allows_write(policy)
-        skipped_for_policy = sum(
-            1
-            for endpoint in endpoints
-            if str(endpoint.get("method", "GET")).upper() in WRITE_API_METHODS and not write_allowed
-        )
-        return {
-            "endpoint_count": len(endpoints),
-            "auth_required_count": sum(
-                1 for endpoint in endpoints if endpoint.get("auth_required")
-            ),
-            "estimated_executable_count": max(len(endpoints) - skipped_for_policy, 0),
-            "estimated_skipped_count": skipped_for_policy,
-            "target_url": inferred_target_url,
-            "api_path_prefix_rewrite": prefix_rewrite,
-        }
-    except Exception:
-        return {
-            "endpoint_count": None,
-            "auth_required_count": None,
-            "estimated_executable_count": None,
-            "estimated_skipped_count": None,
-            "target_url": None,
-            "api_path_prefix_rewrite": None,
-        }
+    return await preflight_service.best_effort_api_profile(source, input_type, api_execution_policy)
 
 
 async def _best_effort_reachability(source: str) -> str:
-    if not source.startswith(("http://", "https://")):
-        return "skipped"
-    try:
-        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
-            response = await client.get(source)
-        if response.status_code < 500:
-            return "ready"
-        return "warning"
-    except Exception:
-        return "warning"
+    return await preflight_service.best_effort_reachability(source)
 
 
 async def _redis_broker_reachable(timeout: float) -> bool:
-    try:
-        from redis.asyncio import Redis
-
-        client = Redis.from_url(
-            settings.REDIS_URL,
-            socket_connect_timeout=timeout,
-            socket_timeout=timeout,
-        )
-        try:
-            await client.ping()
-        finally:
-            await client.aclose()
-        return True
-    except Exception as exc:
-        logger.debug("Redis broker readiness probe failed: %s", exc)
-        return False
+    return await preflight_service.redis_broker_reachable(timeout)
 
 
 async def _best_effort_worker_readiness() -> tuple[str, str, str | None]:
-    timeout = max(float(settings.PREFLIGHT_WORKER_TIMEOUT_SECONDS), 0.1)
-    if not await _redis_broker_reachable(timeout):
-        return (
-            "warning",
-            "未检测到可用 Redis Broker；创建任务失败时会尝试同步回退",
-            "启动 Redis 和 Celery Worker 后重新预检",
-        )
-
-    def _ping_workers() -> Any:
-        from app.worker.celery_app import celery_app
-
-        inspector = celery_app.control.inspect(timeout=timeout)
-        return inspector.ping()
-
-    try:
-        replies = await asyncio.wait_for(
-            asyncio.to_thread(_ping_workers),
-            timeout=timeout + 0.25,
-        )
-    except Exception as exc:
-        logger.debug("Worker readiness probe failed: %s", exc)
-        return (
-            "warning",
-            "未检测到活跃 Worker；创建任务失败时会尝试同步回退",
-            "启动 Celery Worker 并确认 Redis 可访问",
-        )
-
-    if isinstance(replies, dict) and replies:
-        return "ready", f"检测到 {len(replies)} 个活跃 Worker", None
-
-    return (
-        "warning",
-        "未检测到活跃 Worker；创建任务失败时会尝试同步回退",
-        "启动 Celery Worker 并确认 Redis 可访问",
-    )
+    return await preflight_service.best_effort_worker_readiness(_redis_broker_reachable)
 
 
 async def _prepare_run_auth(
@@ -709,55 +528,24 @@ async def _prepare_run_auth(
     input_type: str,
     target_url: str,
 ) -> tuple[dict[str, str], AuthResolution]:
-    headers = normalize_headers(payload.headers)
-    merge_token_header(payload.token, headers)
-    resolution = await resolve_auto_auth_headers(
-        payload.auth_config,
+    return await auth_preflight_service.prepare_run_auth(
+        payload,
         source=source,
         input_type=input_type,
         target_url=target_url,
     )
-    if resolution.ok:
-        headers.update(resolution.headers)
-    return headers, resolution
 
 
 def _normalize_auth_mode(payload: RunCreate | RunPreflightRequest) -> str:
-    mode = (payload.auth_mode or "auto").strip().lower()
-    if mode not in AUTH_MODES:
-        mode = "auto"
-    if mode == "auto":
-        legacy_headers = normalize_headers(payload.headers)
-        merge_token_header(payload.token, legacy_headers)
-        auth_config = coerce_auth_config(payload.auth_config)
-        if (
-            has_auth_like_header(legacy_headers)
-            and not auth_config.get("enabled")
-            and not _has_login_credentials(payload)
-        ):
-            return "manual"
-    return mode
+    return auth_preflight_service.normalize_auth_mode(payload)
 
 
 def _normalize_captcha_mode(payload: RunCreate | RunPreflightRequest) -> str:
-    mode = (payload.captcha_mode or "none").strip().lower()
-    return mode if mode in CAPTCHA_MODES else "none"
+    return auth_preflight_service.normalize_captcha_mode(payload)
 
 
 def _auth_credentials_dict(payload: RunCreate | RunPreflightRequest) -> dict[str, str]:
-    credentials = payload.auth_credentials
-    data: dict[str, str] = {}
-    if credentials is not None:
-        for key in ("username", "password", "captcha"):
-            value = getattr(credentials, key, None)
-            if isinstance(value, str) and value.strip():
-                data[key] = value.strip()
-    config = coerce_auth_config(payload.auth_config)
-    for key in ("username", "password", "captcha", "tenant"):
-        value = config.get(key)
-        if isinstance(value, str) and value.strip() and key not in data:
-            data[key] = value.strip()
-    return data
+    return auth_preflight_service.auth_credentials_dict(payload)
 
 
 def _auth_config_with_credentials(
@@ -766,54 +554,19 @@ def _auth_config_with_credentials(
     enabled: bool,
     captcha_text: str | None = None,
 ) -> dict[str, Any]:
-    config = coerce_auth_config(payload.auth_config)
-    credentials = _auth_credentials_dict(payload)
-    for key in ("username", "password", "captcha", "tenant"):
-        if credentials.get(key) and not config.get(key):
-            config[key] = credentials[key]
-    if captcha_text:
-        config["captcha"] = captcha_text
-    if enabled:
-        config["enabled"] = True
-    return config
+    return auth_preflight_service.auth_config_with_credentials(
+        payload,
+        enabled=enabled,
+        captcha_text=captcha_text,
+    )
 
 
 def _has_login_credentials(payload: RunCreate | RunPreflightRequest) -> bool:
-    credentials = _auth_credentials_dict(payload)
-    if credentials.get("username") and credentials.get("password"):
-        return True
-    config = coerce_auth_config(payload.auth_config)
-    body = config.get("body")
-    if isinstance(body, dict) and body:
-        return True
-    return False
+    return auth_preflight_service.has_login_credentials(payload)
 
 
 def _auth_preflight_fingerprint(payload: RunCreate | RunPreflightRequest) -> str:
-    data = {
-        "source": payload.source,
-        "test_type": payload.test_type,
-        "objective": payload.objective,
-        "base_url": payload.base_url,
-        "headers": payload.headers,
-        "token": payload.token,
-        "auth_mode": _normalize_auth_mode(payload),
-        "captcha_mode": _normalize_captcha_mode(payload),
-        "auth_credentials": payload.auth_credentials.model_dump(mode="json", exclude_none=True)
-        if payload.auth_credentials
-        else None,
-        "auth_config": payload.auth_config.model_dump(mode="json", exclude_none=True)
-        if payload.auth_config
-        else None,
-        "api_execution_policy": payload.api_execution_policy,
-        "setup_instructions": payload.setup_instructions,
-        "login_instructions": getattr(payload, "login_instructions", ""),
-    }
-    if not data["setup_instructions"] and data["login_instructions"]:
-        data["setup_instructions"] = data["login_instructions"]
-    data.pop("login_instructions", None)
-    encoded = json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return auth_preflight_service.auth_preflight_fingerprint(payload)
 
 
 def _cache_auth_preflight(
@@ -824,58 +577,23 @@ def _cache_auth_preflight(
     runtime_auth_config: dict[str, Any] | None,
     auth_resolution: AuthResolution,
 ) -> str:
-    auth_preflight_id = str(uuid.uuid4())
-    auth_preflight.auth_preflight_id = auth_preflight_id
-    _AUTH_PREFLIGHT_CACHE[auth_preflight_id] = {
-        "created_at": time.time(),
-        "fingerprint": fingerprint,
-        "auth_preflight": auth_preflight,
-        "auth_headers": dict(auth_headers),
-        "runtime_auth_config": runtime_auth_config,
-        "auth_resolution": auth_resolution,
-    }
-    return auth_preflight_id
+    return auth_preflight_service.cache_auth_preflight(
+        fingerprint=fingerprint,
+        auth_preflight=auth_preflight,
+        auth_headers=auth_headers,
+        runtime_auth_config=runtime_auth_config,
+        auth_resolution=auth_resolution,
+    )
 
 
 def _get_cached_auth_preflight(
     payload: RunCreate,
 ) -> tuple[RunAuthPreflight, dict[str, str], dict[str, Any] | None, AuthResolution] | None:
-    preflight_id = (payload.auth_preflight_id or "").strip()
-    if not preflight_id:
-        return None
-    cached = _AUTH_PREFLIGHT_CACHE.get(preflight_id)
-    if not cached:
-        return None
-    if time.time() - float(cached.get("created_at") or 0) > AUTH_PREFLIGHT_CACHE_TTL_SECONDS:
-        _AUTH_PREFLIGHT_CACHE.pop(preflight_id, None)
-        return None
-    if cached.get("fingerprint") != _auth_preflight_fingerprint(payload):
-        return None
-    auth_preflight = cached.get("auth_preflight")
-    if not isinstance(auth_preflight, RunAuthPreflight):
-        return None
-    if auth_preflight.status not in AUTH_PREFLIGHT_VALID_STATUSES or not auth_preflight.can_start:
-        return None
-    auth_resolution = cached.get("auth_resolution")
-    if not isinstance(auth_resolution, AuthResolution):
-        auth_resolution = AuthResolution(ok=False, detail="No cached auth resolution")
-    return (
-        auth_preflight,
-        dict(cached.get("auth_headers") or {}),
-        cached.get("runtime_auth_config"),
-        auth_resolution,
-    )
+    return auth_preflight_service.get_cached_auth_preflight(payload)
 
 
 async def _load_preflight_endpoints(source: str, input_type: str) -> list[dict[str, Any]]:
-    if input_type == "url":
-        return []
-    try:
-        _, endpoints = await load_auth_endpoints(source, input_type)
-        return endpoints
-    except Exception as exc:
-        logger.debug("Unable to load auth preflight endpoints: %s", exc)
-        return []
+    return await auth_preflight_service.load_preflight_endpoints(source, input_type)
 
 
 def _api_validation_candidates(
@@ -885,88 +603,23 @@ def _api_validation_candidates(
     protected_only: bool,
     limit: int = 3,
 ) -> list[dict[str, str]]:
-    from app.agent.nodes.api_runner import (
-        SAFE_API_METHODS,
-        _build_request_url,
-        _resolve_path_params,
+    return auth_preflight_service.api_validation_candidates(
+        endpoints,
+        target_url,
+        protected_only=protected_only,
+        limit=limit,
     )
-
-    candidates: list[dict[str, str]] = []
-    for endpoint in endpoints:
-        method = str(endpoint.get("method") or "GET").upper()
-        if method not in SAFE_API_METHODS:
-            continue
-        if protected_only and not endpoint.get("auth_required"):
-            continue
-        path = _resolve_path_params(str(endpoint.get("path") or ""), endpoint)
-        url = _build_request_url(target_url, path)
-        if not url:
-            continue
-        candidates.append({"method": method, "url": url, "path": path})
-        if len(candidates) >= limit:
-            break
-    return candidates
 
 
 def _is_preflight_auth_failure(status_code: int, payload: Any) -> bool:
-    if status_code in {401, 403}:
-        return True
-    if isinstance(payload, dict):
-        for key in ("code", "status", "status_code"):
-            value = payload.get(key)
-            try:
-                if int(value) in {401, 403}:
-                    return True
-            except (TypeError, ValueError):
-                continue
-    return False
+    return auth_preflight_service.is_preflight_auth_failure(status_code, payload)
 
 
 async def _validate_readonly_auth_access(
     candidates: list[dict[str, str]],
     headers: dict[str, str],
 ) -> tuple[list[RunAuthPreflightValidation], int]:
-    results: list[RunAuthPreflightValidation] = []
-    success_count = 0
-    async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
-        for candidate in candidates:
-            method = candidate["method"]
-            url = candidate["url"]
-            try:
-                response = await client.request(method, url, headers=headers or None)
-                try:
-                    payload = response.json()
-                except ValueError:
-                    payload = {}
-                auth_failed = _is_preflight_auth_failure(response.status_code, payload)
-                ok = 200 <= response.status_code < 400 and not auth_failed
-                if ok:
-                    success_count += 1
-                status_text = "passed" if ok else "failed"
-                detail = "只读接口验证通过" if ok else "只读接口验证未通过"
-                if auth_failed:
-                    detail = "只读接口仍返回 401/403"
-                results.append(
-                    RunAuthPreflightValidation(
-                        method=method,
-                        url=_redact_url_for_preview(url),
-                        status=status_text,
-                        status_code=response.status_code,
-                        detail=detail,
-                    )
-                )
-            except Exception as exc:
-                safe_detail = redact_sensitive_data(str(exc)) if str(exc) else "未知错误"
-                results.append(
-                    RunAuthPreflightValidation(
-                        method=method,
-                        url=_redact_url_for_preview(url),
-                        status="failed",
-                        status_code=None,
-                        detail=f"只读接口验证请求失败：{safe_detail[:120]}",
-                    )
-                )
-    return results, success_count
+    return await auth_preflight_service.validate_readonly_auth_access(candidates, headers)
 
 
 def _auth_preflight_response(
@@ -985,35 +638,25 @@ def _auth_preflight_response(
     protected_validation_count: int = 0,
     next_action: str | None = None,
 ) -> RunAuthPreflight:
-    can_start = status in AUTH_PREFLIGHT_VALID_STATUSES
-    if test_type == "api" and validation_results is not None:
-        can_start = can_start and (protected_validation_count > 0 or auth_mode == "none_confirmed")
-    return RunAuthPreflight(
+    return auth_preflight_service.auth_preflight_response(
         auth_mode=auth_mode,
         captcha_mode=captcha_mode,
+        test_type=test_type,
         status=status,
         strategy=strategy,
         plan=plan,
         captcha_handling=captcha_handling,
         steps=steps,
-        missing_fields=missing_fields or [],
-        validation_results=validation_results or [],
+        missing_fields=missing_fields,
+        validation_results=validation_results,
         auth_header_name=auth_header_name,
         protected_validation_count=protected_validation_count,
-        can_start=can_start,
         next_action=next_action,
     )
 
 
 def _captcha_context_summary(captcha: CaptchaContextResolution | None) -> str:
-    if captcha is None:
-        return "无验证码"
-    if not captcha.ok:
-        return captcha.detail or "验证码上下文获取失败"
-    fields = [key for key in captcha.context.keys() if key not in {"status_code"}]
-    if captcha.captcha_text:
-        return f"已获取验证码上下文（{len(fields)} 个字段），接口返回了明文验证码。"
-    return f"已获取验证码上下文（{len(fields)} 个字段）；接口测试不会识别图片验证码。"
+    return auth_preflight_service.captcha_context_summary(captcha)
 
 
 async def _run_auth_preflight(
@@ -1026,563 +669,41 @@ async def _run_auth_preflight(
     test_type: str,
     auth_required_count: int | None,
 ) -> tuple[RunAuthPreflight, dict[str, str], dict[str, Any] | None, AuthResolution]:
-    auth_mode = _normalize_auth_mode(payload)
-    captcha_mode = _normalize_captcha_mode(payload)
-    endpoints = await _load_preflight_endpoints(source, input_type)
-    headers = normalize_headers(payload.headers)
-    merge_token_header(payload.token, headers)
-    runtime_auth_config: dict[str, Any] | None = None
-    auth_resolution = AuthResolution(ok=False, detail="未执行自动鉴权")
-    steps: list[RunAuthPreflightStep] = [
-        RunAuthPreflightStep(
-            key="mode",
-            label="鉴权模式",
-            status="passed",
-            detail={
-                "auto": "自动获取 Token",
-                "manual": "手动 Token/Header",
-                "none_confirmed": "无需鉴权",
-            }[auth_mode],
-        )
-    ]
-
-    if test_type == "ui":
-        vision_count = await _count_default_vision_models(db)
-        if captcha_mode == "dynamic" and not vision_count:
-            steps.append(
-                RunAuthPreflightStep(
-                    key="captcha",
-                    label="动态验证码",
-                    status="blocked",
-                    detail="UI 动态验证码需要默认 Vision 模型，当前未配置。",
-                )
-            )
-            auth_preflight = _auth_preflight_response(
-                auth_mode=auth_mode,
-                captcha_mode=captcha_mode,
-                test_type=test_type,
-                status="blocked",
-                strategy="ui_browser_login",
-                plan="浏览器打开登录页，由页面结构和测试账号推理登录步骤；动态验证码由 Vision 模型识别。",
-                captcha_handling="动态验证码：运行时使用 Vision 模型识别页面验证码图片。",
-                steps=steps,
-                missing_fields=["vision_model"],
-                next_action="在模型管理中设置默认 Vision 模型，或改用固定验证码/无验证码。",
-            )
-            return auth_preflight, headers, None, auth_resolution
-        if auth_mode == "manual" and not has_auth_like_header(headers):
-            steps.append(
-                RunAuthPreflightStep(
-                    key="manual_auth",
-                    label="手动鉴权",
-                    status="blocked",
-                    detail="手动模式需要提供 Token 或鉴权 Header。",
-                )
-            )
-            auth_preflight = _auth_preflight_response(
-                auth_mode=auth_mode,
-                captcha_mode=captcha_mode,
-                test_type=test_type,
-                status="blocked",
-                strategy="ui_manual_header",
-                plan="浏览器测试将使用手动凭据作为上下文，但启动前需要先提供凭据。",
-                captcha_handling="UI 手动模式不处理验证码，除非同时提供登录说明。",
-                steps=steps,
-                missing_fields=["token_or_header"],
-                next_action="填写 Token/Header，或切换到自动获取 Token。",
-            )
-            return auth_preflight, headers, None, auth_resolution
-        if auth_mode == "auto" and not _has_login_credentials(payload):
-            steps.append(
-                RunAuthPreflightStep(
-                    key="credentials",
-                    label="登录凭据",
-                    status="blocked",
-                    detail="自动获取 Token 需要账号和密码；如果页面无需登录，请选择无需鉴权。",
-                )
-            )
-            auth_preflight = _auth_preflight_response(
-                auth_mode=auth_mode,
-                captcha_mode=captcha_mode,
-                test_type=test_type,
-                status="blocked",
-                strategy="ui_browser_login",
-                plan="浏览器打开登录页，由页面结构和测试账号推理登录步骤。",
-                captcha_handling="验证码策略会在 UI 登录步骤中执行。",
-                steps=steps,
-                missing_fields=["username", "password"],
-                next_action="填写账号密码，或选择确认无需鉴权。",
-            )
-            return auth_preflight, headers, None, auth_resolution
-        steps.append(
-            RunAuthPreflightStep(
-                key="ui_runtime_verify",
-                label="登录后页面验证",
-                status="passed",
-                detail="UI 执行前会验证已进入登录后页面；验证失败不会继续 UI 用例。",
-            )
-        )
-        auth_preflight = _auth_preflight_response(
-            auth_mode=auth_mode,
-            captcha_mode=captcha_mode,
-            test_type=test_type,
-            status="passed",
-            strategy="ui_browser_login" if auth_mode == "auto" else auth_mode,
-            plan="浏览器打开目标入口，模型根据页面结构推理登录链路并执行；登录后验证页面状态。",
-            captcha_handling={
-                "none": "无验证码。",
-                "static": "固定验证码：使用用户填写的验证码。",
-                "dynamic": "动态验证码：运行时使用默认 Vision 模型识别页面验证码图片。",
-            }[captcha_mode],
-            steps=steps,
-            auth_header_name=None,
-            protected_validation_count=0,
-            next_action=None,
-        )
-        return auth_preflight, headers, None, auth_resolution
-
-    protected_candidates = _api_validation_candidates(
-        endpoints,
-        target_url,
-        protected_only=True,
-        limit=3,
-    )
-    any_read_candidates = _api_validation_candidates(
-        endpoints,
-        target_url,
-        protected_only=False,
-        limit=3,
-    )
-    captcha_context: CaptchaContextResolution | None = None
-    captcha_text: str | None = None
-
-    if auth_mode == "none_confirmed":
-        candidates = protected_candidates or any_read_candidates
-        if not candidates:
-            steps.append(
-                RunAuthPreflightStep(
-                    key="readonly_validation",
-                    label="无鉴权验证",
-                    status="blocked",
-                    detail="没有可用于确认无需鉴权的只读接口。",
-                )
-            )
-            auth_preflight = _auth_preflight_response(
-                auth_mode=auth_mode,
-                captcha_mode=captcha_mode,
-                test_type=test_type,
-                status="blocked",
-                strategy="none_confirmed",
-                plan="不注入任何鉴权信息，仅验证只读接口无鉴权可访问。",
-                captcha_handling="无验证码。",
-                steps=steps,
-                missing_fields=["read_only_endpoint"],
-                next_action="提供 OpenAPI 中可访问的 GET/HEAD/OPTIONS 接口，或改用自动/手动鉴权。",
-            )
-            return auth_preflight, {}, None, auth_resolution
-        validation_results, success_count = await _validate_readonly_auth_access(candidates, {})
-        status = "passed" if success_count >= max(1, min(2, len(candidates))) else "blocked"
-        steps.append(
-            RunAuthPreflightStep(
-                key="readonly_validation",
-                label="无鉴权验证",
-                status=status,
-                detail=f"无鉴权只读验证通过 {success_count}/{len(candidates)} 个接口。",
-            )
-        )
-        auth_preflight = _auth_preflight_response(
-            auth_mode=auth_mode,
-            captcha_mode=captcha_mode,
-            test_type=test_type,
-            status=status,
-            strategy="none_confirmed",
-            plan="不注入任何鉴权信息，仅在只读接口确认可访问后启动。",
-            captcha_handling="无验证码。",
-            steps=steps,
-            validation_results=validation_results,
-            protected_validation_count=success_count,
-            next_action=None
-            if status == "passed"
-            else "目标仍需要鉴权；请选择自动鉴权或手动 Header/Token。",
-        )
-        return auth_preflight, {}, None, auth_resolution
-
-    if auth_mode == "manual":
-        if not has_auth_like_header(headers):
-            steps.append(
-                RunAuthPreflightStep(
-                    key="manual_auth",
-                    label="手动鉴权",
-                    status="blocked",
-                    detail="手动模式需要提供 Token 或鉴权 Header。",
-                )
-            )
-            auth_preflight = _auth_preflight_response(
-                auth_mode=auth_mode,
-                captcha_mode=captcha_mode,
-                test_type=test_type,
-                status="blocked",
-                strategy="manual_header",
-                plan="使用用户提供的 Header/Token 调用受保护只读接口。",
-                captcha_handling="手动 Header/Token 模式不处理验证码。",
-                steps=steps,
-                missing_fields=["token_or_header"],
-                next_action="填写 Token/Header 后重新预检。",
-            )
-            return auth_preflight, headers, None, auth_resolution
-        candidates = protected_candidates
-        if not candidates:
-            steps.append(
-                RunAuthPreflightStep(
-                    key="protected_validation",
-                    label="受保护接口验证",
-                    status="blocked",
-                    detail="没有可用于验证手动鉴权的受保护只读接口。",
-                )
-            )
-            auth_preflight = _auth_preflight_response(
-                auth_mode=auth_mode,
-                captcha_mode=captcha_mode,
-                test_type=test_type,
-                status="blocked",
-                strategy="manual_header",
-                plan="使用用户提供的 Header/Token 调用受保护只读接口。",
-                captcha_handling="手动 Header/Token 模式不处理验证码。",
-                steps=steps,
-                missing_fields=["protected_read_only_endpoint"],
-                auth_header_name="Authorization" if (payload.token or "").strip() else None,
-                next_action="补充 OpenAPI 中带 security 的 GET/HEAD/OPTIONS 接口，或改用可验证的登录链路。",
-            )
-            return auth_preflight, headers, None, auth_resolution
-        validation_results, success_count = await _validate_readonly_auth_access(
-            candidates, headers
-        )
-        status = "passed" if success_count >= max(1, min(2, len(candidates))) else "blocked"
-        steps.append(
-            RunAuthPreflightStep(
-                key="protected_validation",
-                label="受保护接口验证",
-                status=status,
-                detail=f"手动鉴权只读验证通过 {success_count}/{len(candidates)} 个接口。",
-            )
-        )
-        runtime_auth_config = coerce_auth_config(payload.auth_config)
-        if not runtime_auth_config.get("enabled"):
-            runtime_auth_config = None
-        auth_preflight = _auth_preflight_response(
-            auth_mode=auth_mode,
-            captcha_mode=captcha_mode,
-            test_type=test_type,
-            status=status,
-            strategy="manual_header",
-            plan="使用用户提供的 Header/Token 调用受保护只读接口，通过后再启动接口测试。",
-            captcha_handling="手动 Header/Token 模式不处理验证码。",
-            steps=steps,
-            validation_results=validation_results,
-            auth_header_name="Authorization" if (payload.token or "").strip() else None,
-            protected_validation_count=success_count,
-            next_action=None
-            if status == "passed"
-            else "确认 Token/Header 有效，并确保受保护只读接口可访问。",
-        )
-        return (
-            auth_preflight,
-            headers,
-            runtime_auth_config,
-            AuthResolution(
-                ok=status == "passed",
-                headers=headers,
-                strategy="manual_header",
-                header_name="Authorization" if (payload.token or "").strip() else None,
-                detail="手动 Header/Token 预检通过"
-                if status == "passed"
-                else "手动 Header/Token 预检失败",
-            ),
-        )
-
-    if not _has_login_credentials(payload):
-        configured_auto = coerce_auth_config(payload.auth_config)
-        if configured_auto.get("enabled"):
-            auth_resolution = await resolve_auto_auth_headers(
-                configured_auto,
-                source=source,
-                input_type=input_type,
-                target_url=target_url,
-                endpoints=endpoints,
-            )
-            missing_fields = auth_resolution.missing_inputs or ["username", "password"]
-            detail = auth_resolution.detail or "自动获取 Token 缺少登录凭据。"
-            next_action = auth_resolution.next_action or "补齐登录凭据，或选择手动 Token/Header。"
-            required_fields = auth_resolution.required_fields or missing_fields
-        else:
-            missing_fields = ["username", "password"]
-            detail = "检测到鉴权预检未完成；必须提供 Token/Header、填写账号密码，或选择无需鉴权。"
-            next_action = "填写账号密码，或选择手动 Token/Header / 无需鉴权。"
-            required_fields = missing_fields
-        steps.append(
-            RunAuthPreflightStep(
-                key="credentials",
-                label="登录凭据",
-                status="blocked",
-                detail=detail,
-            )
-        )
-        auth_preflight = _auth_preflight_response(
-            auth_mode=auth_mode,
-            captcha_mode=captcha_mode,
-            test_type=test_type,
-            status="blocked",
-            strategy="auto_login",
-            plan="根据 OpenAPI 推理 login/token/captcha/csrf 链路，并限制为登录相关接口与只读验证接口。",
-            captcha_handling="验证码策略尚未执行。",
-            steps=steps,
-            missing_fields=required_fields,
-            next_action=next_action,
-        )
-        return auth_preflight, headers, None, auth_resolution
-
-    auth_config = _auth_config_with_credentials(payload, enabled=True)
-    login_url, login_endpoint = login_endpoint_for_config(
-        auth_config,
-        endpoints=endpoints,
-        target_url=target_url,
-    )
-    if captcha_mode == "static":
-        captcha_value = (
-            _auth_credentials_dict(payload).get("captcha")
-            or str(auth_config.get("captcha") or "").strip()
-        )
-        if not captcha_value:
-            steps.append(
-                RunAuthPreflightStep(
-                    key="captcha",
-                    label="固定验证码",
-                    status="blocked",
-                    detail="固定验证码模式需要填写验证码。",
-                )
-            )
-            auth_preflight = _auth_preflight_response(
-                auth_mode=auth_mode,
-                captcha_mode=captcha_mode,
-                test_type=test_type,
-                status="blocked",
-                strategy="auto_login",
-                plan="使用用户填写的固定验证码执行登录。",
-                captcha_handling="固定验证码：缺少用户填写的验证码。",
-                steps=steps,
-                missing_fields=["captcha"],
-                next_action="填写验证码后重新预检。",
-            )
-            return auth_preflight, headers, None, auth_resolution
-        auth_config["captcha"] = captcha_value
-    elif captcha_mode == "dynamic":
-        captcha_context = await fetch_captcha_context(
-            auth_config,
-            source=source,
-            input_type=input_type,
-            target_url=target_url,
-            endpoints=endpoints,
-        )
-        captcha_text = captcha_context.captcha_text if captcha_context.ok else None
-        steps.append(
-            RunAuthPreflightStep(
-                key="captcha",
-                label="动态验证码上下文",
-                status="passed" if captcha_context.ok else "blocked",
-                detail=_captcha_context_summary(captcha_context),
-            )
-        )
-        if captcha_context.ok and captcha_text:
-            auth_config["captcha"] = captcha_text
-        elif captcha_required_by_login(auth_config, login_endpoint):
-            auth_preflight = _auth_preflight_response(
-                auth_mode=auth_mode,
-                captcha_mode=captcha_mode,
-                test_type=test_type,
-                status="blocked",
-                strategy="auto_login",
-                plan="接口测试只获取验证码上下文，不做图片识别。",
-                captcha_handling=_captcha_context_summary(captcha_context),
-                steps=steps,
-                missing_fields=["captcha"],
-                next_action="接口动态验证码未返回明文 code；请改用固定验证码并填写验证码。",
-            )
-            return auth_preflight, headers, None, auth_resolution
-
-    if not login_url:
-        steps.append(
-            RunAuthPreflightStep(
-                key="login_plan",
-                label="登录链路",
-                status="blocked",
-                detail="未提供登录 URL，且无法从 API 文档推断。",
-            )
-        )
-    auth_resolution = await resolve_auto_auth_headers(
-        auth_config,
+    return await auth_preflight_service.run_auth_preflight(
+        payload,
+        db=db,
         source=source,
         input_type=input_type,
         target_url=target_url,
-        endpoints=endpoints,
-    )
-    steps.append(
-        RunAuthPreflightStep(
-            key="login",
-            label="登录换取 Token/Cookie",
-            status="passed" if auth_resolution.ok else "blocked",
-            detail=auth_resolution.detail
-            or ("自动获取成功" if auth_resolution.ok else "自动获取失败"),
-        )
-    )
-    if auth_resolution.ok:
-        headers.update(auth_resolution.headers)
-    else:
-        auth_preflight = _auth_preflight_response(
-            auth_mode=auth_mode,
-            captcha_mode=captcha_mode,
-            test_type=test_type,
-            status="blocked",
-            strategy="auto_login",
-            plan="根据 OpenAPI 推理 login/token/captcha/csrf 链路，并限制为登录相关接口与只读验证接口。",
-            captcha_handling=_captcha_context_summary(captcha_context)
-            if captcha_mode == "dynamic"
-            else {"none": "无验证码。", "static": "固定验证码：使用用户填写的验证码。"}[
-                captcha_mode
-            ],
-            steps=steps,
-            missing_fields=auth_resolution.missing_inputs,
-            auth_header_name=auth_resolution.header_name,
-            next_action=auth_resolution.next_action or "补齐登录信息后重新预检。",
-        )
-        return auth_preflight, headers, None, auth_resolution
-
-    candidates = protected_candidates
-    if not candidates:
-        steps.append(
-            RunAuthPreflightStep(
-                key="protected_validation",
-                label="受保护接口验证",
-                status="blocked",
-                detail="没有可用于验证 Token/Cookie 的受保护只读接口。",
-            )
-        )
-        auth_preflight = _auth_preflight_response(
-            auth_mode=auth_mode,
-            captcha_mode=captcha_mode,
-            test_type=test_type,
-            status="blocked",
-            strategy="auto_login",
-            plan="根据 OpenAPI 推理 login/token/captcha/csrf 链路，并限制为登录相关接口与只读验证接口。",
-            captcha_handling=_captcha_context_summary(captcha_context)
-            if captcha_mode == "dynamic"
-            else {"none": "无验证码。", "static": "固定验证码：使用用户填写的验证码。"}[
-                captcha_mode
-            ],
-            steps=steps,
-            missing_fields=["protected_read_only_endpoint"],
-            auth_header_name=auth_resolution.header_name,
-            next_action="OpenAPI 需要提供受保护 GET/HEAD/OPTIONS 接口用于鉴权预检。",
-        )
-        return auth_preflight, headers, None, auth_resolution
-
-    validation_results, success_count = await _validate_readonly_auth_access(candidates, headers)
-    status = "passed" if success_count >= max(1, min(2, len(candidates))) else "blocked"
-    steps.append(
-        RunAuthPreflightStep(
-            key="protected_validation",
-            label="受保护接口验证",
-            status=status,
-            detail=f"自动鉴权只读验证通过 {success_count}/{len(candidates)} 个接口。",
-        )
-    )
-    runtime_auth_config = auth_config if auth_config.get("enabled") else None
-    auth_preflight = _auth_preflight_response(
-        auth_mode=auth_mode,
-        captcha_mode=captcha_mode,
         test_type=test_type,
-        status=status,
-        strategy="auto_login",
-        plan="根据 OpenAPI 推理 login/token/captcha/csrf 链路；执行层仅允许登录、验证码、token/refresh/csrf 相关接口和只读验证接口。",
-        captcha_handling=_captcha_context_summary(captcha_context)
-        if captcha_mode == "dynamic"
-        else {"none": "无验证码。", "static": "固定验证码：使用用户填写的验证码。"}[captcha_mode],
-        steps=steps,
-        validation_results=validation_results,
-        auth_header_name=auth_resolution.header_name,
-        protected_validation_count=success_count,
-        next_action=None
-        if status == "passed"
-        else "Token/Cookie 获取成功，但受保护接口验证失败；请检查账号权限。",
+        auth_required_count=auth_required_count,
     )
-    return auth_preflight, headers, runtime_auth_config, auth_resolution
 
 
 def _preflight_readiness(checks: list[RunPreflightCheck]) -> str:
-    if any(check.status == "missing" for check in checks):
-        return "blocked"
-    if any(check.status == "warning" for check in checks):
-        return "needs_review"
-    return "ready"
+    return preflight_service.preflight_readiness(checks)
 
 
 def _redact_url_for_preview(value: str) -> str:
-    if not value.startswith(("http://", "https://")):
-        return value
-    try:
-        parsed = urlsplit(value)
-        hostname = parsed.hostname or ""
-        if ":" in hostname and not hostname.startswith("["):
-            hostname = f"[{hostname}]"
-        netloc = hostname
-        if parsed.port:
-            netloc = f"{netloc}:{parsed.port}"
-        if not (parsed.username or parsed.password):
-            netloc = parsed.netloc
-        query = urlencode(
-            [
-                (key, REDACTED_VALUE if is_sensitive_header(key) else query_value)
-                for key, query_value in parse_qsl(parsed.query, keep_blank_values=True)
-            ]
-        )
-        return urlunsplit((parsed.scheme, netloc, parsed.path, query, ""))
-    except Exception:
-        return value
+    return preflight_service.redact_url_for_preview(value)
 
 
 def _preflight_target_label(source: str, input_type: str, target_url: str) -> str:
-    if input_type in ("swagger_json", "swagger_yaml") and target_url == source:
-        return "粘贴的 OpenAPI 文档（运行时解析 Base URL）"
-    return _redact_url_for_preview(target_url or source)
+    return preflight_service.preflight_target_label(source, input_type, target_url)
 
 
 def _preflight_input_mode_label(input_type: str) -> str:
-    return {
-        "url": "网页 URL",
-        "swagger_url": "Swagger/OpenAPI URL",
-        "swagger_json": "Swagger/OpenAPI JSON",
-        "swagger_yaml": "Swagger/OpenAPI YAML",
-    }.get(input_type, input_type)
+    return preflight_service.preflight_input_mode_label(input_type)
 
 
 def _preflight_test_mode_label(test_type: str) -> str:
-    return {
-        "auto": "自动编排",
-        "api": "API 检查",
-        "ui": "UI 巡检",
-    }.get(test_type, test_type)
+    return preflight_service.preflight_test_mode_label(test_type)
 
 
 def _preflight_objective_summary(
     payload: RunPreflightRequest, input_type: str, test_type: str
 ) -> str:
-    objective = payload.objective.strip()
-    if objective:
-        return objective
-    if test_type == "api" or input_type in ("swagger_url", "swagger_json", "swagger_yaml"):
-        return "验证 API 契约、参数边界、鉴权路径和错误分支。"
-    if test_type == "ui":
-        return "巡检入口页面、关键导航、表单路径和可见错误。"
-    return "由智能体根据输入自动识别 API/UI 路径并生成测试计划。"
+    return preflight_service.preflight_objective_summary(payload, input_type, test_type)
 
 
 def _preflight_scope_summary(
@@ -1592,34 +713,21 @@ def _preflight_scope_summary(
     estimated_executable_count: int | None,
     estimated_skipped_count: int | None,
 ) -> str:
-    if test_type == "ui" or (test_type == "auto" and input_type == "url"):
-        return "浏览器会从目标入口开始探索 UI 路径，并采集截图与执行证据。"
-
-    endpoint_text = (
-        "运行时解析接口范围" if endpoint_count is None else f"文档包含 {endpoint_count} 个端点"
+    return preflight_service.preflight_scope_summary(
+        input_type,
+        test_type,
+        endpoint_count,
+        estimated_executable_count,
+        estimated_skipped_count,
     )
-    if estimated_executable_count is None:
-        return f"{endpoint_text}，执行前会继续规划可运行用例。"
-    skipped_text = (
-        f"，策略跳过 {estimated_skipped_count} 个变更接口" if estimated_skipped_count else ""
-    )
-    return f"{endpoint_text}，预计执行 {estimated_executable_count} 个接口{skipped_text}。"
 
 
 def _preflight_policy_summary(api_execution_policy: str) -> str:
-    if api_execution_policy == "write_allowed":
-        return "允许写入/变更请求；仅适合测试环境或明确可回滚的数据。"
-    if api_execution_policy == "safe_with_auth":
-        return "带鉴权只读；使用凭据执行只读接口，写入/变更接口仍会跳过。"
-    return "安全只读；默认跳过 POST/PUT/PATCH/DELETE，避免误改真实数据。"
+    return preflight_service.preflight_policy_summary(api_execution_policy)
 
 
 def _preflight_safety_boundary(payload: RunPreflightRequest, api_execution_policy: str) -> str:
-    if payload.setup_instructions.strip():
-        return "已提供前置说明/安全边界；预览不展开可能包含凭据的原文。"
-    if api_execution_policy == "write_allowed":
-        return "未提供额外安全说明；允许写入前建议补充测试账号、可写范围和清理规则。"
-    return "未提供额外安全说明；本次主要依赖执行策略限制高风险动作。"
+    return preflight_service.preflight_safety_boundary(payload, api_execution_policy)
 
 
 def _preflight_auth_readiness(
@@ -1627,58 +735,22 @@ def _preflight_auth_readiness(
     supplied_auth: bool,
     auth_resolution: AuthResolution,
 ) -> str:
-    header_name = auth_resolution.header_name or "Authorization"
-    if auth_required_count:
-        if auth_resolution.ok:
-            return f"自动获取 Token 已通过；运行时会注入 {header_name}，预览不展示值。"
-        if supplied_auth:
-            return "已提供 Token/Header；预览不展示任何鉴权值。"
-        return f"检测到 {auth_required_count} 个接口需要鉴权；启动前需要补齐 Token/Header 或自动获取信息。"
-    if auth_resolution.ok or supplied_auth:
-        return "已提供鉴权信息；本次未检测到文档声明强制鉴权，预览不展示值。"
-    return "未检测到接口鉴权要求。"
+    return preflight_service.preflight_auth_readiness(
+        auth_required_count,
+        supplied_auth,
+        auth_resolution,
+    )
 
 
 def _default_correction_action(check: RunPreflightCheck) -> str:
-    return {
-        "provider": "前往系统设置配置模型后重新预检。",
-        "planner": "设置默认 Planner 可让测试计划更稳定。",
-        "runner": "确认前端/Worker 镜像已安装浏览器工具。",
-        "reachability": "确认目标 URL、内网/VPN、Base URL 或代理路径是否正确。",
-        "environment": "可以继续使用当前输入；建议后续保存为环境资产复用。",
-        "auth": "补齐 Token/Header，或选择自动获取 Token 并填写登录信息。",
-        "api_policy": "确认目标为测试环境后再允许写入/变更接口。",
-        "source": "修正目标入口/API 文档，或切换测试模式后重新预检。",
-        "worker": "启动 Redis 和 Celery Worker 后重新预检。",
-    }.get(check.key, "确认该项后重新预检。")
+    return preflight_service.default_correction_action(check)
 
 
 def _preflight_correction_prompts(
     checks: list[RunPreflightCheck],
     warnings: list[str],
 ) -> list[RunPreflightCorrectionPrompt]:
-    prompts = [
-        RunPreflightCorrectionPrompt(
-            key=check.key,
-            label=check.label,
-            status=check.status,
-            detail=check.detail,
-            action=check.action or _default_correction_action(check),
-        )
-        for check in checks
-        if check.status in {"missing", "warning"}
-    ]
-    prompts.extend(
-        RunPreflightCorrectionPrompt(
-            key=f"warning_{index}",
-            label="待确认提示",
-            status="warning",
-            detail=warning,
-            action="确认无误后可继续，或回到对应输入修正。",
-        )
-        for index, warning in enumerate(warnings, start=1)
-    )
-    return prompts
+    return preflight_service.preflight_correction_prompts(checks, warnings)
 
 
 def _build_mission_preview(
@@ -1700,128 +772,48 @@ def _build_mission_preview(
     supplied_auth: bool,
     auth_resolution: AuthResolution,
 ) -> RunPreflightMissionPreview:
-    ready_count = sum(1 for check in checks if check.status == "ready")
-    blocked_count = sum(1 for check in checks if check.status == "missing")
-    review_count = sum(1 for check in checks if check.status == "warning") + len(warnings)
-    handoff = {
-        "ready": "预检完成：智能体可以接收本次测试任务。",
-        "blocked": "预检发现阻断项：修正后再启动测试智能体。",
-    }.get(readiness, "预检完成但有待确认项：确认后可启动测试智能体。")
-    return RunPreflightMissionPreview(
-        handoff=handoff,
+    return preflight_service.build_mission_preview(
+        payload,
+        source=source,
+        input_type=input_type,
+        test_type=test_type,
+        target_url=target_url,
+        expected_flow=expected_flow,
         readiness=readiness,
-        target=_preflight_target_label(source, input_type, target_url),
-        input_mode=_preflight_input_mode_label(input_type),
-        test_mode=_preflight_test_mode_label(test_type),
-        objective=_preflight_objective_summary(payload, input_type, test_type),
-        scope=_preflight_scope_summary(
-            input_type,
-            test_type,
-            endpoint_count,
-            estimated_executable_count,
-            estimated_skipped_count,
-        ),
-        execution_policy=_preflight_policy_summary(api_execution_policy),
-        safety_boundary=_preflight_safety_boundary(payload, api_execution_policy),
-        auth_readiness=_preflight_auth_readiness(
-            auth_required_count, supplied_auth, auth_resolution
-        ),
-        counts=RunPreflightMissionCounts(
-            endpoint_count=endpoint_count,
-            estimated_executable_count=estimated_executable_count,
-            estimated_skipped_count=estimated_skipped_count,
-            auth_required_count=auth_required_count,
-            flow_step_count=len(expected_flow),
-            check_count=len(checks),
-            ready_count=ready_count,
-            review_count=review_count,
-            blocked_count=blocked_count,
-        ),
-        correction_prompts=_preflight_correction_prompts(checks, warnings),
+        checks=checks,
+        warnings=warnings,
+        endpoint_count=endpoint_count,
+        auth_required_count=auth_required_count,
+        estimated_executable_count=estimated_executable_count,
+        estimated_skipped_count=estimated_skipped_count,
+        api_execution_policy=api_execution_policy,
+        supplied_auth=supplied_auth,
+        auth_resolution=auth_resolution,
     )
 
 
-_TARGET_MEMORY_SAMPLE_LIMIT = 100
-_TARGET_MEMORY_URL_RE = re.compile(r"https?://[^\s<>\")\]]+")
+_TARGET_MEMORY_SAMPLE_LIMIT = preflight_service._TARGET_MEMORY_SAMPLE_LIMIT
+_TARGET_MEMORY_URL_RE = preflight_service._TARGET_MEMORY_URL_RE
 
 
 def _redact_url_for_memory(value: str) -> str:
-    try:
-        parsed = urlsplit(value)
-    except Exception:
-        return redact_sensitive_text(value).split("?", 1)[0]
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return redact_sensitive_text(value).split("?", 1)[0]
-    hostname = parsed.hostname or ""
-    if ":" in hostname and not hostname.startswith("["):
-        hostname = f"[{hostname}]"
-    netloc = hostname
-    if parsed.port:
-        netloc = f"{netloc}:{parsed.port}"
-    path = redact_sensitive_text(parsed.path or "")
-    return urlunsplit((parsed.scheme, netloc, path, "", ""))
+    return preflight_service.redact_url_for_memory(value)
 
 
 def _target_memory_text(value: Any, limit: int = 220) -> str:
-    text = redact_sensitive_text(str(value or "").strip())
-    text = _TARGET_MEMORY_URL_RE.sub(lambda match: _redact_url_for_memory(match.group(0)), text)
-    text = re.sub(
-        r"([?&][A-Za-z0-9_.:-]+)=([^\s&#,;)}\]]+)",
-        lambda match: f"{match.group(1)}={REDACTED_VALUE}",
-        text,
-    )
-    if len(text) <= limit:
-        return text
-    return f"{text[:limit].rstrip()}..."
+    return preflight_service.target_memory_text(value, limit)
 
 
 def _target_memory_url_parts(value: Any) -> dict[str, str | None]:
-    text = str(value or "").strip()
-    if not text:
-        return {"host": None, "exact": None, "label": "Unknown target"}
-    try:
-        parsed = urlsplit(text)
-    except Exception:
-        safe_text = _target_memory_text(text, 160)
-        return {
-            "host": None,
-            "exact": safe_text.lower() if safe_text else None,
-            "label": safe_text or "Unknown target",
-        }
-    if parsed.scheme in {"http", "https"} and parsed.netloc:
-        hostname = parsed.hostname or ""
-        if ":" in hostname and not hostname.startswith("["):
-            hostname = f"[{hostname}]"
-        host = hostname.lower()
-        if parsed.port:
-            host = f"{host}:{parsed.port}"
-        path = (parsed.path or "/").rstrip("/") or "/"
-        return {
-            "host": host,
-            "exact": f"{parsed.scheme.lower()}://{host}{path}",
-            "label": _redact_url_for_memory(text),
-        }
-    safe_text = _target_memory_text(text, 160)
-    return {
-        "host": None,
-        "exact": safe_text.lower() if safe_text else None,
-        "label": safe_text or "Unknown target",
-    }
+    return preflight_service.target_memory_url_parts(value)
 
 
 def _target_memory_task_matches(target_parts: dict[str, str | None], task: Task) -> bool:
-    task_parts = _target_memory_url_parts(getattr(task, "target_url", None))
-    if target_parts.get("host") and task_parts.get("host"):
-        return target_parts["host"] == task_parts["host"]
-    if target_parts.get("exact") and task_parts.get("exact"):
-        return target_parts["exact"] == task_parts["exact"]
-    return False
+    return preflight_service.target_memory_task_matches(target_parts, task)
 
 
 def _target_memory_last_seen(current: datetime | None, candidate: datetime) -> datetime:
-    if current is None or candidate > current:
-        return candidate
-    return current
+    return preflight_service.target_memory_last_seen(current, candidate)
 
 
 def _target_memory_add_blocker(
@@ -1832,23 +824,13 @@ def _target_memory_add_blocker(
     reason: str,
     created_at: datetime,
 ) -> None:
-    detail = _target_memory_text(reason, 220)
-    if not detail:
-        return
-    entry = stats.setdefault(
-        category,
-        {
-            "category": category,
-            "label": label,
-            "count": 0,
-            "detail": detail,
-            "last_seen_dt": None,
-        },
+    preflight_service.target_memory_add_blocker(
+        stats,
+        category=category,
+        label=label,
+        reason=reason,
+        created_at=created_at,
     )
-    entry["count"] += 1
-    entry["last_seen_dt"] = _target_memory_last_seen(entry["last_seen_dt"], created_at)
-    if entry["detail"] == detail or created_at >= entry["last_seen_dt"]:
-        entry["detail"] = detail
 
 
 def _target_memory_confidence(
@@ -1858,13 +840,12 @@ def _target_memory_confidence(
     known_blocker_count: int,
     reusable_suite_count: int,
 ) -> tuple[str, str]:
-    if previous_run_count == 0:
-        return "low", "当前目标还没有可复用的历史运行。"
-    if previous_run_count >= 3 or recurring_theme_count or reusable_suite_count:
-        return "high", "已有多次历史运行、复用资产或重复问题可指导本次策略。"
-    if known_blocker_count:
-        return "medium", "历史样本有限，但已有可参考的登录、鉴权或前置阻塞。"
-    return "medium", "已有少量历史运行，可作为弱记忆参考。"
+    return preflight_service.target_memory_confidence(
+        previous_run_count=previous_run_count,
+        recurring_theme_count=recurring_theme_count,
+        known_blocker_count=known_blocker_count,
+        reusable_suite_count=reusable_suite_count,
+    )
 
 
 def _target_memory_strategy(
@@ -1875,19 +856,13 @@ def _target_memory_strategy(
     known_blockers: list[RunTargetMemoryBlocker],
     reusable_suite_count: int,
 ) -> str:
-    if previous_run_count == 0:
-        return "暂无目标历史；先执行安全冒烟和只读检查，并在完成后保存可复用用例。"
-    if known_blockers:
-        return f"先确认「{known_blockers[0].label}」已处理，再启动本次运行；必要时补充账号、Token、环境和成功判断。"
-    if recurring_themes:
-        return f"优先回归反复出现的「{recurring_themes[0].theme}」，并保留证据用于缺陷流转。"
-    if reusable_suite_count:
-        return "优先复用已保存套件覆盖稳定路径，再用本次目标补充探索性检查。"
-    if last_status in {"failed", "bug_found"}:
-        return "上次运行未通过；从失败路径和受影响页面/接口开始重跑，再扩展到冒烟范围。"
-    if last_status == "succeeded":
-        return "沿用上次通过的安全策略，增加少量边界与回归检查以确认无退化。"
-    return "结合历史状态先做小范围验证，再根据预检结果扩展覆盖面。"
+    return preflight_service.target_memory_strategy(
+        previous_run_count=previous_run_count,
+        last_status=last_status,
+        recurring_themes=recurring_themes,
+        known_blockers=known_blockers,
+        reusable_suite_count=reusable_suite_count,
+    )
 
 
 async def _build_preflight_target_memory(
@@ -1897,190 +872,11 @@ async def _build_preflight_target_memory(
     input_type: str,
     target_url: str,
 ) -> RunTargetMemory:
-    target_parts = _target_memory_url_parts(target_url)
-    result = await db.execute(
-        select(Task).order_by(Task.created_at.desc()).limit(_TARGET_MEMORY_SAMPLE_LIMIT)
-    )
-    sampled_tasks = list(result.scalars())
-    matching_tasks = [
-        task for task in sampled_tasks if _target_memory_task_matches(target_parts, task)
-    ]
-    now = datetime.utcnow()
-    matching_tasks.sort(key=lambda item: _history_created_at(item, now), reverse=True)
-
-    task_ids = [task.id for task in matching_tasks]
-    reusable_suites: list[RunTargetMemorySuite] = []
-    reusable_case_count = 0
-    if task_ids:
-        suite_result = await db.execute(
-            select(TestSuite)
-            .where(TestSuite.task_id.in_(task_ids))
-            .order_by(TestSuite.created_at.desc())
-            .limit(10)
-        )
-        for suite in suite_result.scalars():
-            case_ids = suite.test_case_ids if isinstance(suite.test_case_ids, list) else []
-            case_count = len(case_ids)
-            reusable_case_count += case_count
-            reusable_suites.append(
-                RunTargetMemorySuite(
-                    suite_id=suite.id,
-                    label=_target_memory_text(suite.name, 80) or "Untitled suite",
-                    case_count=case_count,
-                )
-            )
-
-    theme_stats: dict[str, dict[str, Any]] = {}
-    blocker_stats: dict[str, dict[str, Any]] = {}
-    for task in matching_tasks:
-        status = _history_status(task)
-        created_at = _history_created_at(task, now)
-        parsed = redact_sensitive_data(
-            _parse_execution_log_dict(getattr(task, "execution_log", None))
-        )
-        triage = _build_run_triage_summary(status, parsed)
-
-        setup_blocked, setup_reason = _setup_intervention_signal(parsed)
-        api_blocked, api_reason = _api_intervention_signal(parsed)
-        ui_blocked, ui_reason = _ui_intervention_signal(parsed)
-        if setup_blocked or ui_blocked:
-            _target_memory_add_blocker(
-                blocker_stats,
-                category="setup_auth",
-                label="登录/前置阻塞",
-                reason=setup_reason or ui_reason,
-                created_at=created_at,
-            )
-        if api_blocked:
-            _target_memory_add_blocker(
-                blocker_stats,
-                category="api_auth",
-                label="API 鉴权阻塞",
-                reason=api_reason,
-                created_at=created_at,
-            )
-
-        issue_run = (
-            status in _HISTORY_ISSUE_STATUSES or _triage_int(triage.get("blocking_count")) > 0
-        )
-        if not issue_run:
-            continue
-        for finding in _triage_list(triage.get("blocking_findings")):
-            if not isinstance(finding, dict):
-                continue
-            title = _target_memory_text(finding.get("title") or finding.get("description"), 180)
-            if not title:
-                continue
-            category = _history_theme_category(finding)
-            theme_key = f"{category}:{_history_normalize_theme(title)}"
-            severity = _triage_severity(finding.get("severity"))
-            entry = theme_stats.setdefault(
-                theme_key,
-                {
-                    "theme": title,
-                    "category": category,
-                    "count": 0,
-                    "severity": severity,
-                    "severity_rank": _triage_severity_rank(severity),
-                    "surfaces": set(),
-                    "last_seen_dt": None,
-                },
-            )
-            entry["count"] += 1
-            entry["last_seen_dt"] = _target_memory_last_seen(entry["last_seen_dt"], created_at)
-            if _triage_severity_rank(severity) > entry["severity_rank"]:
-                entry["severity"] = severity
-                entry["severity_rank"] = _triage_severity_rank(severity)
-            surface = _target_memory_text(finding.get("surface"), 120)
-            if surface:
-                entry["surfaces"].add(surface)
-
-    recurring_themes = [
-        RunTargetMemoryTheme(
-            theme=item["theme"],
-            category=item["category"],
-            count=item["count"],
-            severity=item["severity"],
-            surfaces=sorted(item["surfaces"])[:5],
-            last_seen=_history_iso(item["last_seen_dt"]),
-            recommended_action=_history_theme_action(
-                item["category"], item["severity"], item["theme"]
-            ),
-        )
-        for item in theme_stats.values()
-        if item["count"] > 1
-    ]
-    recurring_themes.sort(
-        key=lambda item: (item.count, _triage_severity_rank(item.severity), item.last_seen or ""),
-        reverse=True,
-    )
-
-    known_blockers = [
-        RunTargetMemoryBlocker(
-            category=item["category"],
-            label=item["label"],
-            count=item["count"],
-            detail=item["detail"],
-            last_seen=_history_iso(item["last_seen_dt"]),
-        )
-        for item in blocker_stats.values()
-    ]
-    known_blockers.sort(key=lambda item: (item.count, item.last_seen or ""), reverse=True)
-
-    target_run_count = sum(
-        1
-        for task in matching_tasks
-        if target_parts.get("exact")
-        and _target_memory_url_parts(getattr(task, "target_url", None)).get("exact")
-        == target_parts.get("exact")
-    )
-    host_run_count = sum(
-        1
-        for task in matching_tasks
-        if target_parts.get("host")
-        and _target_memory_url_parts(getattr(task, "target_url", None)).get("host")
-        == target_parts.get("host")
-    )
-    previous_run_count = host_run_count if target_parts.get("host") else target_run_count
-
-    last_task = matching_tasks[0] if matching_tasks else None
-    last_status = _history_status(last_task) if last_task else None
-    confidence, confidence_reason = _target_memory_confidence(
-        previous_run_count=previous_run_count,
-        recurring_theme_count=len(recurring_themes),
-        known_blocker_count=len(known_blockers),
-        reusable_suite_count=len(reusable_suites),
-    )
-    target_label = _target_memory_text(_preflight_target_label(source, input_type, target_url), 180)
-    return RunTargetMemory(
-        target=target_label or str(target_parts.get("label") or "Unknown target"),
-        previous_run_count=previous_run_count,
-        target_run_count=target_run_count,
-        host_run_count=host_run_count,
-        last_run=RunTargetMemoryLastRun(
-            run_id=last_task.id,
-            status=last_status or "",
-            test_type=normalize_agent_test_type(last_task.test_type, default="auto")
-            if last_task
-            else None,
-            created_at=_history_iso(_history_created_at(last_task, now)) if last_task else None,
-        )
-        if last_task
-        else None,
-        recurring_failure_themes=recurring_themes[:5],
-        known_blockers=known_blockers[:5],
-        reusable_suite_count=len(reusable_suites),
-        reusable_case_count=reusable_case_count,
-        reusable_suites=reusable_suites[:5],
-        suggested_strategy=_target_memory_strategy(
-            previous_run_count=previous_run_count,
-            last_status=last_status,
-            recurring_themes=recurring_themes,
-            known_blockers=known_blockers,
-            reusable_suite_count=len(reusable_suites),
-        ),
-        confidence=confidence,
-        confidence_reason=confidence_reason,
+    return await preflight_service.build_preflight_target_memory(
+        db,
+        source=source,
+        input_type=input_type,
+        target_url=target_url,
     )
 
 
@@ -4666,7 +3462,7 @@ async def create_run(payload: RunCreate, db: DbSession, _: CurrentUser):
     api_profile = await _best_effort_api_profile(source, input_type, api_execution_policy)
     if not payload.base_url and api_profile.get("target_url"):
         target_url = str(api_profile["target_url"])
-    cached_auth = _get_cached_auth_preflight(payload)
+    cached_auth = auth_preflight_service.get_cached_auth_preflight(payload)
     if cached_auth is not None:
         auth_preflight, extra_headers, runtime_auth_config, auth_resolution = cached_auth
     else:
@@ -4675,7 +3471,7 @@ async def create_run(payload: RunCreate, db: DbSession, _: CurrentUser):
             extra_headers,
             runtime_auth_config,
             auth_resolution,
-        ) = await _run_auth_preflight(
+        ) = await auth_preflight_service.run_auth_preflight(
             payload,
             db=db,
             source=source,
@@ -4684,8 +3480,8 @@ async def create_run(payload: RunCreate, db: DbSession, _: CurrentUser):
             test_type=agent_test_type,
             auth_required_count=api_profile.get("auth_required_count"),
         )
-        _cache_auth_preflight(
-            fingerprint=_auth_preflight_fingerprint(payload),
+        auth_preflight_service.cache_auth_preflight(
+            fingerprint=auth_preflight_service.auth_preflight_fingerprint(payload),
             auth_preflight=auth_preflight,
             auth_headers=extra_headers,
             runtime_auth_config=runtime_auth_config,
@@ -4718,9 +3514,9 @@ async def create_run(payload: RunCreate, db: DbSession, _: CurrentUser):
             input_type=input_type,
             auth_headers=extra_headers or None,
             auth_config=runtime_auth_config,
-            auth_mode=_normalize_auth_mode(payload),
-            captcha_mode=_normalize_captcha_mode(payload),
-            auth_credentials=_auth_credentials_dict(payload) or None,
+            auth_mode=auth_preflight_service.normalize_auth_mode(payload),
+            captcha_mode=auth_preflight_service.normalize_captcha_mode(payload),
+            auth_credentials=auth_preflight_service.auth_credentials_dict(payload) or None,
             auth_preflight=auth_preflight.model_dump(mode="json"),
             base_url_override=payload.base_url,
             api_execution_policy=api_execution_policy,
@@ -4741,9 +3537,9 @@ async def create_run(payload: RunCreate, db: DbSession, _: CurrentUser):
                 "input_type": input_type,
                 "auth_headers": extra_headers or None,
                 "auth_config": runtime_auth_config,
-                "auth_mode": _normalize_auth_mode(payload),
-                "captcha_mode": _normalize_captcha_mode(payload),
-                "auth_credentials": _auth_credentials_dict(payload) or None,
+                "auth_mode": auth_preflight_service.normalize_auth_mode(payload),
+                "captcha_mode": auth_preflight_service.normalize_captcha_mode(payload),
+                "auth_credentials": auth_preflight_service.auth_credentials_dict(payload) or None,
                 "auth_preflight": auth_preflight.model_dump(mode="json"),
                 "base_url_override": payload.base_url,
                 "api_execution_policy": api_execution_policy,
@@ -4764,234 +3560,12 @@ async def create_run(payload: RunCreate, db: DbSession, _: CurrentUser):
 @router.post("/preflight", response_model=RunPreflightResponse)
 async def preflight_run(payload: RunPreflightRequest, db: DbSession, _: CurrentUser):
     """Inspect run input and product readiness before creating a test run."""
-    from app.agent.nodes.api_runner import _normalize_api_execution_policy
-    from app.agent.nodes.source_loader import classify_input
-
-    source = payload.source.strip()
-    if not source:
-        raise HTTPException(status_code=400, detail="source is required")
-
-    try:
-        agent_test_type = _normalize_new_run_test_type(payload.test_type)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    input_type = classify_input(source)
-    api_execution_policy = _normalize_api_execution_policy(payload.api_execution_policy)
-    target_url = _resolve_run_target_url(source, input_type, payload.base_url)
-    provider_count = await _count_rows(db, LLMProvider)
-    planner_count = await _count_default_planners(db)
-    environment_count = await _count_rows(db, Environment)
-    api_profile = await _best_effort_api_profile(source, input_type, api_execution_policy)
-    endpoint_count = api_profile["endpoint_count"]
-    auth_required_count = api_profile["auth_required_count"]
-    estimated_executable_count = api_profile["estimated_executable_count"]
-    estimated_skipped_count = api_profile["estimated_skipped_count"]
-    if not payload.base_url and api_profile.get("target_url"):
-        target_url = str(api_profile["target_url"])
-    reachability = await _best_effort_reachability(source)
-    worker_status, worker_detail, worker_action = await _best_effort_worker_readiness()
-    browser_tool_found = (
-        shutil.which("playwright-cli") is not None or shutil.which("npx") is not None
+    deps = preflight_service.RunPreflightDependencies(
+        best_effort_worker_readiness=_best_effort_worker_readiness,
+        best_effort_reachability=_best_effort_reachability,
+        redis_broker_reachable=_redis_broker_reachable,
     )
-    (
-        auth_preflight,
-        prepared_headers,
-        runtime_auth_config,
-        auth_resolution,
-    ) = await _run_auth_preflight(
-        payload,
-        db=db,
-        source=source,
-        input_type=input_type,
-        target_url=target_url,
-        test_type=agent_test_type,
-        auth_required_count=auth_required_count,
-    )
-    _cache_auth_preflight(
-        fingerprint=_auth_preflight_fingerprint(payload),
-        auth_preflight=auth_preflight,
-        auth_headers=prepared_headers,
-        runtime_auth_config=runtime_auth_config,
-        auth_resolution=auth_resolution,
-    )
-    supplied_auth = auth_preflight.can_start or has_auth_like_header(prepared_headers)
-    auth_mode = _normalize_auth_mode(payload)
-    auth_attempted = auth_mode == "auto"
-
-    checks = [
-        RunPreflightCheck(
-            key="source",
-            label="测试目标",
-            status="ready",
-            detail=f"已识别为 {input_type}",
-        ),
-        RunPreflightCheck(
-            key="provider",
-            label="模型配置",
-            status="ready" if provider_count else "missing",
-            detail="已配置可用模型" if provider_count else "尚未配置 LLM Provider",
-            action=None if provider_count else "前往系统设置配置模型",
-        ),
-        RunPreflightCheck(
-            key="planner",
-            label="规划模型",
-            status="ready" if planner_count else "warning",
-            detail="已有默认 Planner 模型"
-            if planner_count
-            else "未设置默认 Planner，系统将按现有回退逻辑尝试运行",
-            action=None if planner_count else "在模型管理中设置默认 Planner",
-        ),
-        RunPreflightCheck(
-            key="worker",
-            label="任务 Worker",
-            status=worker_status,
-            detail=worker_detail,
-            action=worker_action,
-        ),
-        RunPreflightCheck(
-            key="runner",
-            label="浏览器执行器",
-            status="ready" if browser_tool_found else "warning",
-            detail="检测到本地浏览器执行入口"
-            if browser_tool_found
-            else "未检测到 playwright-cli 或 npx，UI 测试可能失败",
-            action=None if browser_tool_found else "确认前端/Worker 镜像已安装浏览器工具",
-        ),
-        RunPreflightCheck(
-            key="reachability",
-            label="目标可达性",
-            status=reachability,
-            detail="目标可访问"
-            if reachability == "ready"
-            else "未执行网络检查"
-            if reachability == "skipped"
-            else "暂时无法确认目标可达",
-        ),
-        RunPreflightCheck(
-            key="environment",
-            label="环境资产",
-            status="ready" if environment_count else "warning",
-            detail=f"已配置 {environment_count} 个环境"
-            if environment_count
-            else "尚未沉淀环境配置，本次将使用输入源直接运行",
-        ),
-        RunPreflightCheck(
-            key="auth",
-            label="鉴权准备",
-            status="ready"
-            if auth_preflight.can_start
-            else "missing"
-            if auth_preflight.status == "blocked"
-            else "warning",
-            detail=(auth_preflight.steps[-1].detail if auth_preflight.steps else "鉴权预检未完成"),
-            action=(
-                None
-                if auth_preflight.can_start
-                else auth_preflight.next_action
-                or "选择自动鉴权、手动 Header/Token，或确认无需鉴权。"
-            ),
-        ),
-        RunPreflightCheck(
-            key="api_policy",
-            label="API 执行策略",
-            status="ready",
-            detail=(
-                "安全只读：默认跳过 POST/PUT/PATCH/DELETE"
-                if api_execution_policy != "write_allowed"
-                else "已允许写入/变更请求，需确认目标为测试环境"
-            ),
-        ),
-    ]
-
-    warnings: list[str] = []
-    if input_type in ("swagger_json", "swagger_yaml") and not payload.base_url:
-        warnings.append(
-            "原文 Swagger 未提供 Base URL 时，系统只能依赖文档 servers 字段推断请求地址。"
-        )
-    if agent_test_type == "ui" and not payload.setup_instructions.strip():
-        warnings.append(
-            "如果目标需要登录、验证码或其他前置步骤，请在前置说明里提供测试账号和安全边界。"
-        )
-    if input_type == "url" and agent_test_type == "api":
-        warnings.append(
-            "当前输入看起来是网页 URL，但测试模式选择了 API；建议确认是否应使用 Swagger/OpenAPI。"
-        )
-    if not auth_preflight.can_start:
-        warnings.append(f"鉴权预检未通过：{auth_preflight.next_action or auth_preflight.status}")
-    if auth_attempted and auth_resolution.detail and not auth_resolution.ok:
-        warnings.append(f"自动鉴权预检失败：{auth_resolution.detail}")
-    if estimated_skipped_count:
-        warnings.append(
-            f"当前 API 策略预计会跳过 {estimated_skipped_count} 个写入/变更接口，避免误改真实数据。"
-        )
-    if api_profile.get("api_path_prefix_rewrite"):
-        rewrite = api_profile["api_path_prefix_rewrite"]
-        warnings.append(
-            f"检测到代理路径改写：请求执行时会将 {rewrite.get('from')} 改为 {rewrite.get('to')}。"
-        )
-
-    expected_flow = _expected_flow_for(input_type, agent_test_type, bool(payload.base_url))
-    readiness = _preflight_readiness(checks)
-    mission_preview = _build_mission_preview(
-        payload,
-        source=source,
-        input_type=input_type,
-        test_type=agent_test_type,
-        target_url=target_url,
-        expected_flow=expected_flow,
-        readiness=readiness,
-        checks=checks,
-        warnings=warnings,
-        endpoint_count=endpoint_count,
-        auth_required_count=auth_required_count,
-        estimated_executable_count=estimated_executable_count,
-        estimated_skipped_count=estimated_skipped_count,
-        api_execution_policy=api_execution_policy,
-        supplied_auth=supplied_auth,
-        auth_resolution=auth_resolution,
-    )
-    target_memory = await _build_preflight_target_memory(
-        db,
-        source=source,
-        input_type=input_type,
-        target_url=target_url,
-    )
-
-    return RunPreflightResponse(
-        input_type=input_type,
-        test_type=agent_test_type,
-        target_url=target_url,
-        expected_flow=expected_flow,
-        readiness=readiness,
-        checks=checks,
-        mission_preview=mission_preview,
-        target_memory=target_memory,
-        auth_preflight=auth_preflight,
-        warnings=warnings,
-        endpoint_count=endpoint_count,
-        auth_required_count=auth_required_count,
-        estimated_executable_count=estimated_executable_count,
-        estimated_skipped_count=estimated_skipped_count,
-        api_execution_policy=api_execution_policy,
-        api_path_prefix_rewrite=api_profile.get("api_path_prefix_rewrite"),
-        auth_resolved=auth_resolution.ok
-        or (auth_preflight.can_start and auth_preflight.strategy == "manual_header"),
-        auth_strategy=auth_resolution.strategy or auth_preflight.strategy,
-        auth_header_name=auth_resolution.header_name,
-        auth_error=None
-        if auth_preflight.can_start
-        else auth_resolution.detail or auth_preflight.next_action,
-        auth_missing_inputs=[]
-        if auth_preflight.can_start
-        else auth_preflight.missing_fields or auth_resolution.missing_inputs,
-        auth_next_action=None
-        if auth_preflight.can_start
-        else auth_preflight.next_action or auth_resolution.next_action,
-        auth_required_fields=[]
-        if auth_preflight.can_start
-        else auth_resolution.required_fields or auth_preflight.missing_fields,
-    )
+    return await preflight_service.build_run_preflight_response(payload, db, deps=deps)
 
 
 @router.get("", response_model=list[TaskListItemRead])
@@ -5002,6 +3576,9 @@ async def list_runs(
     page_size: int = Query(default=20, ge=1, le=100),
     status: str | None = Query(default=None),
     test_type: str | None = Query(default=None),
+    search: str | None = Query(default=None, max_length=200),
+    created_after: datetime | None = Query(default=None),
+    created_before: datetime | None = Query(default=None),
 ):
     """List all test runs with optional filters."""
     try:
@@ -5015,6 +3592,23 @@ async def list_runs(
         filters.append(Task.status == normalized_status)
     if normalized_test_type is not None:
         filters.append(Task.test_type == normalized_test_type)
+    created_after = _normalize_query_datetime(created_after)
+    created_before = _normalize_query_datetime(created_before)
+    if created_after is not None:
+        filters.append(Task.created_at >= created_after)
+    if created_before is not None:
+        filters.append(Task.created_at <= created_before)
+    search_term = (search or "").strip()
+    if search_term:
+        pattern = f"%{search_term}%"
+        filters.append(
+            or_(
+                Task.id.ilike(pattern),
+                Task.objective.ilike(pattern),
+                Task.target_url.ilike(pattern),
+                Task.execution_log.ilike(pattern),
+            )
+        )
 
     count_stmt = select(func.count()).select_from(Task)
     if filters:
@@ -5380,50 +3974,18 @@ async def stream_run(run_id: str, db: DbSession, token: str | None = Query(defau
     else:
         raise HTTPException(status_code=401, detail="Token required for SSE stream")
 
-    async def event_stream():
-        last_status = None
-        last_log = ""
-        while True:
-            async with AsyncSessionLocal() as stream_db:
-                task = await task_service.get(stream_db, run_id)
-                if task is None:
-                    yield f"data: {json.dumps({'error': 'Run not found'})}\n\n"
-                    break
-                current_status = task.status if isinstance(task.status, str) else task.status.value
-                current_log = task.execution_log or ""
+    task = await task_service.get(db, run_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Run not found")
 
-            if current_status != last_status:
-                yield f"data: {json.dumps({'run_id': run_id, 'type': 'status', 'status': current_status})}\n\n"
-                last_status = current_status
-
-            if current_log != last_log:
-                try:
-                    log_data = json.loads(current_log)
-                    log_data = redact_sensitive_data(log_data)
-                    triage_summary = _build_run_triage_summary(current_status, log_data)
-                    log_data["triage_summary"] = triage_summary
-                    log_data["intervention_summary"] = _build_run_intervention_summary(
-                        current_status,
-                        log_data,
-                        triage_summary,
-                    )
-                    yield f"data: {json.dumps({'run_id': run_id, 'type': 'snapshot', 'snapshot': log_data})}\n\n"
-                    steps = log_data.get("workflow_steps") or []
-                    if steps:
-                        yield f"data: {json.dumps({'run_id': run_id, 'type': 'workflow', 'steps': steps})}\n\n"
-                except Exception:
-                    pass
-                safe_log = redact_json_text(current_log) or current_log
-                yield f"data: {json.dumps({'run_id': run_id, 'type': 'log', 'log': safe_log[:2000]})}\n\n"
-                last_log = current_log
-
-            if current_status in ("succeeded", "failed", "bug_found", "cancelled"):
-                yield f"data: {json.dumps({'run_id': run_id, 'type': 'done', 'status': current_status})}\n\n"
-                break
-
-            await asyncio.sleep(2)
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        stream_run_events(
+            run_id,
+            build_triage_summary=_build_run_triage_summary,
+            build_intervention_summary=_build_run_intervention_summary,
+        ),
+        media_type="text/event-stream",
+    )
 
 
 @router.post("/{run_id}/rerun", response_model=TaskRead)

@@ -7,12 +7,12 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
-  Database,
   FileCode,
   Link2,
   Pencil,
   Play,
   Search,
+  Sparkles,
   Trash2,
   Upload,
   X,
@@ -21,6 +21,8 @@ import EmptyState from '../components/EmptyState.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import StyledSelect from '../components/StyledSelect.vue'
+import DocumentAssetCard from '../components/assets/DocumentAssetCard.vue'
+import { compactLines, redactSensitiveText } from '../lib/assetHandoff'
 
 const REAL_DOCS_URL = 'http://60.204.225.104/api/v3/api-docs'
 const endpointPageSize = 12
@@ -380,6 +382,35 @@ function startApiRun(item: any) {
   })
 }
 
+function authEndpointCount(item: any) {
+  const endpoints = Array.isArray(item?.parsed_endpoints) ? item.parsed_endpoints : []
+  return endpoints.filter((endpoint: any) => endpoint?.auth_required).length
+}
+
+function useDocumentForPlan(item: any) {
+  const endpoints = Array.isArray(item?.parsed_endpoints) ? item.parsed_endpoints : []
+  const context = compactLines([
+    '从 TestClaw 接口文档资产创建新测试计划。',
+    `文档：${item.name || 'OpenAPI 文档'}`,
+    `格式：${item.format || 'openapi'}`,
+    `端点数：${endpoints.length}`,
+    `需要鉴权端点：${authEndpointCount(item)}`,
+    item.source_url ? `Source URL：${item.source_url}` : 'Source：已保存原文，不在 URL 中传递原文内容。',
+    '建议范围：API 契约、鉴权链路、参数边界、错误分支。',
+    '安全边界：默认只读；不要复用凭证、Token、Cookie、会话或验证码值。',
+  ])
+  router.push({
+    path: '/agent-plan',
+    query: {
+      from: 'asset',
+      asset_type: 'document',
+      asset_id: item.id,
+      title: item.name || 'OpenAPI 文档',
+      context: redactSensitiveText(context),
+    },
+  })
+}
+
 function previousEndpointPage() {
   endpointPage.value = Math.max(1, endpointPage.value - 1)
 }
@@ -416,6 +447,14 @@ onMounted(fetchItems)
           class="inline-flex items-center gap-2 rounded-lg bg-gray-950 px-4 py-2 text-xs font-bold text-white transition-all hover:bg-gray-800"
         >
           <Play :size="14" /> 用此文档运行
+        </button>
+        <button
+          v-if="selectedDoc"
+          type="button"
+          @click="useDocumentForPlan(selectedDoc)"
+          class="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-xs font-bold text-blue-700 transition-all hover:bg-blue-100"
+        >
+          <Sparkles :size="14" /> 用于新计划
         </button>
       </div>
     </div>
@@ -534,31 +573,18 @@ onMounted(fetchItems)
             title="暂无文档"
             description="导入 URL、粘贴原文或上传文件后开始浏览端点"
           />
-          <div v-else class="max-h-[430px] overflow-y-auto p-2">
-            <button
+          <div v-else class="max-h-[560px] space-y-3 overflow-y-auto p-3">
+            <DocumentAssetCard
               v-for="item in items"
               :key="item.id"
-              type="button"
-              @click="selectDocument(item)"
-              class="mb-2 w-full rounded-lg border p-3 text-left transition-all"
-              :class="selectedDoc?.id === item.id ? 'border-gray-300 bg-gray-100' : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'"
-            >
-              <div class="flex items-start gap-3">
-                <div class="rounded-lg bg-white p-2 text-blue-600">
-                  <Database :size="15" />
-                </div>
-                <div class="min-w-0 flex-1">
-                  <div class="truncate text-sm font-bold text-gray-900">{{ item.name || `Document-${item.format}` }}</div>
-                  <div class="mt-1 truncate font-mono text-[10px] text-gray-400">
-                    {{ item.source_url || 'manual content' }}
-                  </div>
-                  <div class="mt-2 flex flex-wrap items-center gap-2 text-[10px] font-bold text-gray-500">
-                    <span class="rounded border border-gray-200 bg-white px-2 py-0.5 uppercase">{{ item.format }}</span>
-                    <span>{{ item.parsed_endpoints?.length || 0 }} endpoints</span>
-                  </div>
-                </div>
-              </div>
-            </button>
+              :item="item"
+              :selected="selectedDoc?.id === item.id"
+              @view="selectDocument(item)"
+              @run="startApiRun(item)"
+              @plan="useDocumentForPlan(item)"
+              @edit="startEdit(item)"
+              @delete="confirmDelete(item)"
+            />
           </div>
         </section>
       </aside>
@@ -602,6 +628,13 @@ onMounted(fetchItems)
                   class="inline-flex items-center gap-2 rounded-lg bg-gray-950 px-3 py-2 text-xs font-bold text-white transition-all hover:bg-gray-800"
                 >
                   <Play :size="14" /> 去运行
+                </button>
+                <button
+                  type="button"
+                  @click="useDocumentForPlan(selectedDoc)"
+                  class="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700 transition-all hover:bg-blue-100"
+                >
+                  <Sparkles :size="14" /> 新计划
                 </button>
                 <button
                   type="button"

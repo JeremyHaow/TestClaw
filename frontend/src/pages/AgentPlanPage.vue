@@ -1,74 +1,39 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
-  AlertTriangle,
   Bot,
   CheckCircle2,
-  FileJson,
+  ChevronRight,
+  ClipboardList,
+  Globe2,
+  KeyRound,
+  ListChecks,
   Loader2,
+  LockKeyhole,
   MessageSquare,
   Pencil,
-  Play,
   Plus,
-  Send,
-  ShieldCheck,
   Trash2,
-  X,
-  XCircle,
 } from 'lucide-vue-next'
+import AgentChatInput from '../components/agent/AgentChatInput.vue'
+import AgentPlanDraft from '../components/agent/AgentPlanDraft.vue'
+import AgentQuestionCard from '../components/agent/AgentQuestionCard.vue'
 import api, { apiUrl } from '../lib/api'
+import { redactSensitiveText } from '../lib/assetHandoff'
 import { useToast } from '../composables/useToast'
-
-type PlanMessage = {
-  id: string
-  role: 'user' | 'assistant' | 'system'
-  content: string
-  plan?: PlannerMessagePlan | null
-  created_at?: string | null
-}
-
-type PlannerQuestionChoice = {
-  label: string
-  message: string
-}
-
-type PlannerQuestionOption = {
-  question: string
-  options: PlannerQuestionChoice[]
-}
-
-type PlannerMessagePlan = {
-  status?: string
-  questions?: string[]
-  question_options?: PlannerQuestionOption[]
-  ready_to_execute?: boolean
-  plan?: Record<string, any> | null
-  run_payload?: Record<string, any> | null
-}
-
-type PlanningSession = {
-  id: string
-  title: string
-  status: string
-  ready_to_execute: boolean
-  current_plan?: Record<string, any> | null
-  current_run_payload?: Record<string, any> | null
-  rejection_reason?: string | null
-  executed_run_id?: string | null
-  created_at?: string | null
-  updated_at?: string | null
-  messages?: PlanMessage[]
-  question_options?: PlannerQuestionOption[]
-}
-
-type PlannerProcessEvent = {
-  code: string
-  label: string
-  status?: string
-}
+import type {
+  IntakeStep,
+  IntakeStepId,
+  PlanMessage,
+  PlannerProcessEvent,
+  PlannerQuestionChoice,
+  PlannerQuestionOption,
+  PlanningSession,
+} from '../types/agentPlan'
 
 const router = useRouter()
+const route = useRoute()
 const toast = useToast()
 const sessions = ref<PlanningSession[]>([])
 const activeSession = ref<PlanningSession | null>(null)
@@ -83,29 +48,290 @@ const editingMessageId = ref<string | null>(null)
 const draft = ref('')
 const executeError = ref('')
 const chatEnd = ref<HTMLElement | null>(null)
-const draftInput = ref<HTMLTextAreaElement | null>(null)
+const chatInput = ref<InstanceType<typeof AgentChatInput> | null>(null)
 const processEvents = ref<PlannerProcessEvent[]>([])
 const editingRollbackSnapshot = ref<PlanningSession | null>(null)
+const selectedIntakeChoices = ref<Partial<Record<IntakeStepId, PlannerQuestionChoice>>>({})
+const intakeSupplement = ref<Partial<Record<IntakeStepId, string>>>({})
+const deferredIntakeSteps = ref<Partial<Record<IntakeStepId, boolean>>>({})
+const skippedIntakeSteps = ref<Partial<Record<IntakeStepId, boolean>>>({})
 let streamAbortController: AbortController | null = null
+
+const IMPORTED_PLAN_CONTEXT_LIMIT = 1400
+
+const intakeSteps: IntakeStep[] = [
+  { id: 'target_kind', label: '测试目标', icon: Globe2 },
+  { id: 'coverage_scope', label: '覆盖范围', icon: ClipboardList },
+  { id: 'auth_boundary', label: '登录方式/凭证', icon: KeyRound },
+  { id: 'safety_boundary', label: '安全边界', icon: LockKeyhole },
+  { id: 'success_criteria', label: '成功标准', icon: ListChecks },
+]
 
 const messages = computed(() => activeSession.value?.messages || [])
 const currentPlan = computed(() => activeSession.value?.current_plan || null)
 const currentPayload = computed(() => activeSession.value?.current_run_payload || null)
 const planReady = computed(() => Boolean(activeSession.value?.ready_to_execute && currentPlan.value))
 const canModifyActiveSession = computed(() => Boolean(activeSession.value && activeSession.value.status !== 'executed'))
-const latestOptionMessageId = computed(() => {
-  if (activeSession.value?.status !== 'collecting') return ''
-  for (const message of [...messages.value].reverse()) {
-    if (message.role === 'assistant' && messageQuestionOptions(message).length) return message.id
-  }
-  return ''
-})
 const scopeItems = computed(() => toStringList(currentPlan.value?.scope))
 const stepItems = computed(() => toStringList(currentPlan.value?.steps))
 const safetyItems = computed(() => toStringList(currentPlan.value?.safety))
+const latestQuestionGroups = computed(() => {
+  const sessionGroups = activeSession.value?.question_options
+  const groups = Array.isArray(sessionGroups) && sessionGroups.length
+    ? sessionGroups
+    : latestAssistantQuestionOptions()
+  return groups
+    .filter((group) => group?.question && Array.isArray(group.options) && group.options.length)
+    .slice(0, 2)
+})
+const currentIntakeGroup = computed(() => latestQuestionGroups.value[0] || null)
+const currentStepId = computed<IntakeStepId>(() => {
+  const groupStep = currentIntakeGroup.value ? stepIdForGroup(currentIntakeGroup.value) : null
+  if (groupStep) return groupStep
+  if (planReady.value) return 'success_criteria'
+  return firstOpenStepId()
+})
+const currentStep = computed<IntakeStep>(() => (
+  intakeSteps.find((step) => step.id === currentStepId.value) || intakeSteps[0]!
+))
+const currentSupplementText = computed({
+  get: () => intakeSupplement.value[currentStepId.value] || '',
+  set: (value: string) => {
+    intakeSupplement.value = { ...intakeSupplement.value, [currentStepId.value]: value }
+  },
+})
+const currentSelectedChoice = computed(() => selectedIntakeChoices.value[currentStepId.value] || null)
+const currentGroupRequired = computed(() => currentIntakeGroup.value?.required !== false)
+const canSkipCurrentStep = computed(() => {
+  if (!currentIntakeGroup.value) return false
+  return (
+    currentGroupRequired.value === false
+    || currentIntakeGroup.value.options.some((option) => option.allows_skip || option.optional)
+  )
+})
+const canContinueIntake = computed(() => Boolean(currentSelectedChoice.value || currentSupplementText.value.trim()))
+const currentStepIndex = computed(() => intakeSteps.findIndex((step) => step.id === currentStepId.value))
+const planDraftItems = computed(() => intakeSteps.map((step) => draftItemForStep(step.id)))
+const currentDraftStatus = computed(() => draftItemForStep(currentStepId.value).status)
+const activeRejectionReason = computed(() => (
+  activeSession.value?.status === 'collecting' ? activeSession.value?.rejection_reason || '' : ''
+))
+const intakeControlsDisabled = computed(() => !canModifyActiveSession.value || Boolean(editingMessageId.value))
 
 function toStringList(value: unknown) {
   return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean).slice(0, 8) : []
+}
+
+function queryText(value: unknown) {
+  if (Array.isArray(value)) return typeof value[0] === 'string' ? value[0] : ''
+  return typeof value === 'string' ? value : ''
+}
+
+function redactImportedPlanContext(value: unknown) {
+  return redactSensitiveText(value, IMPORTED_PLAN_CONTEXT_LIMIT)
+}
+
+function importedQualityMemoryPlanContent() {
+  if (queryText(route.query.from) !== 'quality-memory') return ''
+  const context = redactImportedPlanContext(queryText(route.query.context))
+  if (context) return context
+  const target = redactImportedPlanContext(queryText(route.query.target))
+  if (!target) return ''
+  return [
+    '从 TestClaw 质量记忆创建新测试计划。',
+    `目标：${target}`,
+    '安全边界：默认只读；不要复用历史凭证、Token、Cookie、会话或验证码值。',
+  ].join('\n')
+}
+
+function importedAssetPlanContent() {
+  if (queryText(route.query.from) !== 'asset') return ''
+  const assetType = queryText(route.query.asset_type)
+  const assetLabels: Record<string, string> = {
+    document: '接口文档',
+    environment: '测试环境',
+    'test-case': '用例资产',
+  }
+  const label = assetLabels[assetType] || '可复用资产'
+  const context = redactImportedPlanContext(queryText(route.query.context))
+  const title = redactImportedPlanContext(queryText(route.query.title))
+  if (!context && !title) return ''
+  return [
+    `从 TestClaw ${label}创建新测试计划。`,
+    title ? `资产：${title}` : '',
+    context,
+    '安全边界：默认只读；不要复用凭证、Token、Cookie、会话或验证码值。',
+  ].filter(Boolean).join('\n')
+}
+
+async function clearImportedQualityMemoryQuery() {
+  const nextQuery = { ...route.query }
+  delete nextQuery.from
+  delete nextQuery.target
+  delete nextQuery.context
+  await router.replace({ path: route.path, query: nextQuery }).catch(() => undefined)
+}
+
+async function clearImportedAssetQuery() {
+  const nextQuery = { ...route.query }
+  delete nextQuery.from
+  delete nextQuery.asset_type
+  delete nextQuery.asset_id
+  delete nextQuery.title
+  delete nextQuery.context
+  await router.replace({ path: route.path, query: nextQuery }).catch(() => undefined)
+}
+
+function latestAssistantQuestionOptions() {
+  if (activeSession.value?.status !== 'collecting') return []
+  for (const message of [...messages.value].reverse()) {
+    const groups = messageQuestionOptions(message)
+    if (groups.length) return groups
+  }
+  return []
+}
+
+function normalizeStepId(value?: string | null): IntakeStepId | null {
+  const normalized = String(value || '').trim().toLowerCase()
+  const aliases: Record<string, IntakeStepId> = {
+    target: 'target_kind',
+    target_kind: 'target_kind',
+    target_type: 'target_kind',
+    source: 'target_kind',
+    scope: 'coverage_scope',
+    coverage: 'coverage_scope',
+    coverage_scope: 'coverage_scope',
+    auth: 'auth_boundary',
+    login: 'auth_boundary',
+    credentials: 'auth_boundary',
+    auth_boundary: 'auth_boundary',
+    safety: 'safety_boundary',
+    policy: 'safety_boundary',
+    safety_boundary: 'safety_boundary',
+    success: 'success_criteria',
+    criteria: 'success_criteria',
+    success_criteria: 'success_criteria',
+  }
+  return aliases[normalized] || null
+}
+
+function inferStepFromQuestion(question: string): IntakeStepId | null {
+  if (/目标|网址|接口文档/.test(question)) return 'target_kind'
+  if (/范围|覆盖/.test(question)) return 'coverage_scope'
+  if (/登录|账号|鉴权|凭证|令牌|请求头/.test(question)) return 'auth_boundary'
+  if (/安全|只读|写入/.test(question)) return 'safety_boundary'
+  if (/成功|结果|断言|通过/.test(question)) return 'success_criteria'
+  return null
+}
+
+function stepIdForGroup(group: PlannerQuestionOption): IntakeStepId | null {
+  return (
+    normalizeStepId(group.step)
+    || normalizeStepId(group.options[0]?.step)
+    || normalizeStepId(group.options[0]?.field)
+    || inferStepFromQuestion(group.question)
+  )
+}
+
+function firstOpenStepId(): IntakeStepId {
+  for (const step of intakeSteps) {
+    const item = draftItemForStep(step.id)
+    if (item.status === '待确认') return step.id
+  }
+  return 'success_criteria'
+}
+
+function choiceTitle(option: PlannerQuestionChoice) {
+  return option.title || option.label
+}
+
+function selectIntakeChoice(group: PlannerQuestionOption, option: PlannerQuestionChoice) {
+  const stepId = stepIdForGroup(group)
+  if (!stepId || sending.value || intakeControlsDisabled.value) return
+  selectedIntakeChoices.value = { ...selectedIntakeChoices.value, [stepId]: option }
+  deferredIntakeSteps.value = { ...deferredIntakeSteps.value, [stepId]: false }
+  skippedIntakeSteps.value = { ...skippedIntakeSteps.value, [stepId]: false }
+}
+
+function stepIndex(stepId: IntakeStepId) {
+  return intakeSteps.findIndex((step) => step.id === stepId)
+}
+
+function stepTone(stepId: IntakeStepId) {
+  const index = stepIndex(stepId)
+  if (index < currentStepIndex.value) return 'done'
+  if (stepId === currentStepId.value) return 'active'
+  const item = draftItemForStep(stepId)
+  if (item.status !== '待确认') return 'done'
+  return 'pending'
+}
+
+function stepCircleClass(stepId: IntakeStepId) {
+  const tone = stepTone(stepId)
+  if (tone === 'done') return 'border-emerald-500 bg-emerald-500 text-white'
+  if (tone === 'active') return 'border-gray-950 bg-gray-950 text-white'
+  return 'border-gray-200 bg-white text-gray-400'
+}
+
+function stepTextClass(stepId: IntakeStepId) {
+  const tone = stepTone(stepId)
+  if (tone === 'done') return 'text-emerald-700'
+  if (tone === 'active') return 'text-gray-950'
+  return 'text-gray-400'
+}
+
+function draftItemForStep(stepId: IntakeStepId) {
+  const step = intakeSteps.find((item) => item.id === stepId) || intakeSteps[0]
+  const selected = selectedIntakeChoices.value[stepId]
+  const supplement = (intakeSupplement.value[stepId] || '').trim()
+  if (skippedIntakeSteps.value[stepId]) {
+    return { id: stepId, label: step.label, status: '已跳过', value: '按默认策略继续规划' }
+  }
+  if (deferredIntakeSteps.value[stepId]) {
+    return { id: stepId, label: step.label, status: '待补充', value: '已标记为稍后补充' }
+  }
+  if (selected || supplement) {
+    const value = [selected ? choiceTitle(selected) : '', supplement].filter(Boolean).join('；')
+    return { id: stepId, label: step.label, status: '已选择', value }
+  }
+  if (stepId === 'target_kind' && (currentPlan.value?.target || currentPayload.value?.source)) {
+    return { id: stepId, label: step.label, status: '已收集', value: currentPlan.value?.target || currentPayload.value?.source }
+  }
+  if (stepId === 'coverage_scope' && scopeItems.value.length) {
+    return { id: stepId, label: step.label, status: '已生成', value: scopeItems.value[0] }
+  }
+  if (stepId === 'auth_boundary' && (currentPlan.value?.auth_summary || currentPayload.value?.auth_mode)) {
+    return { id: stepId, label: step.label, status: '已收集', value: currentPlan.value?.auth_summary || currentPayload.value?.auth_mode }
+  }
+  if (stepId === 'safety_boundary' && (safetyItems.value.length || currentPayload.value?.api_execution_policy)) {
+    return { id: stepId, label: step.label, status: '已收集', value: safetyItems.value[0] || currentPayload.value?.api_execution_policy }
+  }
+  if (stepId === 'success_criteria' && currentPlan.value?.summary) {
+    return { id: stepId, label: step.label, status: '已生成', value: currentPlan.value.summary }
+  }
+  return { id: stepId, label: step.label, status: '待确认', value: '等待确认' }
+}
+
+function buildIntakeContent(action: 'continue' | 'defer' | 'skip') {
+  const step = currentStep.value
+  if (action === 'skip') {
+    return `${step.label}：跳过这个非必填项，按默认 TestClaw 策略继续规划。`
+  }
+  if (action === 'defer') {
+    if (step.id === 'target_kind') {
+      return `${step.label}：目标来源待补充；这不是可执行目标，请在计划草案中标记为待补充。`
+    }
+    return `${step.label}：稍后补充；先记录为待补充项，请继续确认其他计划信息。`
+  }
+  const parts: string[] = []
+  if (currentSelectedChoice.value) {
+    parts.push(`${step.label}：${choiceTitle(currentSelectedChoice.value)}。${currentSelectedChoice.value.message}`)
+  }
+  const supplement = currentSupplementText.value.trim()
+  if (supplement) {
+    parts.push(`${step.label}补充说明：${supplement}`)
+  }
+  return parts.join('\n')
 }
 
 function statusLabel(status?: string) {
@@ -177,10 +403,18 @@ function upsertSession(session: PlanningSession) {
   sessions.value.sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')))
 }
 
+function resetIntakeState() {
+  selectedIntakeChoices.value = {}
+  intakeSupplement.value = {}
+  deferredIntakeSteps.value = {}
+  skippedIntakeSteps.value = {}
+}
+
 function resetConversationUi() {
   processEvents.value = []
   editingMessageId.value = null
   editingRollbackSnapshot.value = null
+  resetIntakeState()
 }
 
 function clonePlanningSession(session: PlanningSession): PlanningSession {
@@ -290,7 +524,7 @@ async function scrollChat() {
 
 async function focusDraftInput() {
   await nextTick()
-  draftInput.value?.focus()
+  await chatInput.value?.focus()
 }
 
 function parseSseBlock(block: string) {
@@ -431,6 +665,32 @@ async function loadSessions() {
   }
 }
 
+async function initializePage() {
+  const qualityMemoryContent = importedQualityMemoryPlanContent()
+  const assetContent = qualityMemoryContent ? '' : importedAssetPlanContent()
+  const importedContent = qualityMemoryContent || assetContent
+  if (!importedContent) {
+    await loadSessions()
+    return
+  }
+
+  loading.value = true
+  try {
+    await createSession()
+    if (qualityMemoryContent) {
+      await clearImportedQualityMemoryQuery()
+    } else {
+      await clearImportedAssetQuery()
+    }
+    const sent = await submitPlannerContent(importedContent, importedContent)
+    if (!sent) {
+      draft.value = importedContent
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
 async function createSession() {
   creating.value = true
   executeError.value = ''
@@ -453,20 +713,15 @@ async function selectSession(id: string) {
   await scrollChat()
 }
 
-async function sendMessage() {
-  const content = draft.value.trim()
-  if (!content || sending.value) return
+async function submitPlannerContent(content: string, restoreDraftContent = '') {
+  if (!content || sending.value) return false
   if (!activeSession.value) {
     await createSession()
   }
-  if (!activeSession.value) return
+  if (!activeSession.value) return false
   if (!canModifyActiveSession.value) {
     toast.error(errorMessage(new Error('Executed plan cannot be changed'), '已执行的计划不能再修改'))
-    return
-  }
-  if (editingMessageId.value) {
-    await resendEditedMessage(content)
-    return
+    return false
   }
   sending.value = true
   executeError.value = ''
@@ -478,20 +733,54 @@ async function sendMessage() {
     await scrollChat()
     await streamPlannerTurn(`/agent-plans/${sessionId}/messages/stream`, 'POST', content, assistantId)
     await scrollChat()
+    return true
   } catch (error: any) {
-    draft.value = content
+    draft.value = restoreDraftContent
     await selectSession(sessionId).catch(() => undefined)
     toast.error(errorMessage(error, '发送失败'))
+    return false
   } finally {
     sending.value = false
   }
 }
 
-async function applyChoiceToDraft(option: PlannerQuestionChoice) {
-  const message = option.message.trim()
-  if (!message || sending.value || !canModifyActiveSession.value) return
-  draft.value = draft.value.trim() ? `${draft.value.trim()}\n${message}` : message
-  await focusDraftInput()
+async function sendMessage() {
+  const content = draft.value.trim()
+  if (!content || sending.value) return
+  if (editingMessageId.value) {
+    await resendEditedMessage(content)
+    return
+  }
+  await submitPlannerContent(content, content)
+}
+
+async function continueIntake() {
+  if (!canContinueIntake.value || sending.value || intakeControlsDisabled.value) return
+  const content = buildIntakeContent('continue')
+  if (!content.trim()) return
+  await submitPlannerContent(content)
+}
+
+async function deferCurrentStep() {
+  if (sending.value || intakeControlsDisabled.value) return
+  const stepId = currentStepId.value
+  deferredIntakeSteps.value = { ...deferredIntakeSteps.value, [stepId]: true }
+  skippedIntakeSteps.value = { ...skippedIntakeSteps.value, [stepId]: false }
+  const sent = await submitPlannerContent(buildIntakeContent('defer'))
+  if (!sent) {
+    deferredIntakeSteps.value = { ...deferredIntakeSteps.value, [stepId]: false }
+  }
+}
+
+async function skipCurrentStep() {
+  if (!canSkipCurrentStep.value || sending.value || intakeControlsDisabled.value) return
+  const stepId = currentStepId.value
+  skippedIntakeSteps.value = { ...skippedIntakeSteps.value, [stepId]: true }
+  deferredIntakeSteps.value = { ...deferredIntakeSteps.value, [stepId]: false }
+  const sent = await submitPlannerContent(buildIntakeContent('skip'))
+  if (!sent) {
+    skippedIntakeSteps.value = { ...skippedIntakeSteps.value, [stepId]: false }
+  }
 }
 
 async function resendEditedMessage(content: string) {
@@ -640,7 +929,7 @@ async function deleteMessage(message: PlanMessage) {
   }
 }
 
-onMounted(loadSessions)
+onMounted(initializePage)
 onBeforeUnmount(() => {
   streamAbortController?.abort()
 })
@@ -729,6 +1018,37 @@ onBeforeUnmount(() => {
         </span>
       </div>
 
+      <div class="border-b border-gray-100 bg-white px-4 py-3">
+        <div class="grid grid-cols-5 gap-2">
+          <div
+            v-for="(step, index) in intakeSteps"
+            :key="step.id"
+            class="min-w-0"
+          >
+            <div class="flex items-center gap-1.5">
+              <div
+                class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border text-xs transition"
+                :class="stepCircleClass(step.id)"
+              >
+                <CheckCircle2 v-if="stepTone(step.id) === 'done'" :size="15" />
+                <component v-else :is="step.icon" :size="15" />
+              </div>
+              <ChevronRight
+                v-if="index < intakeSteps.length - 1"
+                :size="14"
+                class="hidden shrink-0 text-gray-300 sm:block"
+              />
+            </div>
+            <div
+              class="mt-1 truncate text-[11px] font-bold"
+              :class="stepTextClass(step.id)"
+            >
+              {{ step.label }}
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div v-if="processEvents.length" class="border-b border-gray-100 bg-white px-4 py-2">
         <div class="flex flex-wrap gap-2">
           <div
@@ -744,15 +1064,30 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="min-h-0 flex-1 overflow-y-auto bg-[#f8faf9] px-4 py-4">
-        <div v-if="!messages.length" class="flex h-full items-center justify-center">
-          <div class="max-w-md rounded-lg border border-dashed border-gray-300 bg-white px-4 py-4 text-center">
+        <div class="space-y-4">
+          <AgentQuestionCard
+            :current-step="currentStep"
+            :question-group="currentIntakeGroup"
+            :status="currentDraftStatus"
+            :selected-choice="currentSelectedChoice"
+            v-model:supplement="currentSupplementText"
+            :can-skip="canSkipCurrentStep"
+            :can-continue="canContinueIntake"
+            :sending="sending"
+            :disabled="intakeControlsDisabled"
+            @select="selectIntakeChoice"
+            @skip="skipCurrentStep"
+            @defer="deferCurrentStep"
+            @continue="continueIntake"
+          />
+
+          <div v-if="!messages.length" class="rounded-lg border border-dashed border-gray-300 bg-white px-4 py-4 text-center">
             <Bot :size="24" class="mx-auto mb-2 text-gray-500" />
             <div class="text-sm font-semibold text-gray-900">还没有需求</div>
             <div class="mt-1 text-xs leading-5 text-gray-500">先描述目标、范围、鉴权约束和安全边界。</div>
           </div>
-        </div>
 
-        <div v-else class="space-y-3">
+          <div v-else class="space-y-3">
           <div
             v-for="message in messages"
             :key="message.id"
@@ -794,31 +1129,6 @@ onBeforeUnmount(() => {
                 <Loader2 :size="15" class="animate-spin" />
                 <span>正在生成回复</span>
               </div>
-              <div
-                v-if="message.id === latestOptionMessageId"
-                class="mt-3 space-y-2"
-              >
-                <div
-                  v-for="group in messageQuestionOptions(message)"
-                  :key="group.question"
-                  class="space-y-1.5"
-                >
-                  <div class="text-xs font-semibold text-gray-500">{{ group.question }}</div>
-                  <div class="flex flex-wrap gap-2">
-                    <button
-                      v-for="option in group.options"
-                      :key="`${group.question}-${option.label}-${option.message}`"
-                      type="button"
-                      class="rounded-full border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:border-gray-400 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-                      :title="option.message"
-                      :disabled="sending"
-                      @click="applyChoiceToDraft(option)"
-                    >
-                      {{ option.label }}
-                    </button>
-                  </div>
-                </div>
-              </div>
             </div>
             <div
               v-if="message.role !== 'user' && canModifyActiveSession"
@@ -840,144 +1150,34 @@ onBeforeUnmount(() => {
           <div ref="chatEnd" />
         </div>
       </div>
-
-      <div class="border-t border-gray-100 bg-white p-3">
-        <div v-if="activeSession?.rejection_reason && activeSession.status === 'collecting'" class="mb-2 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-          <AlertTriangle :size="15" class="mt-0.5 shrink-0" />
-          <span class="min-w-0 break-words">{{ activeSession.rejection_reason }}</span>
-        </div>
-        <div v-if="editingMessageId" class="mb-2 flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
-          <Pencil :size="14" class="shrink-0" />
-          <span class="min-w-0 flex-1">正在编辑上一条需求，发送后会从这里重新生成。</span>
-          <button
-            type="button"
-            title="取消编辑"
-            aria-label="取消编辑"
-            class="flex h-6 w-6 shrink-0 items-center justify-center rounded-md hover:bg-blue-100"
-            @click="cancelEdit"
-          >
-            <X :size="14" />
-          </button>
-        </div>
-        <div class="flex gap-2">
-          <textarea
-            ref="draftInput"
-            v-model="draft"
-            rows="2"
-            class="min-h-[52px] flex-1 resize-none rounded-lg border border-gray-200 px-3 py-2 text-sm leading-5 outline-none transition focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
-            placeholder="描述测试目标、范围、凭据和约束"
-            :disabled="sending || !canModifyActiveSession"
-            @keydown.enter.exact.prevent="sendMessage"
-          />
-          <button
-            type="button"
-            title="发送"
-            aria-label="发送"
-            class="flex h-[52px] w-[52px] items-center justify-center rounded-lg bg-gray-950 text-white hover:bg-gray-800 disabled:cursor-not-allowed disabled:bg-gray-300"
-            :disabled="sending || !draft.trim() || !canModifyActiveSession"
-            @click="sendMessage"
-          >
-            <Loader2 v-if="sending" :size="18" class="animate-spin" />
-            <Send v-else :size="18" />
-          </button>
-        </div>
       </div>
+
+      <AgentChatInput
+        ref="chatInput"
+        v-model="draft"
+        :sending="sending"
+        :disabled="!canModifyActiveSession"
+        :editing-message-id="editingMessageId"
+        :rejection-reason="activeRejectionReason"
+        @send="sendMessage"
+        @cancel-edit="cancelEdit"
+      />
     </section>
 
-    <aside class="tc-card flex min-h-0 flex-col overflow-hidden">
-      <div class="border-b border-gray-100 px-4 py-3">
-        <div class="flex items-center gap-2">
-          <FileJson :size="18" class="text-gray-700" />
-          <h2 class="text-base font-semibold text-gray-950">当前计划</h2>
-        </div>
-        <p class="mt-1 text-xs text-gray-500">{{ planReady ? '等待确认' : '暂无可执行计划' }}</p>
-      </div>
-
-      <div class="min-h-0 flex-1 overflow-y-auto p-4">
-        <div v-if="!currentPlan" class="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-500">
-          规划器会把下一份可执行任务放在这里。
-        </div>
-
-        <div v-else class="space-y-4">
-          <div>
-            <div class="text-sm font-semibold text-gray-950">{{ currentPlan.title || '测试智能体任务计划' }}</div>
-            <div class="mt-1 text-xs leading-5 text-gray-600">{{ currentPlan.summary }}</div>
-          </div>
-
-          <div class="grid grid-cols-2 gap-2">
-            <div class="rounded-lg border border-gray-200 bg-gray-50 p-2">
-              <div class="text-[10px] font-bold uppercase text-gray-400">目标</div>
-              <div class="mt-1 truncate text-xs font-semibold text-gray-900">{{ currentPlan.target || currentPayload?.source }}</div>
-            </div>
-            <div class="rounded-lg border border-gray-200 bg-gray-50 p-2">
-              <div class="text-[10px] font-bold uppercase text-gray-400">模式</div>
-              <div class="mt-1 text-xs font-semibold uppercase text-gray-900">{{ currentPlan.test_type || currentPayload?.test_type }}</div>
-            </div>
-          </div>
-
-          <div v-if="currentPlan.objective" class="rounded-lg border border-gray-200 bg-white p-3">
-            <div class="text-[10px] font-bold uppercase text-gray-400">任务目标</div>
-            <div class="mt-1 text-xs leading-5 text-gray-700">{{ currentPlan.objective }}</div>
-          </div>
-
-          <div v-if="scopeItems.length" class="space-y-2">
-            <div class="text-xs font-bold uppercase text-gray-400">范围</div>
-            <div v-for="item in scopeItems" :key="item" class="flex gap-2 text-xs leading-5 text-gray-700">
-              <CheckCircle2 :size="14" class="mt-0.5 shrink-0 text-emerald-600" />
-              <span>{{ item }}</span>
-            </div>
-          </div>
-
-          <div v-if="stepItems.length" class="space-y-2">
-            <div class="text-xs font-bold uppercase text-gray-400">执行步骤</div>
-            <div v-for="(item, index) in stepItems" :key="item" class="flex gap-2 text-xs leading-5 text-gray-700">
-              <span class="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-gray-900 text-[10px] font-bold text-white">{{ index + 1 }}</span>
-              <span>{{ item }}</span>
-            </div>
-          </div>
-
-          <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
-            <div class="mb-2 flex items-center gap-2 text-xs font-bold uppercase text-gray-400">
-              <ShieldCheck :size="14" />
-              安全边界
-            </div>
-            <div class="space-y-1.5">
-              <div v-for="item in safetyItems" :key="item" class="text-xs leading-5 text-gray-700">{{ item }}</div>
-              <div class="text-xs leading-5 text-gray-700">{{ currentPlan.auth_summary || currentPlan.auth }}</div>
-            </div>
-          </div>
-
-          <div v-if="executeError" class="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-xs leading-5 text-red-700">
-            <AlertTriangle :size="15" class="mt-0.5 shrink-0" />
-            <span>{{ executeError }}</span>
-          </div>
-        </div>
-      </div>
-
-      <div v-if="currentPlan && activeSession?.status !== 'executed'" class="border-t border-gray-100 p-3">
-        <div class="grid grid-cols-2 gap-2">
-          <button
-            type="button"
-            class="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
-            :disabled="rejecting || executing"
-            @click="rejectPlan"
-          >
-            <Loader2 v-if="rejecting" :size="16" class="animate-spin" />
-            <XCircle v-else :size="16" />
-            拒绝
-          </button>
-          <button
-            type="button"
-            class="inline-flex items-center justify-center gap-2 rounded-lg bg-gray-950 px-3 py-2 text-sm font-semibold text-white hover:bg-gray-800 disabled:cursor-not-allowed disabled:bg-gray-300"
-            :disabled="!planReady || rejecting || executing"
-            @click="executePlan"
-          >
-            <Loader2 v-if="executing" :size="16" class="animate-spin" />
-            <Play v-else :size="16" />
-            立即执行
-          </button>
-        </div>
-      </div>
-    </aside>
+    <AgentPlanDraft
+      :draft-items="planDraftItems"
+      :current-plan="currentPlan"
+      :current-payload="currentPayload"
+      :scope-items="scopeItems"
+      :step-items="stepItems"
+      :safety-items="safetyItems"
+      :plan-ready="planReady"
+      :execute-error="executeError"
+      :rejecting="rejecting"
+      :executing="executing"
+      :show-actions="activeSession?.status !== 'executed'"
+      @reject="rejectPlan"
+      @execute="executePlan"
+    />
   </div>
 </template>

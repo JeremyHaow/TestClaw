@@ -5,11 +5,11 @@ import { Cpu, Database, Globe, BookOpen, Layers, Settings2 } from 'lucide-vue-ne
 const router = useRouter()
 
 const settingsLinks = [
-  { path: '/providers', label: '模型管理', desc: '配置 LLM 提供商和 API Key', icon: Cpu },
-  { path: '/documents', label: '文档管理', desc: '管理导入的 API 文档', icon: Database },
-  { path: '/environments', label: '环境管理', desc: '配置测试环境变量', icon: Globe },
-  { path: '/test-cases', label: '用例库', desc: '查看所有生成的测试用例', icon: Layers },
-  { path: '/knowledge', label: '知识库', desc: '管理 RAG 知识库', icon: BookOpen },
+  { path: '/providers', label: '模型与 Agent', desc: '配置 Planner / Executor / Vision 默认模型', icon: Cpu },
+  { path: '/documents', label: '接口文档', desc: '管理导入的 OpenAPI / Postman 文档', icon: Database },
+  { path: '/environments', label: '测试环境', desc: '配置测试环境变量和安全边界', icon: Globe },
+  { path: '/test-cases', label: '用例资产', desc: '查看、编辑和复用沉淀用例', icon: Layers },
+  { path: '/knowledge', label: 'RAG 知识库', desc: '管理 Agent 可检索的测试知识', icon: BookOpen },
 ]
 </script>
 
@@ -18,8 +18,8 @@ const settingsLinks = [
     <div class="flex items-center gap-3">
       <Settings2 :size="24" class="text-gray-400" />
       <div>
-        <h2 class="text-2xl font-bold tracking-tight text-gray-900">系统设置</h2>
-        <p class="text-gray-500 text-sm">管理模型、环境和文档配置。</p>
+        <h2 class="text-2xl font-bold tracking-tight text-gray-900">Agent 设置</h2>
+        <p class="text-gray-500 text-sm">管理模型、测试资产和 RAG 知识配置。</p>
       </div>
     </div>
 

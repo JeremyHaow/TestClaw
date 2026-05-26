@@ -2,23 +2,48 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import api from '../lib/api'
 import { useToast } from '../composables/useToast'
-import { BookOpen, Check, Edit3, Plus, Search, Trash2, X } from 'lucide-vue-next'
+import { Ban, BookOpen, Check, Edit3, Eye, FileText, Plus, RefreshCw, Search, Trash2, X } from 'lucide-vue-next'
 import EmptyState from '../components/EmptyState.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 
+interface KnowledgeEntry {
+  id: string
+  content: string
+  source_script_id?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+  last_updated?: string | null
+  embedding_available?: boolean
+  usage_count?: number | null
+  used_count?: number | null
+  chunk_count?: number | null
+  fragment_count?: number | null
+  chunks_count?: number | null
+  fragments_count?: number | null
+  chunks?: unknown[] | null
+  fragments?: unknown[] | null
+  is_active?: boolean | null
+  disabled?: boolean | null
+  type?: string | null
+  knowledge_type?: string | null
+  title?: string | null
+  name?: string | null
+}
+
 const toast = useToast()
-const items = ref<any[]>([])
+const items = ref<KnowledgeEntry[]>([])
 const loading = ref(false)
 const searchQuery = ref('')
-const searchResults = ref<any[]>([])
+const searchResults = ref<KnowledgeEntry[]>([])
 const searching = ref(false)
 const newContent = ref('')
 const adding = ref(false)
-const deleteTarget = ref<any>(null)
-const selectedEntry = ref<any | null>(null)
+const deleteTarget = ref<KnowledgeEntry | null>(null)
+const selectedEntry = ref<KnowledgeEntry | null>(null)
 const editing = ref(false)
 const editContent = ref('')
+const reindexingId = ref<string | null>(null)
 
 const displayedItems = computed(() => {
   if (searchQuery.value.trim()) return searchResults.value
@@ -40,10 +65,11 @@ async function fetchItems() {
   loading.value = true
   try {
     const { data } = await api.get('/knowledge')
-    items.value = data
-    if (!selectedEntry.value && data.length) selectedEntry.value = data[0]
+    const list = Array.isArray(data) ? data : []
+    items.value = list
+    if (!selectedEntry.value && list.length) selectedEntry.value = list[0]
     if (selectedEntry.value) {
-      selectedEntry.value = data.find((item: any) => item.id === selectedEntry.value?.id) || selectedEntry.value
+      selectedEntry.value = list.find((item: KnowledgeEntry) => item.id === selectedEntry.value?.id) || selectedEntry.value
     }
   } catch {
     toast.error('加载知识库失败')
@@ -61,7 +87,7 @@ async function doSearch() {
   searching.value = true
   try {
     const { data } = await api.get('/knowledge/search', { params: { q: query } })
-    searchResults.value = data
+    searchResults.value = Array.isArray(data) ? data : []
   } catch {
     toast.error('搜索失败')
   } finally {
@@ -74,7 +100,7 @@ function clearSearch() {
   searchResults.value = []
 }
 
-function selectEntry(entry: any) {
+function selectEntry(entry: KnowledgeEntry) {
   selectedEntry.value = entry
   editing.value = false
   editContent.value = ''
@@ -137,12 +163,104 @@ async function doDelete() {
   }
 }
 
-function embeddingLabel(entry: any) {
+function embeddingLabel(entry: KnowledgeEntry | null) {
   return entry?.embedding_available ? '向量已生成' : '无向量'
 }
 
-function sourceLabel(entry: any) {
+function sourceLabel(entry: KnowledgeEntry | null) {
   return entry?.source_script_id ? `run ${String(entry.source_script_id).slice(0, 8)}` : '手动知识'
+}
+
+function firstNumber(...values: unknown[]) {
+  for (const value of values) {
+    const numberValue = Number(value)
+    if (Number.isFinite(numberValue) && numberValue >= 0) return numberValue
+  }
+  return null
+}
+
+function entryTitle(entry: KnowledgeEntry) {
+  const direct = String(entry.title || entry.name || '').trim()
+  if (direct) return direct
+  const firstLine = String(entry.content || '')
+    .trim()
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .find(Boolean)
+  if (!firstLine) return '未命名知识'
+  return firstLine.length > 32 ? `${firstLine.slice(0, 32)}...` : firstLine
+}
+
+function knowledgeType(entry: KnowledgeEntry) {
+  const explicitType = String(entry.knowledge_type || entry.type || '').trim()
+  if (explicitType) return explicitType
+  const content = String(entry.content || '').toLowerCase()
+  if (/规范|标准|准则|policy|guideline|rule/.test(content)) return '测试规范'
+  if (/缺陷|故障|失败|根因|bug|error|exception|incident/.test(content)) return '历史缺陷'
+  if (/接口|端点|api|openapi|swagger|endpoint/.test(content)) return '接口说明'
+  if (/业务|流程|权限|角色/.test(content)) return '业务规则'
+  return entry.source_script_id ? '运行沉淀' : '手动知识'
+}
+
+function fragmentCount(entry: KnowledgeEntry) {
+  const explicitCount = firstNumber(
+    entry.fragment_count,
+    entry.chunk_count,
+    entry.fragments_count,
+    entry.chunks_count,
+  )
+  if (explicitCount !== null) return explicitCount
+  if (Array.isArray(entry.fragments)) return entry.fragments.length
+  if (Array.isArray(entry.chunks)) return entry.chunks.length
+  const content = String(entry.content || '').trim()
+  if (!content) return 0
+  const paragraphCount = content.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean).length
+  return Math.max(1, paragraphCount, Math.ceil(content.length / 500))
+}
+
+function usageCount(entry: KnowledgeEntry) {
+  return firstNumber(entry.usage_count, entry.used_count) ?? 0
+}
+
+function lastUpdatedLabel(entry: KnowledgeEntry) {
+  return entry.updated_at || entry.last_updated || entry.created_at || '未知'
+}
+
+function retrievalStatusLabel(entry: KnowledgeEntry) {
+  if (entry.disabled || entry.is_active === false) return '已禁用'
+  return entry.embedding_available ? '可检索' : '待索引'
+}
+
+function retrievalStatusClass(entry: KnowledgeEntry) {
+  if (entry.disabled || entry.is_active === false) return 'border-gray-200 bg-gray-50 text-gray-500'
+  return entry.embedding_available
+    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    : 'border-amber-200 bg-amber-50 text-amber-700'
+}
+
+async function reindexEntry(entry: KnowledgeEntry) {
+  const content = String(entry.content || '').trim()
+  if (!content) {
+    toast.warning('知识内容不能为空，无法重新索引')
+    return
+  }
+  reindexingId.value = entry.id
+  try {
+    const { data } = await api.put(`/knowledge/${entry.id}`, { content })
+    const updated = data as KnowledgeEntry
+    selectedEntry.value = updated
+    toast.success(updated.embedding_available ? '知识条目已重新索引' : '重新索引已请求，embedding provider 暂不可用')
+    await fetchItems()
+    if (searchQuery.value.trim()) await doSearch()
+  } catch (err: any) {
+    toast.error(err?.response?.data?.detail || '重新索引失败')
+  } finally {
+    reindexingId.value = null
+  }
+}
+
+function showDisableUnavailable() {
+  toast.warning('当前知识 API 不支持禁用，未执行任何变更')
 }
 
 onMounted(fetchItems)
@@ -192,30 +310,74 @@ onMounted(fetchItems)
 
           <LoadingSpinner v-if="loading || searching" text="加载中..." />
           <EmptyState v-else-if="!displayedItems.length" :icon="BookOpen" title="暂无知识条目" description="添加知识条目来构建你的测试知识库。" />
-          <div v-else class="max-h-96 min-h-[260px] divide-y divide-gray-100 overflow-y-auto lg:max-h-[calc(100vh-28rem)]">
-            <button
+          <div v-else class="max-h-96 min-h-[260px] space-y-3 overflow-y-auto p-3 lg:max-h-[calc(100vh-28rem)]">
+            <article
               v-for="entry in displayedItems"
               :key="entry.id"
-              @click="selectEntry(entry)"
-              class="w-full p-4 text-left transition-colors hover:bg-gray-50"
-              :class="selectedEntry?.id === entry.id ? 'bg-gray-100' : 'bg-white'"
+              data-testid="knowledge-card"
+              class="rounded-lg border p-4 transition-all"
+              :class="selectedEntry?.id === entry.id ? 'border-blue-300 bg-blue-50/50 shadow-[0_12px_30px_rgba(37,99,235,0.10)]' : 'border-gray-200 bg-white shadow-sm hover:border-blue-200 hover:shadow-[0_12px_30px_rgba(15,23,42,0.08)]'"
             >
-              <div class="flex items-start justify-between gap-3">
-                <div class="min-w-0">
+              <div class="flex items-start gap-3">
+                <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
+                  <FileText :size="18" />
+                </div>
+                <div class="min-w-0 flex-1">
                   <div class="flex flex-wrap items-center gap-2">
-                    <span class="font-mono text-[10px] text-gray-400">{{ entry.id.slice(0, 8) }}</span>
-                    <span class="rounded px-2 py-0.5 text-[10px] font-bold" :class="entry.embedding_available ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'">
-                      {{ embeddingLabel(entry) }}
+                    <h3 class="min-w-0 flex-1 truncate text-sm font-semibold text-gray-950">{{ entryTitle(entry) }}</h3>
+                    <span class="rounded-full border px-2 py-0.5 text-[10px] font-bold" :class="retrievalStatusClass(entry)">
+                      {{ retrievalStatusLabel(entry) }}
                     </span>
                   </div>
-                  <p class="mt-2 line-clamp-3 text-sm leading-5 text-gray-700">{{ entry.content }}</p>
-                  <div class="mt-2 flex flex-wrap gap-2 text-[10px] text-gray-400">
-                    <span>{{ sourceLabel(entry) }}</span>
-                    <span>{{ entry.created_at }}</span>
-                  </div>
+                  <p class="mt-2 line-clamp-3 text-xs leading-5 text-gray-500">{{ entry.content }}</p>
                 </div>
               </div>
-            </button>
+
+              <div class="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 border-t border-gray-100 pt-3 text-[11px]">
+                <div>
+                  <div class="font-bold uppercase tracking-widest text-gray-400">类型</div>
+                  <div class="mt-0.5 truncate font-semibold text-gray-800">{{ knowledgeType(entry) }}</div>
+                </div>
+                <div>
+                  <div class="font-bold uppercase tracking-widest text-gray-400">片段</div>
+                  <div class="mt-0.5 font-semibold text-gray-800">{{ fragmentCount(entry) }}</div>
+                </div>
+                <div>
+                  <div class="font-bold uppercase tracking-widest text-gray-400">最近更新</div>
+                  <div class="mt-0.5 truncate font-mono text-gray-500">{{ lastUpdatedLabel(entry) }}</div>
+                </div>
+                <div>
+                  <div class="font-bold uppercase tracking-widest text-gray-400">使用次数</div>
+                  <div class="mt-0.5 font-semibold text-gray-800">{{ usageCount(entry) }}</div>
+                </div>
+              </div>
+
+              <div class="mt-4 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-bold text-gray-700 transition-all hover:border-gray-300 hover:bg-gray-50"
+                  @click="selectEntry(entry)"
+                >
+                  <Eye :size="13" /> 查看
+                </button>
+                <button
+                  type="button"
+                  :disabled="reindexingId === entry.id"
+                  class="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-bold text-blue-700 transition-all hover:bg-blue-100 disabled:opacity-50"
+                  @click="reindexEntry(entry)"
+                >
+                  <RefreshCw :size="13" /> {{ reindexingId === entry.id ? '索引中' : '重新索引' }}
+                </button>
+                <button
+                  type="button"
+                  title="当前知识 API 未提供禁用能力"
+                  class="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs font-bold text-gray-500 transition-all hover:bg-gray-100"
+                  @click="showDisableUnavailable"
+                >
+                  <Ban :size="13" /> 禁用
+                </button>
+              </div>
+            </article>
           </div>
         </section>
       </aside>
@@ -224,9 +386,25 @@ onMounted(fetchItems)
         <div class="flex flex-wrap items-start justify-between gap-3 border-b border-gray-100 px-5 py-4">
           <div>
             <h3 class="text-sm font-bold text-gray-900">知识详情</h3>
-            <p v-if="selectedEntry" class="mt-1 text-xs text-gray-500">{{ sourceLabel(selectedEntry) }} / {{ embeddingLabel(selectedEntry) }}</p>
+            <p v-if="selectedEntry" class="mt-1 text-xs text-gray-500">
+              {{ sourceLabel(selectedEntry) }} / {{ embeddingLabel(selectedEntry) }} / {{ retrievalStatusLabel(selectedEntry) }}
+            </p>
           </div>
-          <div v-if="selectedEntry" class="flex items-center gap-2">
+          <div v-if="selectedEntry" class="flex flex-wrap items-center gap-2">
+            <button
+              @click="reindexEntry(selectedEntry)"
+              :disabled="reindexingId === selectedEntry.id"
+              class="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700 transition-all hover:bg-blue-100 disabled:opacity-50"
+            >
+              <RefreshCw :size="14" /> 重新索引
+            </button>
+            <button
+              @click="showDisableUnavailable"
+              title="当前知识 API 未提供禁用能力"
+              class="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs font-bold text-gray-500 transition-all hover:bg-gray-100"
+            >
+              <Ban :size="14" /> 禁用
+            </button>
             <button v-if="!editing" @click="startEdit"
               class="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-bold text-gray-600 transition-all hover:bg-gray-50 hover:text-gray-950">
               <Edit3 :size="14" /> 编辑
@@ -243,20 +421,22 @@ onMounted(fetchItems)
         </div>
 
         <div v-else class="min-h-0 p-5 lg:flex-1 lg:overflow-y-auto">
-          <div class="mb-4 grid gap-3 sm:grid-cols-3">
+          <div class="mb-4 grid gap-3 sm:grid-cols-4">
             <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
-              <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Embedding</div>
-              <div class="mt-1 text-sm font-semibold" :class="selectedEntry.embedding_available ? 'text-emerald-700' : 'text-amber-700'">
-                {{ embeddingLabel(selectedEntry) }}
-              </div>
+              <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">类型</div>
+              <div class="mt-1 truncate text-sm font-semibold text-gray-900">{{ knowledgeType(selectedEntry) }}</div>
             </div>
             <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
-              <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">来源</div>
-              <div class="mt-1 truncate text-sm font-semibold text-gray-900">{{ sourceLabel(selectedEntry) }}</div>
+              <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">片段</div>
+              <div class="mt-1 text-sm font-semibold text-gray-900">{{ fragmentCount(selectedEntry) }}</div>
             </div>
             <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
-              <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">创建时间</div>
-              <div class="mt-1 truncate text-xs font-mono text-gray-500">{{ selectedEntry.created_at }}</div>
+              <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">最近更新</div>
+              <div class="mt-1 truncate text-xs font-mono text-gray-500">{{ lastUpdatedLabel(selectedEntry) }}</div>
+            </div>
+            <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+              <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">使用次数</div>
+              <div class="mt-1 text-sm font-semibold text-gray-900">{{ usageCount(selectedEntry) }}</div>
             </div>
           </div>
 

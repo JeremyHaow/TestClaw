@@ -49,6 +49,10 @@ def test_run_preflight_classifies_raw_openapi_and_reports_readiness() -> None:
     assert any(
         check["key"] == "provider" and check["status"] == "missing" for check in body["checks"]
     )
+    serialized = json.dumps(body, ensure_ascii=False)
+    assert "模型与 Agent" in serialized
+    assert "系统设置" not in serialized
+    assert "模型管理" not in serialized
 
 
 def test_run_preflight_returns_structured_mission_preview(monkeypatch) -> None:
@@ -494,6 +498,8 @@ def test_run_preflight_ui_dynamic_captcha_requires_vision_model(monkeypatch) -> 
     assert body["auth_preflight"]["strategy"] == "ui_browser_login"
     assert body["auth_preflight"]["missing_fields"] == ["vision_model"]
     assert "Vision" in body["auth_preflight"]["next_action"]
+    assert "模型与 Agent" in body["auth_preflight"]["next_action"]
+    assert "模型管理" not in body["auth_preflight"]["next_action"]
 
 
 def test_run_preflight_manual_auth_requires_protected_readonly_validation(monkeypatch) -> None:

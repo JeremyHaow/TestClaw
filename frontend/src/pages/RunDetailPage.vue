@@ -6,8 +6,13 @@ import StatusBadge from '../components/StatusBadge.vue'
 import LoadingSpinner from '../components/LoadingSpinner.vue'
 import InlinePager from '../components/InlinePager.vue'
 import StyledSelect from '../components/StyledSelect.vue'
+import AgentCurrentActionCard from '../components/agent/AgentCurrentActionCard.vue'
+import AgentEvidenceCard from '../components/agent/AgentEvidenceCard.vue'
+import AgentInterventionDrawer from '../components/agent/AgentInterventionDrawer.vue'
+import AgentRunSummary from '../components/agent/AgentRunSummary.vue'
+import AgentTimeline from '../components/agent/AgentTimeline.vue'
 import { useToast } from '../composables/useToast'
-import { Activity, AlertTriangle, ArrowLeft, BookOpen, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCopy, Clock, Download, FileText, Loader2, Monitor, RotateCcw, Save, Terminal, XCircle, XCircleIcon, Zap } from 'lucide-vue-next'
+import { Activity, AlertTriangle, ArrowLeft, BookOpen, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCopy, Download, FileText, Loader2, Monitor, RotateCcw, Save, Terminal, XCircle, XCircleIcon, Zap } from 'lucide-vue-next'
 
 const expandedApiRow = ref<number | null>(null)
 const lightboxUrl = ref<string | null>(null)
@@ -351,6 +356,10 @@ function ensureList(value: any): any[] {
   return Array.isArray(value) ? value : []
 }
 
+function lastItem<T>(items: T[]): T | null {
+  return items.length ? items[items.length - 1] : null
+}
+
 type IndexedItem<T> = {
   item: T
   index: number
@@ -567,12 +576,12 @@ function screenshotDetail(shot: any) {
   return shot?.detail || shot?.after_command || shot?.source_command || screenshotFilename(screenshotPath(shot))
 }
 
-const workflowSteps = computed(() => run.value?.workflow_steps || [])
-const progressEvents = computed(() => run.value?.progress_events || [])
+const workflowSteps = computed<any[]>(() => ensureList(run.value?.workflow_steps))
+const progressEvents = computed<any[]>(() => ensureList(run.value?.progress_events))
 const pagedWorkflowSteps = computed(() => indexedPage(workflowSteps.value, workflowStepPage.value, workflowStepPageSize))
 const pagedProgressEvents = computed(() => indexedPage(progressEvents.value, progressEventPage.value, progressEventPageSize))
 const currentStep = computed(() => {
-  return run.value?.current_step || progressEvents.value.at(-1) || workflowSteps.value.at(-1) || null
+  return run.value?.current_step || lastItem(progressEvents.value) || lastItem(workflowSteps.value)
 })
 const isActiveRun = computed(() => Boolean(run.value && isActiveStatus(run.value.status)))
 const isFailedRun = computed(() => ['failed', 'bug_found'].includes(String(run.value?.status || '').toLowerCase()))
@@ -711,8 +720,8 @@ const recentToolCalls = computed(() => toolCalls.value.slice().reverse())
 const pagedToolCalls = computed(() => indexedPage(recentToolCalls.value, toolCallPage.value, toolCallPageSize))
 const skillPlan = computed(() => ensureList(run.value?.skill_plan || run.value?.final_report?.skill_plan))
 const toolSummary = computed(() => run.value?.tool_summary || run.value?.final_report?.tool_summary || run.value?.artifacts?.tool_summary || null)
-const agentEvaluations = computed(() => ensureList(run.value?.agent_evaluations || run.value?.final_report?.agent_diagnostics?.evaluations))
-const latestAgentEvaluation = computed(() => run.value?.evidence_evaluation || run.value?.final_report?.agent_diagnostics?.latest_evaluation || agentEvaluations.value.at(-1) || null)
+const agentEvaluations = computed<any[]>(() => ensureList(run.value?.agent_evaluations || run.value?.final_report?.agent_diagnostics?.evaluations))
+const latestAgentEvaluation = computed(() => run.value?.evidence_evaluation || run.value?.final_report?.agent_diagnostics?.latest_evaluation || lastItem(agentEvaluations.value))
 const agentReplanCounts = computed(() => run.value?.agent_replan_counts || run.value?.final_report?.agent_diagnostics?.replan_counts || {})
 const agentReplanTotal = computed(() => Object.values(agentReplanCounts.value || {}).reduce((total: number, value: any) => total + Number(value || 0), 0))
 const ragRetrieval = computed(() => run.value?.rag_retrieval || null)
@@ -989,6 +998,30 @@ const statusDescription = computed(() => {
   if (currentStep.value?.detail) return currentStep.value.detail
   return '暂无更多执行信息'
 })
+const currentStepLabel = computed(() => {
+  const step = currentStep.value
+  if (!step) return '初始化'
+  if (typeof step === 'string') return step
+  return String(step.node || step.name || step.stage || step.detail || '初始化')
+})
+const generatedCaseCount = computed(() => {
+  return ensureList(run.value?.api_cases).length + ensureList(run.value?.ui_cases).length + ensureList(run.value?.test_cases).length
+})
+const executedCount = computed(() => Number(apiTotalCount.value || 0) + Number(uiTotalCount.value || 0))
+const passedCount = computed(() => Number(apiPassedCount.value || 0) + Number(uiPassedCount.value || 0))
+const failedCount = computed(() => {
+  const apiFailed = Number(apiSummary.value?.failed ?? Math.max(0, apiTotalCount.value - apiPassedCount.value))
+  const uiFailed = Number(uiSummary.value?.failed ?? Math.max(0, uiTotalCount.value - uiPassedCount.value))
+  return apiFailed + uiFailed
+})
+const skippedCount = computed(() => Number(apiSkippedCount.value || 0) + Number(uiSummary.value?.skipped || 0))
+const evidenceCount = computed(() => {
+  return Number(triageSummary.value?.evidence?.count || 0) + uiScreenshotCount.value + toolCalls.value.length
+})
+const currentBlockingText = computed(() => {
+  return interventionSummary.value?.reason || run.value?.last_error || latestAgentEvaluation.value?.reason || ''
+})
+const releaseRiskLabel = computed(() => triageSummary.value?.release_risk?.label || triageSummary.value?.release_risk?.level || '等待结果')
 
 watch(visibleTabs, (tabs) => {
   if (!tabs.some((tab) => tab.key === activeTab.value)) {
@@ -1084,67 +1117,46 @@ watch(
       </span>
     </div>
 
+    <AgentRunSummary
+      :status="run.status"
+      :progress-percent="progressPercent"
+      :current-step="currentStepLabel"
+      :blocking-text="currentBlockingText"
+      :generated-cases="generatedCaseCount"
+      :executed-count="executedCount"
+      :passed-count="passedCount"
+      :failed-count="failedCount"
+      :skipped-count="skippedCount"
+      :evidence-count="evidenceCount"
+    >
+      <template #badges>
+        <span class="rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-[10px] font-bold text-gray-500">测试计划</span>
+        <span class="rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-[10px] font-bold text-gray-500">测试用例</span>
+        <span class="rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-[10px] font-bold text-gray-500">执行日志</span>
+        <span class="rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-[10px] font-bold text-gray-500">证据</span>
+        <span class="rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-[10px] font-bold text-gray-500">报告</span>
+      </template>
+    </AgentRunSummary>
+
     <!-- Execution Cockpit -->
     <section class="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
-      <div
-        class="p-4 border-b"
-        :class="isFailedRun ? 'bg-red-50/70 border-red-100' : isActiveRun ? 'bg-amber-50/70 border-amber-100' : 'bg-gray-50 border-gray-100'"
+      <AgentCurrentActionCard
+        :status="run.status"
+        :title="statusTitle"
+        :description="statusDescription"
+        :current-step="currentStepLabel"
+        :progress-percent="progressPercent"
+        :active="isActiveRun"
+        :failed="isFailedRun"
+        :cancellable="isActiveRun"
+        :show-notice="isActiveRun || isFailedRun || run.status === 'cancelled'"
+        @cancel="cancelRun"
       >
-        <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-2">
-              <Loader2 v-if="isActiveRun" :size="18" class="text-amber-600 animate-spin" />
-              <AlertTriangle v-else-if="isFailedRun" :size="18" class="text-red-600" />
-              <CheckCircle2 v-else-if="run.status === 'succeeded'" :size="18" class="text-emerald-600" />
-              <Clock v-else :size="18" class="text-gray-500" />
-              <h3 class="text-lg font-bold text-gray-900">{{ statusTitle }}</h3>
-            </div>
-            <p class="mt-1 text-sm text-gray-600 line-clamp-2">{{ statusDescription }}</p>
-          </div>
-          <div class="flex flex-col items-start gap-2 lg:items-end">
-            <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">当前步骤</div>
-            <div class="max-w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-bold text-gray-700 shadow-sm lg:max-w-md">
-              {{ currentStep?.node || currentStep?.name || currentStep?.stage || currentStep || '初始化' }}
-            </div>
-          </div>
-        </div>
-
-        <div class="mt-5">
-          <div class="mb-2 flex items-center justify-between text-[10px] font-bold uppercase tracking-widest text-gray-400">
-            <span>执行进度</span>
-            <span>{{ progressPercent }}%</span>
-          </div>
-          <div class="h-2 overflow-hidden rounded-full bg-white border border-gray-200">
-            <div
-              class="h-full rounded-full transition-all duration-500"
-              :class="isFailedRun ? 'bg-red-500' : run.status === 'succeeded' ? 'bg-emerald-500' : 'bg-amber-500'"
-              :style="{ width: `${progressPercent}%` }"
-            ></div>
-          </div>
-        </div>
-
-        <div
-          v-if="isActiveRun || isFailedRun || run.status === 'cancelled'"
-          class="mt-4 flex flex-col gap-3 rounded-lg border px-4 py-3 text-xs sm:flex-row sm:items-center sm:justify-between"
-          :class="isFailedRun ? 'border-red-200 bg-white text-red-700' : run.status === 'cancelled' ? 'border-gray-200 bg-white text-gray-600' : 'border-amber-200 bg-white text-amber-700'"
-        >
-          <div class="flex min-w-0 items-start gap-2">
-            <Activity v-if="isActiveRun" :size="15" class="mt-0.5 shrink-0" />
-            <AlertTriangle v-else :size="15" class="mt-0.5 shrink-0" />
-            <span class="min-w-0">
-              <template v-if="isActiveRun">运行中会持续刷新智能体动作、证据和实时日志。</template>
-              <template v-else-if="isFailedRun">{{ run.last_error || '执行失败，请查看下方日志定位原因。' }}</template>
-              <template v-else>运行已取消，历史日志仍保留在页面中。</template>
-            </span>
-          </div>
-          <button
-            v-if="isActiveRun"
-            @click="cancelRun"
-            class="shrink-0 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-[11px] font-bold text-red-600 transition-all hover:bg-red-100"
-          >
-            取消运行
-          </button>
-        </div>
+        <template #notice>
+          <template v-if="isActiveRun">运行中会持续刷新智能体动作、证据和实时日志。</template>
+          <template v-else-if="isFailedRun">{{ run.last_error || '执行失败，请查看下方日志定位原因。' }}</template>
+          <template v-else>运行已取消，历史日志仍保留在页面中。</template>
+        </template>
 
         <div
           v-if="legacyApiMisreport"
@@ -1152,7 +1164,7 @@ watch(
         >
           这是旧版 API 执行策略产生的历史结果：当时会请求 /dev-api 写入接口并把缺少鉴权的正向断言计为失败。请使用当前安全只读策略重跑，新的运行会跳过写入接口并显示跳过原因。
         </div>
-      </div>
+      </AgentCurrentActionCard>
 
       <div class="grid gap-0 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.75fr)] lg:items-stretch">
         <div class="min-h-0 border-b border-gray-100 p-4 lg:border-b-0 lg:border-r">
@@ -1224,35 +1236,7 @@ watch(
             </div>
           </div>
 
-          <div class="mt-5">
-            <div class="mb-3 flex items-center justify-between">
-              <h3 class="text-xs font-bold uppercase tracking-widest text-gray-400">最近活动</h3>
-              <span v-if="activityFeed.length" class="text-[10px] font-bold text-gray-400">{{ activityFeed.length }} 条</span>
-            </div>
-            <div v-if="activityFeed.length" class="space-y-2">
-              <div
-                v-for="(item, idx) in activityFeed"
-                :key="`${item.source}-${item.timestamp || item.node || idx}`"
-                class="flex items-start gap-3 rounded-lg border border-gray-100 bg-white px-3 py-2 text-xs"
-              >
-                <span
-                  class="mt-0.5 h-2 w-2 shrink-0 rounded-full"
-                  :class="item.status === 'failed' ? 'bg-red-500' : item.status === 'done' ? 'bg-emerald-500' : item.status === 'cancelled' ? 'bg-gray-400' : 'bg-blue-500'"
-                ></span>
-                <div class="min-w-0 flex-1">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <span class="font-bold text-gray-800">{{ item.node || item.stage || item.event || '执行事件' }}</span>
-                    <span class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-bold text-gray-500">{{ item.status || item.source }}</span>
-                  </div>
-                  <p v-if="item.detail || item.message" class="mt-0.5 text-gray-500">{{ item.detail || item.message }}</p>
-                </div>
-                <span v-if="item.timestamp" class="shrink-0 font-mono text-[10px] text-gray-400">{{ new Date(item.timestamp).toLocaleTimeString('zh-CN') }}</span>
-              </div>
-            </div>
-            <div v-else class="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-4 py-8 text-center text-sm text-gray-400">
-              等待执行活动
-            </div>
-          </div>
+          <AgentTimeline :items="activityFeed" :active="isActiveRun" />
         </div>
 
         <div class="min-h-0 overflow-hidden bg-gray-950 p-4 text-gray-100 lg:relative lg:p-0">
@@ -1280,59 +1264,24 @@ watch(
     </section>
 
     <!-- Human Intervention -->
-    <section v-if="showInterventionPanel" class="bg-white border border-amber-200 rounded-lg shadow-sm p-4">
-      <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div class="min-w-0">
-          <div class="flex items-center gap-2">
-            <AlertTriangle :size="17" class="text-amber-600" />
-            <h3 class="text-sm font-bold text-gray-900">人工干预 / 补充上下文</h3>
-            <span class="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-700">{{ interventionSummary?.category }}</span>
-          </div>
-          <p class="mt-2 text-sm leading-6 text-gray-700">{{ interventionSummary?.reason }}</p>
-          <p class="mt-1 text-xs leading-5 text-amber-700">{{ interventionSummary?.recommended_action }}</p>
-        </div>
-        <div class="shrink-0 rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
-          辅助重跑 {{ interventionSummary?.assisted_rerun_enabled ? '可用' : '不可用' }}
-        </div>
-      </div>
-
-      <div v-if="interventionSuggestedInputs.length" class="mt-4 flex flex-wrap gap-2">
-        <span
-          v-for="item in interventionSuggestedInputs"
-          :key="item"
-          class="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1 text-[11px] text-gray-600"
-        >
-          {{ item }}
-        </span>
-      </div>
-
-      <div class="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
-        <div>
-          <textarea
-            v-model="interventionText"
-            rows="4"
-            class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm leading-6 text-gray-700 outline-none transition-all focus:border-amber-400 focus:ring-2 focus:ring-amber-100"
-            placeholder="补充登录步骤、测试账号、Token/Header、环境入口、需要跳过或优先验证的范围..."
-          ></textarea>
-          <label v-if="interventionSummary?.requires_cancel_current" class="mt-2 flex items-center gap-2 text-xs font-bold text-amber-700">
-            <input v-model="interventionCancelCurrent" type="checkbox" class="h-4 w-4 rounded border-amber-300 text-amber-600 focus:ring-amber-500" />
-            先取消当前运行再发起辅助重跑
-          </label>
-        </div>
-        <button
-          @click="submitInterventionRerun"
-          :disabled="interventionSubmitting || !interventionText.trim() || !interventionSummary?.assisted_rerun_enabled || (interventionSummary?.requires_cancel_current && !interventionCancelCurrent)"
-          class="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg bg-amber-600 px-4 text-xs font-bold text-white transition-all hover:bg-amber-700 disabled:cursor-not-allowed disabled:bg-gray-300"
-        >
-          <Loader2 v-if="interventionSubmitting" :size="14" class="animate-spin" />
-          <RotateCcw v-else :size="14" />
-          辅助重跑
-        </button>
-      </div>
-    </section>
+    <AgentInterventionDrawer
+      v-if="showInterventionPanel"
+      v-model="interventionText"
+      v-model:cancel-current="interventionCancelCurrent"
+      :summary="interventionSummary"
+      :suggested-inputs="interventionSuggestedInputs"
+      :submitting="interventionSubmitting"
+      @submit="submitInterventionRerun"
+    />
 
     <!-- Triage Summary -->
-    <div v-if="triageSummary" class="bg-white border border-gray-200 rounded-lg shadow-sm p-4">
+    <AgentEvidenceCard
+      v-if="triageSummary"
+      :evidence-count="evidenceCount"
+      :finding-count="triageBlockingFindings.length"
+      :risk-label="releaseRiskLabel"
+    >
+    <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-4">
       <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest">分诊摘要</h3>
@@ -1488,6 +1437,7 @@ watch(
         </span>
       </div>
     </div>
+    </AgentEvidenceCard>
 
     <!-- Tab Navigation -->
     <div class="sticky top-0 z-10 flex flex-wrap gap-1 rounded-lg border border-gray-200 bg-white/90 p-1 shadow-sm backdrop-blur">
