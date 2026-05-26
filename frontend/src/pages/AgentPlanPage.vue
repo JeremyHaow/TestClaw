@@ -372,7 +372,7 @@ function draftItemForStep(stepId: IntakeStepId) {
 function localDraftItemForStep(stepId: IntakeStepId) {
   const step = intakeSteps.find((item) => item.id === stepId) || intakeSteps[0]
   const selected = selectedIntakeChoices.value[stepId]
-  const supplement = (intakeSupplement.value[stepId] || '').trim()
+  const supplement = intakeMessageForStep(stepId)
   if (skippedIntakeSteps.value[stepId]) {
     return { id: stepId, label: step.label, status: '草稿', value: '准备跳过这个非必填项' }
   }
@@ -464,6 +464,17 @@ function buildIntakeContent(action: 'continue' | 'defer' | 'skip') {
     parts.push(`${step.label}补充说明：${supplement}`)
   }
   return parts.join('\n')
+}
+
+function intakeMessageForStep(stepId: IntakeStepId) {
+  const supplement = (intakeSupplement.value[stepId] || '').trim()
+  if (supplement) return supplement
+  if (stepId === 'target_kind' && currentStepId.value === 'target_kind') return draft.value.trim()
+  return ''
+}
+
+function shouldConsumeDraftForIntake(stepId: IntakeStepId, message: string) {
+  return stepId === 'target_kind' && Boolean(message) && !intakeSupplement.value[stepId]?.trim()
 }
 
 function statusLabel(status?: string) {
@@ -881,8 +892,9 @@ async function submitStructuredIntake(action: 'continue' | 'defer' | 'skip') {
   if (!activeSession.value || sending.value || intakeControlsDisabled.value) return false
   const stepId = currentStepId.value
   const selectedOption = selectedIntakeChoices.value[stepId] || null
-  const message = (intakeSupplement.value[stepId] || '').trim()
+  const message = intakeMessageForStep(stepId)
   if (action === 'continue' && !selectedOption && !message) return false
+  const consumeDraft = shouldConsumeDraftForIntake(stepId, message)
   const sessionId = activeSession.value.id
   sending.value = true
   executeError.value = ''
@@ -896,6 +908,9 @@ async function submitStructuredIntake(action: 'continue' | 'defer' | 'skip') {
     })
     if (response.data?.session) {
       setActiveSession(response.data.session)
+    }
+    if (consumeDraft) {
+      draft.value = ''
     }
     clearLocalIntakeDraft(stepId)
     await scrollChat()

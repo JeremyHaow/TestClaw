@@ -545,6 +545,85 @@ def test_structured_intake_revisits_missing_target_after_other_steps() -> None:
     assert body["missing_info"][0]["key"] == "target"
 
 
+def test_structured_intake_target_supplement_survives_until_ready() -> None:
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={},
+            headers=headers,
+        ).json()
+        session_id = created["id"]
+        target = client.post(
+            f"/api/v1/agent-plans/sessions/{session_id}/intake",
+            json={
+                "action": "continue",
+                "current_step": "target_kind",
+                "selected_option": {
+                    "label": "API / 接口",
+                    "value": "api_openapi",
+                    "field": "target_kind",
+                    "step": "target_kind",
+                    "message": "测试目标类型：API / OpenAPI/Swagger 接口来源。",
+                },
+                "message": "请测试 https://httpbin.org/get 响应需要包含 url 字段，状态码 200",
+            },
+            headers=headers,
+        )
+        client.post(
+            f"/api/v1/agent-plans/sessions/{session_id}/intake",
+            json={"action": "skip", "current_step": "coverage_scope"},
+            headers=headers,
+        )
+        client.post(
+            f"/api/v1/agent-plans/sessions/{session_id}/intake",
+            json={
+                "action": "continue",
+                "current_step": "auth_boundary",
+                "selected_option": {
+                    "label": "无需登录",
+                    "value": "no_auth",
+                    "field": "auth_boundary",
+                    "step": "auth_boundary",
+                    "message": "登录方式/凭证：目标公开访问，无需登录或鉴权。",
+                },
+            },
+            headers=headers,
+        )
+        client.post(
+            f"/api/v1/agent-plans/sessions/{session_id}/intake",
+            json={
+                "action": "continue",
+                "current_step": "safety_boundary",
+                "selected_option": {
+                    "label": "只读边界",
+                    "value": "safe_read_only",
+                    "field": "safety_boundary",
+                    "step": "safety_boundary",
+                    "message": "安全边界：只做只读检查，不创建、修改或删除数据。",
+                },
+            },
+            headers=headers,
+        )
+        response = client.post(
+            f"/api/v1/agent-plans/sessions/{session_id}/intake",
+            json={"action": "skip", "current_step": "success_criteria"},
+            headers=headers,
+        )
+
+    assert target.status_code == 200
+    assert target.json()["draft"]["target"]["value"]
+    assert "https://httpbin.org/get" in target.json()["draft"]["target"]["value"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session"]["status"] == "ready"
+    assert body["session"]["current_step"] == "review"
+    assert body["session"]["current_run_payload"]["source"] == "https://httpbin.org/get"
+    assert body["next_question"] is None
+    assert body["missing_info"] == []
+
+
 def test_generate_agent_plan_session_before_ready_returns_400() -> None:
     with TestClient(app) as client:
         token = _token(client)

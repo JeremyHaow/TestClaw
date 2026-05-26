@@ -201,7 +201,7 @@ def test_agent_plan_draft_item_can_show_local_draft_without_server_completion() 
     assert server_navigation is not None
     assert "localDraftItemForStep(stepId) || serverDraftItemForStep(stepId)" in draft_item.group(0)
     assert "selectedIntakeChoices.value[stepId]" in local_draft.group(0)
-    assert "intakeSupplement.value[stepId]" in local_draft.group(0)
+    assert "intakeMessageForStep(stepId)" in local_draft.group(0)
     assert "status: '草稿'" in local_draft.group(0)
     assert "serverDraftItemForStep(stepId)" in server_navigation.group(0)
     assert "localDraftItemForStep" not in server_navigation.group(0)
@@ -211,15 +211,24 @@ def test_agent_plan_structured_intake_success_clears_local_step_draft() -> None:
     source = PAGE.read_text(encoding="utf-8")
     submit = re.search(r"async function submitStructuredIntake[\s\S]*?\n}", source)
     clear_draft = re.search(r"function clearLocalIntakeDraft\(stepId: IntakeStepId\)[\s\S]*?\n}", source)
+    intake_message = re.search(r"function intakeMessageForStep\(stepId: IntakeStepId\)[\s\S]*?\n}", source)
+    consume_draft = re.search(r"function shouldConsumeDraftForIntake\(stepId: IntakeStepId, message: string\)[\s\S]*?\n}", source)
 
     assert submit is not None
     assert clear_draft is not None
+    assert intake_message is not None
+    assert consume_draft is not None
     assert "const stepId = currentStepId.value" in submit.group(0)
     assert "selectedIntakeChoices.value[stepId] || null" in submit.group(0)
-    assert "intakeSupplement.value[stepId]" in submit.group(0)
+    assert "const message = intakeMessageForStep(stepId)" in submit.group(0)
+    assert "const consumeDraft = shouldConsumeDraftForIntake(stepId, message)" in submit.group(0)
+    assert "if (consumeDraft)" in submit.group(0)
+    assert "draft.value = ''" in submit.group(0)
     assert "current_step: stepId" in submit.group(0)
     assert "setActiveSession(response.data.session)" in submit.group(0)
     assert "clearLocalIntakeDraft(stepId)" in submit.group(0)
+    assert "stepId === 'target_kind' && currentStepId.value === 'target_kind'" in intake_message.group(0)
+    assert "stepId === 'target_kind'" in consume_draft.group(0)
     for state_name in [
         "selectedIntakeChoices",
         "intakeSupplement",
