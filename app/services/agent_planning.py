@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.json_utils import parse_llm_json_object
 from app.agent.nodes.source_loader import classify_input
+from app.config import settings
 from app.core.llm_gateway import llm_gateway
 from app.core.redaction import redact_sensitive_data, redact_sensitive_text
 from app.models.agent_planning import AgentPlanningMessage, AgentPlanningSession
@@ -1037,7 +1039,16 @@ class AgentPlanningService:
     ) -> PlannerTurnResult:
         raw_llm_output: PlannerLLMOutput | None = None
         try:
-            raw_llm_output = await self._call_planner_llm(db, session=session, messages=messages)
+            planner_timeout = max(float(settings.AGENT_PLAN_LLM_TIMEOUT_SECONDS or 12.0), 0.05)
+            raw_llm_output = await asyncio.wait_for(
+                self._call_planner_llm(db, session=session, messages=messages),
+                timeout=planner_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.info(
+                "Planner LLM timed out after %.1fs, using local fallback",
+                float(settings.AGENT_PLAN_LLM_TIMEOUT_SECONDS or 12.0),
+            )
         except Exception as exc:
             logger.info("Planner LLM unavailable, using local fallback: %s", exc)
 

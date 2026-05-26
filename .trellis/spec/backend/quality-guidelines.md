@@ -103,6 +103,7 @@
 ### 3. Contracts
 
 - Planner LLM output must be strict JSON only. Local code must tolerate invalid/unavailable LLM output with a deterministic fallback.
+- Planner LLM calls in Plan Mode must be bounded by `AGENT_PLAN_LLM_TIMEOUT_SECONDS`; timeout must use the same deterministic fallback path as invalid/unavailable model output.
 - `run_payload` may contain only the fields accepted by run creation: `source`, `test_type`, `objective`, `base_url`, `auth_mode`, `captcha_mode`, `auth_credentials`, `auth_config`, `token`, `headers`, `api_execution_policy`, `allow_out_of_schema_api_cases`, and `setup_instructions`.
 - Local normalization, not the model, owns allowed values for `test_type`, auth/captcha modes, API execution policy, and secret extraction.
 - Local fallback extraction must be generic and multilingual enough for normal Chinese/English tester messages: Chinese labels such as username/account/password/captcha, API/UI intent, no-auth phrases, captcha mode phrases, and safe/write policy phrases should normalize into the same `run_payload` contract as English messages.
@@ -128,6 +129,7 @@
 - Message without target/source -> `status="collecting"`, `ready_to_execute=false`, and a concrete question.
 - UI target without credentials or explicit no-login confirmation -> `status="collecting"` and asks whether login is required.
 - LLM unavailable or invalid JSON -> fallback response; no 500 from the planning turn.
+- Planner LLM timeout -> fallback response; no hanging HTTP/SSE request.
 - Reject with no current plan -> `400 No current plan to reject`.
 - Delete/edit unknown message -> `404 Planning message not found`.
 - Edit assistant/system message -> `400 Only user messages can be edited`.
@@ -147,6 +149,7 @@
 - Good: user describes a public UI target and explicitly says no login is required, receives a ready UI plan.
 - Good: user writes `请测试管理后台页面 ... 用户名 ... 密码 ... 固定验证码 ...` and fallback extraction normalizes UI mode, auto auth credentials, static captcha, and the requested API policy without product-specific branches.
 - Base: no Planner provider is configured; fallback asks for a target or creates a safe basic plan from a URL/OpenAPI source.
+- Base: Planner provider is slow or unavailable; fallback returns within the configured timeout.
 - Base: user gives only a UI URL and objective; fallback asks for login boundary instead of surfacing an executable plan that preflight will immediately block.
 - Bad: executing a plan manually creates `Task` rows and dispatches workers from the planning route, bypassing auth preflight.
 - Bad: plan/session/list responses echo raw `token=...`, `password=...`, `Cookie`, `Authorization`, captcha, session, or API-key values.
@@ -165,6 +168,7 @@
 - Regression: executed planning sessions reject later message add/edit/delete requests without changing `executed_run_id`.
 - Regression: streaming planner message returns `text/event-stream`, process events, token events, and final redacted session payload.
 - Regression: planner output and fallback collecting turns expose generic selectable `question_options`, and frontend source renders clickable choice buttons.
+- Regression: slow planner LLM calls time out and fall back without hanging the planning request.
 - Execute path: monkeypatch or otherwise isolate run creation/preflight and assert planning execution delegates to the existing run creation path.
 - Frontend build: Plan Mode route and navigation compile with the session/message/plan response shape.
 

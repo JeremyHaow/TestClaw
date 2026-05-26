@@ -7,6 +7,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from app.api.v1 import agent_plans
+from app.config import settings
 from app.core.security import hash_password
 from app.database import AsyncSessionLocal
 from app.main import app
@@ -231,6 +232,31 @@ def test_planning_message_exposes_model_provided_choice_options(monkeypatch) -> 
             ],
         }
     ]
+
+
+def test_planning_message_times_out_slow_llm_and_uses_fallback(monkeypatch) -> None:
+    async def slow_llm(*args: Any, **kwargs: Any) -> PlannerLLMOutput:
+        await asyncio.sleep(1)
+        return PlannerLLMOutput(response="too slow", status="collecting")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", slow_llm)
+    monkeypatch.setattr(settings, "AGENT_PLAN_LLM_TIMEOUT_SECONDS", 0.01)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        response = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "Test API https://api-timeout.example.test/openapi.json."},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["current_run_payload"]["source"] == "https://api-timeout.example.test/openapi.json"
+    assert "too slow" not in body["messages"][-1]["content"]
 
 
 def test_whitespace_planning_message_is_rejected_and_not_stored() -> None:
