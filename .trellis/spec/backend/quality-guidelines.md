@@ -100,6 +100,7 @@
 - Blank chat message -> request validation error.
 - Whitespace-only chat message -> `400 content is required` and no empty `AgentPlanningMessage` row is stored.
 - Message without target/source -> `status="collecting"`, `ready_to_execute=false`, and a concrete question.
+- UI target without credentials or explicit no-login confirmation -> `status="collecting"` and asks whether login is required.
 - LLM unavailable or invalid JSON -> fallback response; no 500 from the planning turn.
 - Reject with no current plan -> `400 No current plan to reject`.
 - Execute without `current_run_payload` -> `400 No executable plan is ready`.
@@ -110,8 +111,10 @@
 
 - Good: user describes a Swagger URL and objective, receives a plan card, approves it, and `/agent-plans/{id}/execute` creates the run through `/runs` behavior.
 - Good: user rejects a UI plan, types "use API read-only checks instead", and the regenerated payload uses the later target/mode.
+- Good: user describes a public UI target and explicitly says no login is required, receives a ready UI plan.
 - Good: user writes `请测试管理后台页面 ... 用户名 ... 密码 ... 固定验证码 ...` and fallback extraction normalizes UI mode, auto auth credentials, static captcha, and the requested API policy without product-specific branches.
 - Base: no Planner provider is configured; fallback asks for a target or creates a safe basic plan from a URL/OpenAPI source.
+- Base: user gives only a UI URL and objective; fallback asks for login boundary instead of surfacing an executable plan that preflight will immediately block.
 - Bad: executing a plan manually creates `Task` rows and dispatches workers from the planning route, bypassing auth preflight.
 - Bad: plan/session/list responses echo raw `token=...`, `password=...`, `Cookie`, `Authorization`, captcha, session, or API-key values.
 

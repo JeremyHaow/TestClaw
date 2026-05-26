@@ -436,6 +436,17 @@ def _missing_questions(payload: PlannerRunPayload) -> list[str]:
     input_type = classify_input(payload.source)
     if input_type in {"swagger_json", "swagger_yaml"} and not payload.base_url:
         return ["执行这份 API 文档时应使用哪个基础 URL？"]
+    has_auth_material = bool(
+        payload.token
+        or payload.headers
+        or (
+            payload.auth_credentials
+            and (payload.auth_credentials.username or payload.auth_credentials.password)
+        )
+        or (payload.auth_config and payload.auth_config.enabled)
+    )
+    if payload.test_type == "ui" and payload.auth_mode == "auto" and not has_auth_material:
+        return ["这个页面是否需要登录？如需登录请提供测试账号；如果是公开页面，请明确说明无需登录。"]
     return []
 
 
