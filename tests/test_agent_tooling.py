@@ -742,6 +742,72 @@ async def test_generated_api_cases_are_bounded_to_openapi_scope_before_execution
 
 
 @pytest.mark.asyncio
+async def test_direct_api_url_builds_and_executes_smoke_request_without_schema(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+            self.text = json.dumps(payload)
+            self.content = self.text.encode()
+
+        def json(self) -> dict:
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse({"url": url})
+
+    calls = []
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+
+    generated = await tc_generator.run(
+        {
+            "test_type": "api",
+            "input_type": "url",
+            "objective": "验证 GET 返回 200 且响应包含 url 字段",
+            "target_url": "https://api.example.test/get",
+            "api_execution_policy": "safe_read_only",
+            "workflow_steps": [],
+        }
+    )
+    executed = await api_runner.run(generated)
+
+    assert generated["api_case_generation_source"] == "direct_url_fallback"
+    assert generated["api_cases"][0]["request_template"] == {
+        "method": "GET",
+        "url": "https://api.example.test/get",
+        "headers": {},
+        "query_params": {},
+        "body": None,
+    }
+    assert calls == [
+        {
+            "method": "GET",
+            "url": "https://api.example.test/get",
+            "headers": None,
+            "json": None,
+            "params": {},
+        }
+    ]
+    assert executed["api_request_selection"]["source"] == "api_cases"
+    assert executed["api_request_selection"]["selected_total"] == 1
+    assert executed["api_execution_result"]["all_passed"] is True
+    assert executed["execution_result"]["status_code"] == 0
+
+
+@pytest.mark.asyncio
 async def test_generated_root_meta_json_path_assertion_is_advisory_without_schema(monkeypatch) -> None:
     calls = []
 

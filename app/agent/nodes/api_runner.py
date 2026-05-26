@@ -1259,6 +1259,26 @@ def _has_executable_request(requests: list[dict]) -> bool:
     return any(not request.get("skip_reason") for request in requests)
 
 
+def _build_direct_url_fallback_request(
+    target_url: str,
+    auth_headers: dict | None,
+) -> list[dict]:
+    fallback_url = _build_request_url("", target_url)
+    if not fallback_url:
+        return []
+    return [
+        {
+            "label": f"GET {fallback_url}",
+            "method": "GET",
+            "url": fallback_url,
+            "headers": auth_headers or {},
+            "body": None,
+            "expected_status": 200,
+            "category": "SMOKE",
+        }
+    ]
+
+
 def _safe_schema_subset(api_schema: list[dict], limit: int | None) -> list[dict]:
     subset = []
     for endpoint in safe_schema_method_endpoints(api_schema):
@@ -1824,18 +1844,13 @@ async def run(state: AgentState) -> AgentState:
         request_candidates = _build_test_requests(api_schema, base_url, auth_headers, execution_policy)
         selection_source = "parsed_api_schema"
     else:
-        # Fallback: just hit the target URL
-        fallback_url = _build_request_url("", base_url or target_url)
-        if fallback_url:
-            request_candidates.append({
-                "label": f"GET {fallback_url}",
-                "method": "GET",
-                "url": fallback_url,
-                "headers": auth_headers,
-                "body": None,
-                "expected_status": 200,
-                "category": "SMOKE",
-            })
+        request_candidates = _build_direct_url_fallback_request(base_url or target_url, auth_headers)
+
+    if not request_candidates:
+        request_candidates = _build_direct_url_fallback_request(base_url or target_url, auth_headers)
+        if request_candidates:
+            fallback_reason = fallback_reason or f"{selection_source}_yielded_no_requests"
+            selection_source = "fallback_url"
 
     test_requests, request_selection = _select_requests_for_execution(
         request_candidates,

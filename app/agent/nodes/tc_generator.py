@@ -413,6 +413,12 @@ async def run(state: AgentState) -> AgentState:
         and bool(selected_strategy_endpoints)
         and test_type != "ui"
     )
+    direct_url_api_target = (
+        input_type == "url"
+        and test_type in {"api", "full"}
+        and not parsed_api_schema
+        and base_url.startswith(("http://", "https://"))
+    )
 
     if all_safe_get_coverage_requested and not api_cases:
         try:
@@ -438,6 +444,11 @@ async def run(state: AgentState) -> AgentState:
         generated_api_cases = True
         state["api_coverage_goal"] = str(strategy.get("coverage_scope") or "focused_documented_endpoints")
         state["api_case_generation_source"] = "agent_strategy_schema"
+
+    if direct_url_api_target and not api_cases:
+        api_cases = _build_base_url_api_case(base_url)
+        generated_api_cases = True
+        state["api_case_generation_source"] = "direct_url_fallback"
 
     if db and not (api_cases or ui_cases):
         try:
