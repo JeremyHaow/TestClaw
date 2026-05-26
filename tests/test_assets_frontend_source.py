@@ -92,6 +92,31 @@ def test_phase_6_3_loading_empty_and_card_copy_are_complete() -> None:
     assert "<table" not in _source(TEST_CASES_PAGE).lower()
 
 
+def test_test_case_assets_keep_user_visible_copy_localized() -> None:
+    page = _source(TEST_CASES_PAGE)
+    card = _source(ASSET_COMPONENT_DIR / "TestCaseAssetCard.vue")
+
+    for label in [
+        "已选择",
+        "未选择用例",
+        "选中用例套件",
+        "套件",
+        "功能",
+        "界面",
+        "接口",
+        "性能",
+        "安全",
+    ]:
+        assert label in page
+
+    for label in ["caseTypeLabel", "接口", "界面", "用例", "手动维护", "运行 "]:
+        assert label in card
+
+    assert "{{ selectedIds.size }} selected" not in page
+    assert "Selected suite" not in page
+    assert ">{{ caseType }}</span>" not in card
+
+
 def test_phase_6_3_handoff_redacts_asset_context_and_agent_plan_consumes_it() -> None:
     handoff = _source(ASSET_HANDOFF)
     agent_plan = _source(AGENT_PLAN_PAGE)

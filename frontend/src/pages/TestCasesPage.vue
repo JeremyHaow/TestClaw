@@ -53,6 +53,20 @@ const createForm = reactive({
 const creating = ref(false)
 const suiteRunning = ref(false)
 
+const CATEGORY_LABELS: Record<string, string> = {
+  FUNCTIONAL: '功能',
+  UI: '界面',
+  API: '接口',
+  PERFORMANCE: '性能',
+  SECURITY: '安全',
+}
+
+const CASE_TYPE_LABELS: Record<string, string> = {
+  api: '接口',
+  ui: '界面',
+  case: '用例',
+}
+
 const allSelected = computed(() => items.value.length > 0 && items.value.every((item) => selectedIds.value.has(item.id)))
 const someSelected = computed(() => items.value.some((item) => selectedIds.value.has(item.id)) && !allSelected.value)
 const selectAllLabel = computed(() => allSelected.value ? '取消选择当前页全部用例' : '选择当前页全部用例')
@@ -141,7 +155,7 @@ async function runSelectedSuite() {
   }
   suiteRunning.value = true
   try {
-    const suiteName = `Selected suite ${new Date().toLocaleString('zh-CN')}`
+    const suiteName = `选中用例套件 ${new Date().toLocaleString('zh-CN')}`
     const { data: suite } = await api.post('/test-cases/suites', {
       name: suiteName,
       test_case_ids: ids,
@@ -276,6 +290,16 @@ function caseType(item: any) {
   return 'case'
 }
 
+function categoryLabel(value: any) {
+  const key = String(value || '').toUpperCase()
+  return CATEGORY_LABELS[key] || String(value || '未分类')
+}
+
+function caseTypeLabel(item: any) {
+  const type = caseType(item)
+  return CASE_TYPE_LABELS[type] || type.toUpperCase()
+}
+
 function sourceKind(item: any) {
   const source = String(item.source || '')
   if (caseAsset(item).source_run_id || source.startsWith('run_case_asset:')) return '运行沉淀'
@@ -322,7 +346,7 @@ function useCaseForPlan(item: any) {
   const context = compactLines([
     '从 TestClaw 用例资产创建新测试计划。',
     `用例：${item.title}`,
-    `类型：${caseType(item).toUpperCase()}`,
+    `类型：${caseTypeLabel(item)}`,
     `优先级：${item.priority || 'P1'}`,
     `来源：${sourceKind(item)}`,
     runId ? `来源运行：${runId}` : '',
@@ -362,7 +386,7 @@ onMounted(async () => {
   <div class="mx-auto max-w-7xl space-y-5 pb-10">
     <div class="flex flex-wrap items-start justify-between gap-3 border-b border-gray-200/80 pb-5">
       <div class="flex flex-col gap-1">
-        <div class="tc-page-kicker">Suites</div>
+        <div class="tc-page-kicker">套件</div>
         <h2 class="text-xl font-semibold tracking-tight text-gray-950">用例资产</h2>
         <p class="max-w-3xl text-sm text-gray-500">按来源、运行、套件和分类管理可复用用例；长步骤和预期结果在详情面板中查看和编辑。</p>
       </div>
@@ -389,11 +413,11 @@ onMounted(async () => {
         </StyledSelect>
         <StyledSelect v-model="filterCategory" class="w-full sm:w-48 sm:flex-none" size="sm">
           <option value="">全部分类</option>
-          <option value="FUNCTIONAL">FUNCTIONAL</option>
-          <option value="UI">UI</option>
-          <option value="API">API</option>
-          <option value="PERFORMANCE">PERFORMANCE</option>
-          <option value="SECURITY">SECURITY</option>
+          <option value="FUNCTIONAL">功能</option>
+          <option value="UI">界面</option>
+          <option value="API">接口</option>
+          <option value="PERFORMANCE">性能</option>
+          <option value="SECURITY">安全</option>
         </StyledSelect>
         <button v-if="selectedIds.size > 0" @click="runSelectedSuite" :disabled="suiteRunning"
           class="flex w-full items-center justify-center gap-2 rounded-lg bg-gray-950 px-4 py-2 text-xs font-bold text-white shadow-sm transition-all hover:bg-gray-800 disabled:opacity-50 sm:w-auto sm:flex-none">
@@ -430,7 +454,7 @@ onMounted(async () => {
             </button>
             <span class="text-xs text-gray-500">卡片视图，当前页 {{ items.length }} 条</span>
           </div>
-          <span class="font-mono text-xs text-gray-400">{{ selectedIds.size }} selected</span>
+          <span class="text-xs text-gray-500">{{ selectedIds.size ? `已选择 ${selectedIds.size} 条` : '未选择用例' }}</span>
         </div>
         <div class="grid max-h-[calc(100vh-18rem)] gap-3 overflow-auto p-3 xl:grid-cols-2">
           <TestCaseAssetCard
@@ -455,7 +479,7 @@ onMounted(async () => {
         <div class="flex items-start justify-between gap-4 border-b border-gray-100 px-6 py-4">
           <div class="min-w-0">
             <h3 class="truncate text-lg font-bold text-gray-900">{{ editingId === detailItem.id ? '编辑用例' : detailItem.title }}</h3>
-            <p class="mt-1 text-xs text-gray-500">{{ sourceKind(detailItem) }} / {{ detailItem.category }} / {{ detailItem.priority }}</p>
+            <p class="mt-1 text-xs text-gray-500">{{ sourceKind(detailItem) }} / {{ categoryLabel(detailItem.category) }} / {{ detailItem.priority }}</p>
           </div>
           <button
             type="button"
@@ -479,11 +503,11 @@ onMounted(async () => {
                 <div>
                   <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">分类</label>
                   <StyledSelect v-model="editForm.category">
-                    <option value="FUNCTIONAL">FUNCTIONAL</option>
-                    <option value="UI">UI</option>
-                    <option value="API">API</option>
-                    <option value="PERFORMANCE">PERFORMANCE</option>
-                    <option value="SECURITY">SECURITY</option>
+                    <option value="FUNCTIONAL">功能</option>
+                    <option value="UI">界面</option>
+                    <option value="API">接口</option>
+                    <option value="PERFORMANCE">性能</option>
+                    <option value="SECURITY">安全</option>
                   </StyledSelect>
                 </div>
                 <div>
@@ -607,11 +631,11 @@ onMounted(async () => {
               <div>
                 <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">分类</label>
                 <StyledSelect v-model="createForm.category">
-                  <option value="FUNCTIONAL">FUNCTIONAL</option>
-                  <option value="UI">UI</option>
-                  <option value="API">API</option>
-                  <option value="PERFORMANCE">PERFORMANCE</option>
-                  <option value="SECURITY">SECURITY</option>
+                  <option value="FUNCTIONAL">功能</option>
+                  <option value="UI">界面</option>
+                  <option value="API">接口</option>
+                  <option value="PERFORMANCE">性能</option>
+                  <option value="SECURITY">安全</option>
                 </StyledSelect>
               </div>
               <div>

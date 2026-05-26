@@ -38,6 +38,12 @@ const caseType = computed(() => {
   if (category.includes('ui') || category.includes('page') || props.item.test_data?.playwright_commands) return 'ui'
   return 'case'
 })
+const caseTypeLabel = computed(() => {
+  if (caseType.value === 'api') return '接口'
+  if (caseType.value === 'ui') return '界面'
+  if (caseType.value === 'case') return '用例'
+  return caseType.value.toUpperCase()
+})
 const sourceKind = computed(() => {
   const source = String(props.item.source || '')
   if (asset.value.source_run_id || source.startsWith('run_case_asset:')) return '运行沉淀'
@@ -47,7 +53,7 @@ const sourceKind = computed(() => {
 })
 const sourceDetail = computed(() => {
   const source = asset.value.source ? `${asset.value.source} #${Number(asset.value.source_index ?? 0) + 1}` : ''
-  return source || props.item.source || 'manual'
+  return source || props.item.source || '手动维护'
 })
 const sourceRunId = computed(() => {
   if (asset.value.source_run_id) return String(asset.value.source_run_id)
@@ -101,7 +107,7 @@ function priorityClass(priority: string) {
           <h3 class="min-w-0 flex-1 truncate text-sm font-semibold text-gray-950">{{ item.title }}</h3>
           <span class="rounded px-2 py-0.5 text-[10px] font-bold uppercase"
             :class="caseType === 'api' ? 'bg-blue-50 text-blue-700' : caseType === 'ui' ? 'bg-indigo-50 text-indigo-700' : 'bg-gray-100 text-gray-600'">
-            {{ caseType }}
+            {{ caseTypeLabel }}
           </span>
           <span class="rounded px-2 py-0.5 text-[10px] font-bold" :class="priorityClass(item.priority)">
             {{ item.priority }}
@@ -128,7 +134,7 @@ function priorityClass(priority: string) {
 
     <div class="mt-3 space-y-1 text-[11px] text-gray-500">
       <div class="truncate font-mono">{{ sourceDetail }}</div>
-      <div v-if="sourceRunId" class="truncate font-mono">run {{ sourceRunId.slice(0, 8) }}</div>
+      <div v-if="sourceRunId" class="truncate font-mono">运行 {{ sourceRunId.slice(0, 8) }}</div>
       <div v-if="projectLabel" class="truncate font-mono">{{ projectLabel }}</div>
       <div v-if="suiteNames.length" class="flex flex-wrap gap-1 pt-1">
         <span
