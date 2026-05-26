@@ -6,6 +6,7 @@ import logging
 import re
 from datetime import datetime
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 import yaml
 from langchain_core.messages import HumanMessage
@@ -59,6 +60,39 @@ _KEY_VALUE_TOKEN_RE = re.compile(
     r"(?i)\b(?:token|access_token|api_key|apikey)\b\s*(?:[:=：]|是|为)?\s*([^\s,，;；]+)"
 )
 _API_INTENT_RE = re.compile(r"(?i)\b(api|openapi|swagger|endpoint)\b|接口")
+_API_DIRECT_URL_HINT_RE = re.compile(
+    r"(?i)\b(api|endpoint|json|header|headers|body|status\s*code|response)\b|"
+    r"接口|响应|状态码|字段|断言"
+)
+_RESPONSE_FIELD_LIST_RE = re.compile(
+    r"(?i)(?:包含|包括|含有|返回|需要包含|应包含|必须包含|include|includes|included|"
+    r"contain|contains|has|have|return|returns)\s+"
+    r"(?:json\s+|response\s+|body\s+)?"
+    r"([A-Za-z_][A-Za-z0-9_.-]*(?:\s*(?:、|,|，|/|and|和|及)\s*"
+    r"[A-Za-z_][A-Za-z0-9_.-]*)*)\s*"
+    r"(?:字段|键|keys?|fields?)?"
+)
+_FIELD_LIST_AFTER_LABEL_RE = re.compile(
+    r"(?i)(?:字段|键|keys?|fields?)\s*(?:[:：=]|包含|包括|include|includes|contain|contains)?\s*"
+    r"([A-Za-z_][A-Za-z0-9_.-]*(?:\s*(?:、|,|，|/|and|和|及)\s*"
+    r"[A-Za-z_][A-Za-z0-9_.-]*)*)"
+)
+_RESPONSE_FIELD_STOPWORDS = {
+    "and",
+    "body",
+    "code",
+    "contains",
+    "field",
+    "fields",
+    "header",
+    "include",
+    "includes",
+    "json",
+    "key",
+    "keys",
+    "response",
+    "status",
+}
 _UI_INTENT_RE = re.compile(r"(?i)\b(ui|browser|page|web|login page|screen)\b|页面|浏览器|管理后台|后台")
 _NO_AUTH_RE = re.compile(
     r"(?i)\b(no auth|public|login not required)\b|"
@@ -221,10 +255,103 @@ def _latest_url(text: str) -> str | None:
     return _clean_url(matches[-1].group(0)) if matches else None
 
 
+def _urls_from_text(text: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for match in _URL_RE.finditer(text):
+        url = _clean_url(match.group(0))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+def _response_field_names_from_text(text: str) -> list[str]:
+    fields: list[str] = []
+    seen: set[str] = set()
+    for pattern in (_RESPONSE_FIELD_LIST_RE, _FIELD_LIST_AFTER_LABEL_RE):
+        for match in pattern.finditer(text):
+            raw = match.group(1)
+            for item in re.split(r"\s*(?:、|,|，|/|\band\b|和|及)\s*", raw):
+                field_name = item.strip().strip("`'\".。；;:：")
+                if (
+                    not field_name
+                    or field_name.lower() in _RESPONSE_FIELD_STOPWORDS
+                    or field_name.lower() in seen
+                ):
+                    continue
+                seen.add(field_name.lower())
+                fields.append(field_name)
+    return fields[:12]
+
+
+def _direct_url_response_schema(text: str) -> dict[str, Any]:
+    fields = _response_field_names_from_text(text)
+    schema: dict[str, Any] = {"type": "object"}
+    if fields:
+        schema["properties"] = {field: {} for field in fields}
+        schema["required"] = fields
+    return schema
+
+
+def _direct_api_urls_as_openapi_source(text: str) -> str | None:
+    if not _API_DIRECT_URL_HINT_RE.search(text):
+        return None
+    urls = _urls_from_text(text)
+    if len(urls) < 2:
+        return None
+
+    parsed_urls = [urlsplit(url) for url in urls]
+    origins = {f"{item.scheme}://{item.netloc}" for item in parsed_urls if item.scheme and item.netloc}
+    if len(origins) != 1:
+        return None
+    origin = origins.pop().rstrip("/")
+
+    paths: dict[str, Any] = {}
+    response_schema = _direct_url_response_schema(text)
+    for item in parsed_urls:
+        path = item.path or "/"
+        parameters = [
+            {
+                "name": key,
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "example": value,
+            }
+            for key, value in parse_qsl(item.query, keep_blank_values=True)
+        ]
+        paths[path] = {
+            "get": {
+                "summary": f"Direct GET {path}",
+                "parameters": parameters,
+                "responses": {
+                    "200": {
+                        "description": "Expected successful response",
+                        "content": {"application/json": {"schema": response_schema}},
+                    }
+                },
+            }
+        }
+
+    return _json_dumps(
+        {
+            "openapi": "3.0.0",
+            "info": {"title": "Direct API URL targets", "version": "1.0.0"},
+            "servers": [{"url": origin}],
+            "paths": paths,
+        }
+    )
+
+
 def _source_from_text(text: str) -> str | None:
     openapi_source = _extract_openapi_source(text)
     if openapi_source:
         return openapi_source[:20000]
+    direct_api_source = _direct_api_urls_as_openapi_source(text)
+    if direct_api_source:
+        return direct_api_source[:20000]
     return _latest_url(text)
 
 

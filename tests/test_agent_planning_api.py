@@ -20,6 +20,7 @@ from app.services.agent_planning import (
     agent_planning_service,
     normalize_planner_run_payload,
 )
+from app.tools.doc_parser import parse_api_document_content
 
 
 def _token(client: TestClient) -> str:
@@ -137,6 +138,76 @@ def test_chinese_message_extraction_for_api_no_auth_dynamic_and_safe_policies() 
     assert dynamic_payload.captcha_mode == "dynamic"
     assert dynamic_payload.api_execution_policy == "safe_with_auth"
     assert safe_payload.api_execution_policy == "safe_read_only"
+
+
+def test_multi_direct_api_urls_normalize_to_schema_source() -> None:
+    payload = normalize_planner_run_payload(
+        None,
+        [
+            _message(
+                "请测试 https://httpbin.org/get 和 https://httpbin.org/headers "
+                "两个只读接口，状态码必须是 200，响应 JSON 需要包含 url、headers 字段，并说明证据。"
+            )
+        ],
+    )
+
+    assert payload.test_type == "api"
+    assert payload.base_url == "https://httpbin.org"
+    assert payload.source is not None
+    document = json.loads(payload.source)
+    assert document["openapi"] == "3.0.0"
+    assert document["servers"] == [{"url": "https://httpbin.org"}]
+    assert set(document["paths"]) == {"/get", "/headers"}
+    response_schema = document["paths"]["/get"]["get"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]
+    assert response_schema["required"] == ["url", "headers"]
+
+    endpoints = parse_api_document_content(payload.source)
+    assert [(item["method"], item["path"]) for item in endpoints] == [
+        ("GET", "/get"),
+        ("GET", "/headers"),
+    ]
+    assert endpoints[0]["response_schema"]["required"] == ["url", "headers"]
+
+
+def test_multi_direct_api_urls_preserve_query_examples() -> None:
+    payload = normalize_planner_run_payload(
+        None,
+        [
+            _message(
+                "Test API endpoints https://api.example.test/search?q=codex&page=1 "
+                "and https://api.example.test/users?active=true. Response includes data field."
+            )
+        ],
+    )
+
+    assert payload.source is not None
+    document = json.loads(payload.source)
+    assert document["servers"] == [{"url": "https://api.example.test"}]
+    search_params = document["paths"]["/search"]["get"]["parameters"]
+    assert search_params == [
+        {
+            "name": "q",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string"},
+            "example": "codex",
+        },
+        {
+            "name": "page",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string"},
+            "example": "1",
+        },
+    ]
+    endpoints = parse_api_document_content(payload.source)
+    search = next(item for item in endpoints if item["path"] == "/search")
+    assert {item["name"]: item["example"] for item in search["query_params"]} == {
+        "q": "codex",
+        "page": "1",
+    }
 
 
 def test_api_plan_without_auth_boundary_keeps_collecting(monkeypatch) -> None:
@@ -622,6 +693,90 @@ def test_structured_intake_target_supplement_survives_until_ready() -> None:
     assert body["session"]["current_run_payload"]["source"] == "https://httpbin.org/get"
     assert body["next_question"] is None
     assert body["missing_info"] == []
+
+
+def test_structured_intake_multi_url_target_supplement_builds_schema_source() -> None:
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={},
+            headers=headers,
+        ).json()
+        session_id = created["id"]
+        target = client.post(
+            f"/api/v1/agent-plans/sessions/{session_id}/intake",
+            json={
+                "action": "continue",
+                "current_step": "target_kind",
+                "selected_option": {
+                    "label": "API / 接口",
+                    "value": "api_openapi",
+                    "field": "target_kind",
+                    "step": "target_kind",
+                    "message": "测试目标类型：API / OpenAPI/Swagger 接口来源。",
+                },
+                "message": (
+                    "请测试 https://httpbin.org/get 和 https://httpbin.org/headers "
+                    "两个只读接口，响应 JSON 需要包含 url、headers 字段。"
+                ),
+            },
+            headers=headers,
+        )
+        client.post(
+            f"/api/v1/agent-plans/sessions/{session_id}/intake",
+            json={"action": "skip", "current_step": "coverage_scope"},
+            headers=headers,
+        )
+        client.post(
+            f"/api/v1/agent-plans/sessions/{session_id}/intake",
+            json={
+                "action": "continue",
+                "current_step": "auth_boundary",
+                "selected_option": {
+                    "label": "无需登录",
+                    "value": "no_auth",
+                    "field": "auth_boundary",
+                    "step": "auth_boundary",
+                    "message": "登录方式/凭证：目标公开访问，无需登录或鉴权。",
+                },
+            },
+            headers=headers,
+        )
+        client.post(
+            f"/api/v1/agent-plans/sessions/{session_id}/intake",
+            json={
+                "action": "continue",
+                "current_step": "safety_boundary",
+                "selected_option": {
+                    "label": "只读边界",
+                    "value": "safe_read_only",
+                    "field": "safety_boundary",
+                    "step": "safety_boundary",
+                    "message": "安全边界：只做只读检查，不创建、修改或删除数据。",
+                },
+            },
+            headers=headers,
+        )
+        response = client.post(
+            f"/api/v1/agent-plans/sessions/{session_id}/intake",
+            json={"action": "skip", "current_step": "success_criteria"},
+            headers=headers,
+        )
+
+    assert target.status_code == 200
+    assert target.json()["draft"]["target"]["value"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session"]["status"] == "ready"
+    source = body["session"]["current_run_payload"]["source"]
+    document = json.loads(source)
+    assert document["servers"] == [{"url": "https://httpbin.org"}]
+    assert set(document["paths"]) == {"/get", "/headers"}
+    assert document["paths"]["/headers"]["get"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]["required"] == ["url", "headers"]
 
 
 def test_generate_agent_plan_session_before_ready_returns_400() -> None:

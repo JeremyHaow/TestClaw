@@ -14,6 +14,7 @@ from app.agent.nodes import (
     mission_planner,
     planner,
     reporter,
+    source_loader,
     tc_generator,
 )
 from app.agent.nodes.ui_runner import _build_ui_case_batches
@@ -26,12 +27,14 @@ from app.agent.strategy import normalize_agent_strategy_decision
 from app.agent.tool_registry import build_tool_registry, select_skills_for_state
 from app.core.llm_gateway import LLMGateway
 from app.core.redaction import REDACTED_VALUE
+from app.models.agent_planning import AgentPlanningMessage
 from app.models.llm_provider import LLMProvider, ProviderType
 from app.models.task import TaskStatus
 from app.services.api_auth import AuthResolution
 from app.services import vector_store
 from app.services.embedding_service import EmbeddingService, EmbeddingUnavailableError
 from app.services.knowledge_service import KnowledgeService
+from app.services.agent_planning import normalize_planner_run_payload
 from app.services.vector_store import DatabaseKnowledgeVectorStore, MilvusKnowledgeVectorStore
 from app.tools.mock_data import generate_mock_json_body
 
@@ -1010,6 +1013,77 @@ async def test_direct_api_url_builds_and_executes_smoke_request_without_schema(m
     assert executed["api_request_selection"]["selected_total"] == 1
     assert executed["api_execution_result"]["all_passed"] is True
     assert executed["execution_result"]["status_code"] == 0
+
+
+@pytest.mark.asyncio
+async def test_multi_direct_api_urls_flow_through_schema_case_generation(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+            self.text = json.dumps(payload)
+            self.content = self.text.encode()
+
+        def json(self) -> dict:
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse({"url": url, "headers": {}})
+
+    payload = normalize_planner_run_payload(
+        None,
+        [
+            AgentPlanningMessage(
+                session_id="test-session",
+                role="user",
+                content=(
+                    "请测试 https://httpbin.org/get 和 https://httpbin.org/headers "
+                    "两个只读接口，状态码必须是 200，响应 JSON 需要包含 url、headers 字段。"
+                ),
+            )
+        ],
+    )
+    assert payload.source is not None
+    calls = []
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+
+    loaded = await source_loader.run(
+        {
+            "source_input": payload.source,
+            "input_type": "unknown",
+            "test_type": "api",
+            "objective": payload.objective,
+            "api_execution_policy": payload.api_execution_policy,
+            "workflow_steps": [],
+        }
+    )
+    generated = await tc_generator.run(loaded)
+    executed = await api_runner.run(generated)
+
+    assert loaded["target_url"] == "https://httpbin.org"
+    assert [(item["method"], item["path"]) for item in loaded["parsed_api_schema"]] == [
+        ("GET", "/get"),
+        ("GET", "/headers"),
+    ]
+    assert [case["endpoint"] for case in generated["api_cases"]] == ["/get", "/headers"]
+    assert [call["url"] for call in calls] == [
+        "https://httpbin.org/get",
+        "https://httpbin.org/headers",
+    ]
+    assert executed["api_request_selection"]["selected_total"] == 2
 
 
 @pytest.mark.asyncio
