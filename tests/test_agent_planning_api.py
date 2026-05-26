@@ -13,7 +13,11 @@ from app.main import app
 from app.models.agent_planning import AgentPlanningMessage
 from app.models.task import Task, TaskStatus, TestType as TaskTestType
 from app.models.user import User
-from app.services.agent_planning import agent_planning_service, normalize_planner_run_payload
+from app.services.agent_planning import (
+    PlannerLLMOutput,
+    agent_planning_service,
+    normalize_planner_run_payload,
+)
 
 
 def _token(client: TestClient) -> str:
@@ -43,6 +47,23 @@ async def _create_test_user(username: str, password: str) -> None:
 
 def _message(content: str) -> AgentPlanningMessage:
     return AgentPlanningMessage(session_id="test-session", role="user", content=content)
+
+
+def _sse_events(text: str) -> list[tuple[str, dict[str, Any]]]:
+    events: list[tuple[str, dict[str, Any]]] = []
+    for block in text.replace("\r\n", "\n").strip().split("\n\n"):
+        if not block.strip():
+            continue
+        event_name = "message"
+        data_lines: list[str] = []
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                event_name = line.split(":", 1)[1].strip()
+            elif line.startswith("data:"):
+                data_lines.append(line.split(":", 1)[1].strip())
+        if data_lines:
+            events.append((event_name, json.loads("\n".join(data_lines))))
+    return events
 
 
 def test_chinese_message_extraction_for_ui_credentials_and_write_policy() -> None:
@@ -154,6 +175,62 @@ def test_planning_message_asks_missing_source(monkeypatch) -> None:
     assert body["ready_to_execute"] is False
     assert body["current_plan"] is None
     assert any("目标" in message["content"] for message in body["messages"])
+    assert body["question_options"]
+    assert body["messages"][-1]["plan"]["question_options"] == body["question_options"]
+    assert all(group["question"] for group in body["question_options"])
+    assert all(
+        option["label"] and option["message"]
+        for group in body["question_options"]
+        for option in group["options"]
+    )
+
+
+def test_planning_message_exposes_model_provided_choice_options(monkeypatch) -> None:
+    async def fake_llm(*args: Any, **kwargs: Any) -> PlannerLLMOutput:
+        return PlannerLLMOutput(
+            response="请选择本轮范围。",
+            status="collecting",
+            questions=["希望先覆盖哪个测试范围？"],
+            question_options=[
+                {
+                    "question": "希望先覆盖哪个测试范围？",
+                    "options": [
+                        {
+                            "label": "关键路径",
+                            "message": "范围：先覆盖关键路径和发布阻断风险。",
+                        }
+                    ],
+                }
+            ],
+            ready_to_execute=False,
+            run_payload={},
+        )
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        response = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "先帮我规划测试范围。"},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    question_options = response.json()["question_options"]
+    assert question_options == [
+        {
+            "question": "希望先覆盖哪个测试范围？",
+            "options": [
+                {
+                    "label": "关键路径",
+                    "message": "范围：先覆盖关键路径和发布阻断风险。",
+                }
+            ],
+        }
+    ]
 
 
 def test_whitespace_planning_message_is_rejected_and_not_stored() -> None:
@@ -360,8 +437,23 @@ def test_execute_current_plan_uses_run_creation_path(monkeypatch) -> None:
             headers=headers,
         )
         assert ready.status_code == 200
+        first_user_id = ready.json()["messages"][0]["id"]
         response = client.post(
             f"/api/v1/agent-plans/{created['id']}/execute",
+            headers=headers,
+        )
+        add_after_execute = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "change after launch"},
+            headers=headers,
+        )
+        edit_after_execute = client.put(
+            f"/api/v1/agent-plans/{created['id']}/messages/{first_user_id}",
+            json={"content": "change after launch"},
+            headers=headers,
+        )
+        delete_after_execute = client.delete(
+            f"/api/v1/agent-plans/{created['id']}/messages/{first_user_id}",
             headers=headers,
         )
         rejected_after_execute = client.post(
@@ -376,8 +468,206 @@ def test_execute_current_plan_uses_run_creation_path(monkeypatch) -> None:
     assert body["run"]["status"] == "queued"
     assert body["session"]["status"] == "executed"
     assert body["session"]["executed_run_id"] == body["run"]["id"]
+    assert add_after_execute.status_code == 400
+    assert add_after_execute.json()["detail"] == "Executed plan cannot be changed"
+    assert edit_after_execute.status_code == 400
+    assert edit_after_execute.json()["detail"] == "Executed plan cannot be changed"
+    assert delete_after_execute.status_code == 400
+    assert delete_after_execute.json()["detail"] == "Executed plan cannot be changed"
     assert rejected_after_execute.status_code == 400
     assert rejected_after_execute.json()["detail"] == "Executed plan cannot be rejected"
+
+
+def test_delete_planning_session_removes_conversation(monkeypatch) -> None:
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        ready = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "Test API https://api.example.test/openapi.json."},
+            headers=headers,
+        )
+        assert ready.status_code == 200
+
+        deleted = client.delete(f"/api/v1/agent-plans/{created['id']}", headers=headers)
+        fetched = client.get(f"/api/v1/agent-plans/{created['id']}", headers=headers)
+        listed = client.get("/api/v1/agent-plans", headers=headers)
+
+    assert deleted.status_code == 204
+    assert fetched.status_code == 404
+    assert all(item["id"] != created["id"] for item in listed.json())
+
+
+def test_delete_planning_message_rolls_back_following_messages(monkeypatch) -> None:
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        first = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "Test API https://api.example.test/openapi.json."},
+            headers=headers,
+        )
+        second = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "Focus on contract assertions too."},
+            headers=headers,
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+        first_user_id = first.json()["messages"][0]["id"]
+
+        deleted = client.delete(
+            f"/api/v1/agent-plans/{created['id']}/messages/{first_user_id}",
+            headers=headers,
+        )
+
+    assert deleted.status_code == 200
+    body = deleted.json()
+    assert body["messages"] == []
+    assert body["status"] == "collecting"
+    assert body["title"] == "新计划"
+    assert body["current_plan"] is None
+    assert body["current_run_payload"] is None
+
+
+def test_edit_prior_user_message_rolls_back_and_regenerates(monkeypatch) -> None:
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        first = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "Test public page https://old.example.test as UI. no auth."},
+            headers=headers,
+        )
+        second = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "Also include the dashboard."},
+            headers=headers,
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+        first_user_id = first.json()["messages"][0]["id"]
+
+        edited = client.put(
+            f"/api/v1/agent-plans/{created['id']}/messages/{first_user_id}",
+            json={"content": "Test API https://new.example.test/openapi.json with read-only checks."},
+            headers=headers,
+        )
+
+    assert edited.status_code == 200
+    body = edited.json()
+    assert len(body["messages"]) == 2
+    assert body["messages"][0]["content"].startswith("Test API https://new.example.test")
+    assert all("dashboard" not in message["content"] for message in body["messages"])
+    assert body["title"] == "https://new.example.test/openapi.json"
+    assert body["status"] == "ready"
+    assert body["current_run_payload"]["source"] == "https://new.example.test/openapi.json"
+    assert body["current_run_payload"]["test_type"] == "api"
+
+
+def test_stream_edit_validates_message_before_opening_stream(monkeypatch) -> None:
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        ready = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "Test API https://api.example.test/openapi.json."},
+            headers=headers,
+        )
+        assert ready.status_code == 200
+        assistant_id = ready.json()["messages"][1]["id"]
+
+        missing = client.put(
+            f"/api/v1/agent-plans/{created['id']}/messages/missing-message/stream",
+            json={"content": "new content"},
+            headers=headers,
+        )
+        assistant_edit = client.put(
+            f"/api/v1/agent-plans/{created['id']}/messages/{assistant_id}/stream",
+            json={"content": "new content"},
+            headers=headers,
+        )
+
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == "Planning message not found"
+    assert assistant_edit.status_code == 400
+    assert assistant_edit.json()["detail"] == "Only user messages can be edited"
+
+
+def test_stream_planning_message_emits_process_deltas_and_final_session(monkeypatch) -> None:
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        with client.stream(
+            "POST",
+            f"/api/v1/agent-plans/{created['id']}/messages/stream",
+            json={
+                "content": (
+                    "Test API https://api.example.test/openapi.json "
+                    "with token=secret-token and read-only checks."
+                )
+            },
+            headers=headers,
+        ) as response:
+            status_code = response.status_code
+            content_type = response.headers.get("content-type", "")
+            text = "".join(response.iter_text())
+
+    assert status_code == 200
+    assert content_type.startswith("text/event-stream")
+    events = _sse_events(text)
+    event_names = [event_name for event_name, _ in events]
+    process_codes = [data["code"] for event_name, data in events if event_name == "process"]
+    final_events = [data for event_name, data in events if event_name == "final"]
+    assistant_text = "".join(
+        data["delta"] for event_name, data in events if event_name == "token"
+    )
+
+    assert "process" in event_names
+    assert "token" in event_names
+    assert "final" in event_names
+    assert process_codes[:4] == [
+        "analyzing_requirement",
+        "checking_missing_info",
+        "normalizing_target",
+        "preparing_plan",
+    ]
+    assert "waiting_for_confirmation" in process_codes
+    assert "信息已足够" in assistant_text
+    assert final_events[0]["session"]["status"] == "ready"
+    assert final_events[0]["session"]["current_run_payload"]["token"] == "[REDACTED]"
+    assert final_events[0]["session"]["question_options"] == []
+    assert "secret-token" not in text
 
 
 def test_planning_session_isolated_by_user(monkeypatch) -> None:
@@ -402,12 +692,27 @@ def test_planning_session_isolated_by_user(monkeypatch) -> None:
             headers=admin_headers,
         )
         assert ready.status_code == 200
+        first_user_id = ready.json()["messages"][0]["id"]
 
         listed = client.get("/api/v1/agent-plans", headers=other_headers)
         get_response = client.get(f"/api/v1/agent-plans/{created['id']}", headers=other_headers)
         message_response = client.post(
             f"/api/v1/agent-plans/{created['id']}/messages",
             json={"content": "change it"},
+            headers=other_headers,
+        )
+        edit_response = client.put(
+            f"/api/v1/agent-plans/{created['id']}/messages/{first_user_id}",
+            json={"content": "change it"},
+            headers=other_headers,
+        )
+        stream_edit_response = client.put(
+            f"/api/v1/agent-plans/{created['id']}/messages/{first_user_id}/stream",
+            json={"content": "change it"},
+            headers=other_headers,
+        )
+        delete_message_response = client.delete(
+            f"/api/v1/agent-plans/{created['id']}/messages/{first_user_id}",
             headers=other_headers,
         )
         reject_response = client.post(
@@ -424,5 +729,8 @@ def test_planning_session_isolated_by_user(monkeypatch) -> None:
     assert all(item["id"] != created["id"] for item in listed.json())
     assert get_response.status_code == 404
     assert message_response.status_code == 404
+    assert edit_response.status_code == 404
+    assert stream_edit_response.status_code == 404
+    assert delete_message_response.status_code == 404
     assert reject_response.status_code == 404
     assert execute_response.status_code == 404

@@ -44,3 +44,23 @@ def test_agent_plan_is_default_entry_after_login_and_root_redirects() -> None:
     assert "router.push('/run')" not in login_source
     assert "redirect: '/agent-plan'" in router_source
     assert "return '/agent-plan'" in router_source
+
+
+def test_agent_plan_uses_streaming_and_live_message_controls() -> None:
+    source = PAGE.read_text(encoding="utf-8")
+
+    assert "streamPlannerTurn" in source
+    assert "/messages/stream" in source
+    assert "/stream`" in source
+    assert "eventName === 'token'" in source
+    assert "process_events" in source
+    assert "deleteSession" in source
+    assert "deleteMessage" in source
+    assert "startEditMessage" in source
+    assert "resendEditedMessage" in source
+    assert "Executed plan cannot be changed" in source
+    assert "!canModifyActiveSession" in source
+    assert "PlannerQuestionOption" in source
+    assert "messageQuestionOptions" in source
+    assert "latestOptionMessageId" in source
+    assert "sendChoice(option)" in source

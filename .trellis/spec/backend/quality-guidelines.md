@@ -66,7 +66,12 @@
   POST /api/v1/agent-plans
   GET /api/v1/agent-plans
   GET /api/v1/agent-plans/{session_id}
+  DELETE /api/v1/agent-plans/{session_id}
   POST /api/v1/agent-plans/{session_id}/messages
+  POST /api/v1/agent-plans/{session_id}/messages/stream
+  PUT /api/v1/agent-plans/{session_id}/messages/{message_id}
+  PUT /api/v1/agent-plans/{session_id}/messages/{message_id}/stream
+  DELETE /api/v1/agent-plans/{session_id}/messages/{message_id}
   POST /api/v1/agent-plans/{session_id}/reject
   POST /api/v1/agent-plans/{session_id}/execute
   ```
@@ -76,10 +81,23 @@
     "response": "...",
     "status": "collecting|ready",
     "questions": [],
+    "question_options": [
+      {
+        "question": "...",
+        "options": [{"label": "...", "message": "..."}]
+      }
+    ],
     "ready_to_execute": false,
     "plan": {},
     "run_payload": {}
   }
+  ```
+- Planner stream contract:
+  ```text
+  event: process           data: {"code": "analyzing_requirement|checking_missing_info|normalizing_target|preparing_plan|waiting_for_confirmation", "label": "...", "status": "..."}
+  event: token             data: {"delta": "..."}
+  event: final             data: {"session": <redacted session payload>, "process_events": [...]}
+  event: error             data: {"detail": "..."}
   ```
 
 ### 3. Contracts
@@ -92,8 +110,15 @@
 - After rejection, generated `objective`, `setup_instructions`, credentials, and tokens must be derived from the active user messages after the rejection boundary, not from the full rejected conversation history.
 - Fallback planning must ask for missing target/source and may produce a safe basic plan when enough generic target information exists. Do not add product-specific target branches.
 - Plan rejection clears `current_plan` and `current_run_payload`, records a rejection reason, and leaves the session open for later user messages to regenerate a plan.
+- Deleting a planning session must delete its planning messages and return `204`.
+- Deleting a planning message is a rollback operation: remove that message and all later messages, clear stale `current_plan`/`current_run_payload`, and restore executable state only if the remaining final message is an assistant message with a ready plan.
+- Editing a user message is rollback plus regeneration: update the selected user message, remove all later messages, clear stale executable state, then generate the next assistant turn from the edited conversation. Non-user messages must not be edited.
+- Executed planning sessions are immutable chat transcripts: adding, editing, deleting, or streaming a message after execution must return `400 Executed plan cannot be changed` so the session cannot lose `executed` status or stale run linkage.
+- Streaming message and edit endpoints must use the same persistence path as non-streaming message and edit endpoints. They may progressively chunk a completed assistant response until true model token streaming is available, but the final event must contain the normalized/redacted session payload.
+- Process events are visible operational summaries only (`analyzing_requirement`, `checking_missing_info`, `normalizing_target`, `preparing_plan`, `waiting_for_confirmation`). Do not expose hidden chain-of-thought.
+- Clarifying questions may include selectable `question_options`. Each entry is a generic elicitation object with `question` and `options[].label`/`options[].message`. Option messages must represent reusable testing choices such as target type, scope, auth/login boundary, safety boundary, or success criteria. Do not create product-specific option branches.
 - Plan execution must call the existing run creation path or shared lower-level run functions. It must not duplicate auth preflight, task creation, Celery dispatch, or synchronous fallback behavior.
-- API responses must redact tokens, passwords, cookies, captcha/MFA/OTP values, sessions, API keys, auth headers, and setup text before returning sessions/messages/plans.
+- API responses and stream final payloads must redact tokens, passwords, cookies, captcha/MFA/OTP values, sessions, API keys, auth headers, setup text, and question option messages before returning sessions/messages/plans.
 
 ### 4. Validation & Error Matrix
 
@@ -104,20 +129,29 @@
 - UI target without credentials or explicit no-login confirmation -> `status="collecting"` and asks whether login is required.
 - LLM unavailable or invalid JSON -> fallback response; no 500 from the planning turn.
 - Reject with no current plan -> `400 No current plan to reject`.
+- Delete/edit unknown message -> `404 Planning message not found`.
+- Edit assistant/system message -> `400 Only user messages can be edited`.
+- Add/delete/edit message after execution -> `400 Executed plan cannot be changed`.
 - Execute without `current_run_payload` -> `400 No executable plan is ready`.
 - Existing `/runs` preflight blocks execution -> propagate the run creation `HTTPException` so the UI can show the blocker.
 - Secret-bearing user messages or run payloads -> serialized responses contain `[REDACTED]`, not raw values.
+- Secret-bearing question option messages -> serialized responses and SSE final payloads contain `[REDACTED]`, not raw values.
 
 ### 5. Good/Base/Bad Cases
 
 - Good: user describes a Swagger URL and objective, receives a plan card, approves it, and `/agent-plans/{id}/execute` creates the run through `/runs` behavior.
 - Good: user rejects a UI plan, types "use API read-only checks instead", and the regenerated payload uses the later target/mode.
+- Good: user edits an earlier target message, later messages disappear, stale plan/run payload is cleared, and a regenerated assistant turn reflects the edited target.
+- Good: planner asks for auth boundary and returns selectable generic `question_options` such as no login, provide account, or manual token; clicking an option appends that option message as the next user message and continues planning.
+- Good: streaming planner turn emits process events, token events, and a final redacted session payload without requiring a page refresh.
 - Good: user describes a public UI target and explicitly says no login is required, receives a ready UI plan.
 - Good: user writes `请测试管理后台页面 ... 用户名 ... 密码 ... 固定验证码 ...` and fallback extraction normalizes UI mode, auto auth credentials, static captcha, and the requested API policy without product-specific branches.
 - Base: no Planner provider is configured; fallback asks for a target or creates a safe basic plan from a URL/OpenAPI source.
 - Base: user gives only a UI URL and objective; fallback asks for login boundary instead of surfacing an executable plan that preflight will immediately block.
 - Bad: executing a plan manually creates `Task` rows and dispatches workers from the planning route, bypassing auth preflight.
 - Bad: plan/session/list responses echo raw `token=...`, `password=...`, `Cookie`, `Authorization`, captcha, session, or API-key values.
+- Bad: editing a previous user message leaves later assistant/user messages or stale executable payloads attached to the session.
+- Bad: SSE streams hidden chain-of-thought or omits the final normalized session payload.
 
 ### 6. Tests Required
 
@@ -125,6 +159,12 @@
 - Integration: adding a message with missing target returns a collecting response and question.
 - Integration: enough target information returns `ready_to_execute=true`, `current_plan`, and redacted `current_run_payload`.
 - Regression: reject clears executable state, records the reason, and a later message regenerates a plan from later instructions.
+- Regression: delete planning session removes its messages and hides it from list/get.
+- Regression: delete planning message rolls conversation back and clears stale executable state.
+- Regression: edit prior user message removes later messages and regenerates from the edited conversation.
+- Regression: executed planning sessions reject later message add/edit/delete requests without changing `executed_run_id`.
+- Regression: streaming planner message returns `text/event-stream`, process events, token events, and final redacted session payload.
+- Regression: planner output and fallback collecting turns expose generic selectable `question_options`, and frontend source renders clickable choice buttons.
 - Execute path: monkeypatch or otherwise isolate run creation/preflight and assert planning execution delegates to the existing run creation path.
 - Frontend build: Plan Mode route and navigation compile with the session/message/plan response shape.
 

@@ -118,15 +118,31 @@ class PlannerLLMOutput(BaseModel):
     message: str | None = None
     status: str = PLAN_SESSION_COLLECTING
     questions: list[str] = Field(default_factory=list)
+    question_options: list[dict[str, Any]] = Field(default_factory=list)
     ready_to_execute: bool = False
     plan: dict[str, Any] | None = None
     run_payload: dict[str, Any] | None = None
+
+
+class PlannerQuestionChoice(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    label: str
+    message: str
+
+
+class PlannerQuestionOptions(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    question: str
+    options: list[PlannerQuestionChoice] = Field(default_factory=list)
 
 
 class PlannerTurnResult(BaseModel):
     message: str
     status: str
     questions: list[str] = Field(default_factory=list)
+    question_options: list[dict[str, Any]] = Field(default_factory=list)
     ready_to_execute: bool = False
     plan: dict[str, Any] | None = None
     run_payload: dict[str, Any] | None = None
@@ -460,10 +476,19 @@ def normalize_planner_run_payload(
 
 def _missing_questions(payload: PlannerRunPayload) -> list[str]:
     if not payload.source:
-        return ["TestClaw 应测试哪个目标？请粘贴 URL 或 OpenAPI/Swagger 来源。"]
+        return [
+            "TestClaw 应测试哪个目标？请粘贴 URL 或 OpenAPI/Swagger 来源。",
+            "这次希望覆盖哪些范围？例如关键路径、回归范围、接口契约或页面冒烟。",
+            "目标是否需要登录、Token、Header 或测试账号？如果不需要，请明确说明无需登录。",
+            "安全边界是什么？是否只允许只读检查，还是测试环境允许写入。",
+            "什么结果算成功？请描述通过标准、必须覆盖的断言或需要重点发现的问题。",
+        ]
     input_type = classify_input(payload.source)
     if input_type in {"swagger_json", "swagger_yaml"} and not payload.base_url:
-        return ["执行这份 API 文档时应使用哪个基础 URL？"]
+        return [
+            "执行这份 API 文档时应使用哪个基础 URL？",
+            "这次的成功标准是什么？例如必须覆盖的接口、断言或发布阻断条件。",
+        ]
     has_auth_material = bool(
         payload.token
         or payload.headers
@@ -474,7 +499,11 @@ def _missing_questions(payload: PlannerRunPayload) -> list[str]:
         or (payload.auth_config and payload.auth_config.enabled)
     )
     if payload.test_type == "ui" and payload.auth_mode == "auto" and not has_auth_material:
-        return ["这个页面是否需要登录？如需登录请提供测试账号；如果是公开页面，请明确说明无需登录。"]
+        return [
+            "这个页面是否需要登录？如需登录请提供测试账号；如果是公开页面，请明确说明无需登录。",
+            "UI 检查的安全边界是什么？例如只浏览、不提交表单，或允许在测试环境写入。",
+            "这次 UI 运行的成功标准是什么？例如关键页面可达、核心流程无报错或特定断言通过。",
+        ]
     return []
 
 
@@ -524,6 +553,200 @@ def _build_basic_plan(payload: PlannerRunPayload, raw_plan: dict[str, Any] | Non
         "auth": _plan_auth_summary(payload),
         "blockers": [],
     }
+
+
+def _choice(
+    *,
+    label: str,
+    message: str,
+) -> PlannerQuestionChoice:
+    return PlannerQuestionChoice(
+        label=_clean_text(label, limit=40),
+        message=_clean_text(message, limit=300),
+    )
+
+
+def _question_options(
+    *,
+    question: str,
+    options: list[PlannerQuestionChoice],
+) -> PlannerQuestionOptions:
+    return PlannerQuestionOptions(
+        question=_clean_text(question, limit=180),
+        options=options,
+    )
+
+
+def _dedupe_question_options(
+    question_options: list[PlannerQuestionOptions],
+) -> list[dict[str, Any]]:
+    seen_questions: set[str] = set()
+    seen_options: set[tuple[str, str, str]] = set()
+    normalized: list[dict[str, Any]] = []
+    for group in question_options:
+        question = redact_sensitive_text(group.question).strip()
+        if not question or question in seen_questions:
+            continue
+        choices: list[PlannerQuestionChoice] = []
+        for option in group.options:
+            label = redact_sensitive_text(option.label).strip()
+            message = redact_sensitive_text(option.message).strip()
+            if not label or not message:
+                continue
+            option_key = (question, label, message)
+            if option_key in seen_options:
+                continue
+            seen_options.add(option_key)
+            choices.append(PlannerQuestionChoice(label=label, message=message))
+        if choices:
+            seen_questions.add(question)
+            normalized.append(
+                PlannerQuestionOptions(question=question, options=choices[:5]).model_dump(
+                    mode="json",
+                    exclude_none=True,
+                )
+            )
+    return normalized[:8]
+
+
+def _question_options_from_llm(raw_groups: list[dict[str, Any]]) -> list[PlannerQuestionOptions]:
+    groups: list[PlannerQuestionOptions] = []
+    for raw in raw_groups:
+        if not isinstance(raw, dict):
+            continue
+        question = str(raw.get("question") or "").strip()
+        raw_options = raw.get("options")
+        if not question or not isinstance(raw_options, list):
+            continue
+        choices = [
+            _choice(
+                label=str(option.get("label") or "").strip(),
+                message=str(option.get("message") or option.get("value") or "").strip(),
+            )
+            for option in raw_options
+            if isinstance(option, dict)
+            and str(option.get("label") or "").strip()
+            and str(option.get("message") or option.get("value") or "").strip()
+        ]
+        groups.append(
+            _question_options(
+                question=question,
+                options=choices,
+            )
+        )
+    return groups
+
+
+def _fallback_question_options(
+    payload: PlannerRunPayload,
+    questions: list[str],
+) -> list[dict[str, Any]]:
+    question_options: list[PlannerQuestionOptions] = []
+    if not payload.source:
+        question_options.append(
+            _question_options(
+                question="要先确定哪类测试目标？",
+                options=[
+                    _choice(
+                        label="接口文档",
+                        message="我要测试 API 或 OpenAPI/Swagger 来源，稍后补充具体地址。",
+                    ),
+                    _choice(
+                        label="网页界面",
+                        message="我要测试网页 UI，稍后补充具体地址。",
+                    ),
+                    _choice(
+                        label="粘贴目标",
+                        message="我会直接粘贴目标 URL 或 OpenAPI/Swagger 来源。",
+                    ),
+                ],
+            )
+        )
+    if any("基础 URL" in question for question in questions):
+        question_options.append(
+            _question_options(
+                question="这份 API 文档对应哪个基础 URL？",
+                options=[
+                    _choice(
+                        label="补充基础 URL",
+                        message="我会补充这份 API 文档对应的基础 URL。",
+                    )
+                ],
+            )
+        )
+    if any("登录" in question or "账号" in question or "Token" in question for question in questions):
+        question_options.append(
+            _question_options(
+                question="目标的登录或鉴权边界是什么？",
+                options=[
+                    _choice(
+                        label="无需登录",
+                        message="确认目标是公开访问，无需登录或鉴权。",
+                    ),
+                    _choice(
+                        label="提供账号",
+                        message="目标需要登录，我会提供测试账号、密码和必要的登录说明。",
+                    ),
+                    _choice(
+                        label="手动鉴权",
+                        message="我会提供 Token、Cookie 或 Header 作为手动鉴权材料。",
+                    ),
+                ],
+            )
+        )
+    question_options.extend(
+        [
+            _question_options(
+                question="先按哪个测试范围规划？",
+                options=[
+                    _choice(
+                        label="冒烟范围",
+                        message="范围：先做关键路径和基础可用性冒烟检查。",
+                    ),
+                    _choice(
+                        label="回归范围",
+                        message="范围：覆盖主要回归风险、核心流程和历史问题。",
+                    ),
+                ],
+            ),
+            _question_options(
+                question="安全边界是什么？",
+                options=[
+                    _choice(
+                        label="只读边界",
+                        message="安全边界：只做只读检查，不创建、修改或删除数据。",
+                    ),
+                    _choice(
+                        label="测试环境写入",
+                        message="这是测试环境，允许在约定范围内创建、修改或删除测试数据。",
+                    ),
+                ],
+            ),
+            _question_options(
+                question="结果怎样才算成功？",
+                options=[
+                    _choice(
+                        label="证据充分",
+                        message="成功标准：每个覆盖点都有结果、证据、失败原因或明确跳过原因。",
+                    ),
+                ],
+            ),
+        ]
+    )
+    return _dedupe_question_options(question_options)
+
+
+def _planner_question_options(
+    llm_output: PlannerLLMOutput,
+    payload: PlannerRunPayload,
+    questions: list[str],
+) -> list[dict[str, Any]]:
+    llm_question_options = _dedupe_question_options(
+        _question_options_from_llm(llm_output.question_options)
+    )
+    if llm_question_options:
+        return llm_question_options
+    return _fallback_question_options(payload, questions)
 
 
 def _sanitize_llm_output(raw: dict[str, Any]) -> PlannerLLMOutput | None:
@@ -612,6 +835,141 @@ class AgentPlanningService:
         db.add(user_message)
         await db.flush()
 
+        await self._append_assistant_turn(db, session=session)
+        await db.commit()
+        await db.refresh(session)
+        return session, await self.list_messages(db, session_id=session.id)
+
+    async def edit_user_message(
+        self,
+        db: AsyncSession,
+        *,
+        session: AgentPlanningSession,
+        message_id: str,
+        content: str,
+    ) -> tuple[AgentPlanningSession, list[AgentPlanningMessage]]:
+        content = content.strip()
+        if not content:
+            raise ValueError("content is required")
+        messages = await self.list_messages(db, session_id=session.id)
+        target_index = self._message_index(messages, message_id)
+        if target_index is None:
+            raise LookupError("Planning message not found")
+        target_message = messages[target_index]
+        if target_message.role != "user":
+            raise ValueError("Only user messages can be edited")
+
+        target_message.content = content
+        for message in messages[target_index + 1 :]:
+            await db.delete(message)
+        session.current_plan = None
+        session.current_run_payload = None
+        session.status = PLAN_SESSION_COLLECTING
+        session.rejection_reason = None
+        session.updated_at = datetime.utcnow()
+        await db.flush()
+
+        await self._append_assistant_turn(db, session=session, refresh_title=True)
+        await db.commit()
+        await db.refresh(session)
+        return session, await self.list_messages(db, session_id=session.id)
+
+    async def delete_messages_from(
+        self,
+        db: AsyncSession,
+        *,
+        session: AgentPlanningSession,
+        message_id: str,
+    ) -> tuple[AgentPlanningSession, list[AgentPlanningMessage]]:
+        messages = await self.list_messages(db, session_id=session.id)
+        target_index = self._message_index(messages, message_id)
+        if target_index is None:
+            raise LookupError("Planning message not found")
+        for message in messages[target_index:]:
+            await db.delete(message)
+        remaining_messages = messages[:target_index]
+        self._restore_session_state_from_messages(session, remaining_messages)
+        self._restore_session_title_from_messages(session, remaining_messages)
+        session.rejection_reason = None
+        session.updated_at = datetime.utcnow()
+        await db.commit()
+        await db.refresh(session)
+        return session, await self.list_messages(db, session_id=session.id)
+
+    async def delete_session(
+        self,
+        db: AsyncSession,
+        *,
+        session: AgentPlanningSession,
+    ) -> None:
+        messages = await self.list_messages(db, session_id=session.id)
+        for message in messages:
+            await db.delete(message)
+        await db.delete(session)
+        await db.commit()
+
+    def _message_index(
+        self,
+        messages: list[AgentPlanningMessage],
+        message_id: str,
+    ) -> int | None:
+        for index, message in enumerate(messages):
+            if message.id == message_id:
+                return index
+        return None
+
+    def _restore_session_state_from_messages(
+        self,
+        session: AgentPlanningSession,
+        messages: list[AgentPlanningMessage],
+    ) -> None:
+        session.current_plan = None
+        session.current_run_payload = None
+        session.status = PLAN_SESSION_COLLECTING
+        if not messages or messages[-1].role != "assistant":
+            return
+        plan_data = parse_json_object_text(messages[-1].plan_json)
+        if not plan_data:
+            return
+        status = str(plan_data.get("status") or PLAN_SESSION_COLLECTING)
+        current_plan = plan_data.get("plan") if isinstance(plan_data.get("plan"), dict) else None
+        run_payload = (
+            plan_data.get("run_payload") if isinstance(plan_data.get("run_payload"), dict) else None
+        )
+        ready = bool(plan_data.get("ready_to_execute") and current_plan and run_payload)
+        session.status = PLAN_SESSION_READY if ready else status
+        session.current_plan = _json_dumps(current_plan) if ready else None
+        session.current_run_payload = _json_dumps(run_payload) if ready else None
+
+    def _restore_session_title_from_messages(
+        self,
+        session: AgentPlanningSession,
+        messages: list[AgentPlanningMessage],
+    ) -> None:
+        if not messages:
+            session.title = "新计划"
+            return
+        for message in reversed(messages):
+            if message.role != "assistant":
+                continue
+            plan_data = parse_json_object_text(message.plan_json)
+            plan = plan_data.get("plan") if isinstance(plan_data, dict) else None
+            if isinstance(plan, dict) and plan.get("target"):
+                session.title = _clean_text(str(plan["target"]), limit=80) or "新计划"
+                return
+        for message in messages:
+            if message.role == "user" and message.content.strip():
+                session.title = _clean_text(redact_sensitive_text(message.content), limit=80) or "新计划"
+                return
+        session.title = "新计划"
+
+    async def _append_assistant_turn(
+        self,
+        db: AsyncSession,
+        *,
+        session: AgentPlanningSession,
+        refresh_title: bool = False,
+    ) -> None:
         messages = await self.list_messages(db, session_id=session.id)
         result = await self._generate_turn(db, session=session, messages=messages)
         assistant_message = AgentPlanningMessage(
@@ -622,6 +980,7 @@ class AgentPlanningService:
                 {
                     "status": result.status,
                     "questions": result.questions,
+                    "question_options": result.question_options,
                     "ready_to_execute": result.ready_to_execute,
                     "plan": result.plan,
                     "run_payload": result.run_payload,
@@ -636,12 +995,9 @@ class AgentPlanningService:
         )
         if result.ready_to_execute and result.plan:
             session.rejection_reason = None
-        if session.title in {"New plan", "新计划"}:
+        if refresh_title or session.title in {"New plan", "新计划"}:
             session.title = self._title_from_messages(messages, result)
         session.updated_at = datetime.utcnow()
-        await db.commit()
-        await db.refresh(session)
-        return session, await self.list_messages(db, session_id=session.id)
 
     async def reject_plan(
         self,
@@ -685,6 +1041,7 @@ class AgentPlanningService:
         except Exception as exc:
             logger.info("Planner LLM unavailable, using local fallback: %s", exc)
 
+        using_local_fallback = raw_llm_output is None
         llm_output = raw_llm_output or PlannerLLMOutput(
             response="请先提供测试目标，我才能准备可执行计划。",
             status=PLAN_SESSION_COLLECTING,
@@ -700,9 +1057,13 @@ class AgentPlanningService:
         if ready:
             plan = _build_basic_plan(payload, llm_output.plan)
             run_payload = payload.model_dump(mode="json", exclude_none=True)
-            response = llm_output.response or llm_output.message
+            response = None if using_local_fallback else (llm_output.response or llm_output.message)
             if not response:
-                response = "信息已足够，我已准备好这次运行计划。"
+                response = (
+                    "信息已足够，我已准备好这次运行计划。"
+                    "计划会沿用现有运行预检，并默认按已确认的安全边界执行。"
+                    "如果目标、范围、鉴权或成功标准需要调整，可以直接修改上一条需求后重新生成。"
+                )
             return PlannerTurnResult(
                 message=redact_sensitive_text(response),
                 status=PLAN_SESSION_READY,
@@ -716,13 +1077,17 @@ class AgentPlanningService:
             questions = llm_output.questions or [
                 "TestClaw 应测试哪个目标？请粘贴 URL 或 OpenAPI/Swagger 来源。"
             ]
+        question_options = _planner_question_options(llm_output, payload, questions)
         message = llm_output.response or llm_output.message or "还需要补充一点信息。"
         if not llm_output.questions and questions:
-            message = questions[0]
+            message = "还需要补充这些信息：\n" + "\n".join(
+                f"- {question}" for question in questions[:5]
+            )
         return PlannerTurnResult(
             message=redact_sensitive_text(message),
             status=PLAN_SESSION_COLLECTING,
             questions=[redact_sensitive_text(question) for question in questions[:5]],
+            question_options=question_options,
             ready_to_execute=False,
         )
 
@@ -743,10 +1108,17 @@ class AgentPlanningService:
         ]
         prompt = (
             "You are the TestClaw Plan Mode planner. Return strict JSON only. "
-            "Do not include Markdown or hidden reasoning. Ask concise clarifying questions until "
-            "source/target and execution intent are sufficient. When ready, emit a plan card and a "
-            "run_payload for the existing TestClaw run API.\n\n"
-            "Required JSON fields: response, status, questions, ready_to_execute, plan, run_payload.\n"
+            "Do not include Markdown or hidden reasoning. Ask useful clarifying questions until "
+            "the target, testing scope, auth/login boundary, safety boundary, and success criteria "
+            "are clear enough for a tester to approve. When ready, emit a plan card and a "
+            "run_payload for the existing TestClaw run API. Visible process should be summarized "
+            "as observable actions only, never hidden chain-of-thought.\n\n"
+            "Required JSON fields: response, status, questions, question_options, "
+            "ready_to_execute, plan, run_payload.\n"
+            "When asking questions, include generic selectable question_options as an array of "
+            "objects with question and options. Each option has label and message. Option messages "
+            "must be reusable testing choices such as target type, scope, auth/login boundary, "
+            "safety boundary, or success criteria. Do not make product-specific option branches.\n"
             "Allowed run_payload fields: source, test_type, objective, base_url, auth_mode, "
             "captcha_mode, auth_credentials, auth_config, token, headers, api_execution_policy, "
             "allow_out_of_schema_api_cases, setup_instructions.\n"
@@ -778,6 +1150,21 @@ class AgentPlanningService:
 
 
 agent_planning_service = AgentPlanningService()
+
+
+def _latest_question_options(messages: list[AgentPlanningMessage] | None) -> list[dict[str, Any]]:
+    if not messages:
+        return []
+    for message in reversed(messages):
+        if message.role != "assistant":
+            continue
+        plan_data = parse_json_object_text(message.plan_json)
+        question_options = (
+            plan_data.get("question_options") if isinstance(plan_data, dict) else None
+        )
+        if isinstance(question_options, list):
+            return redact_sensitive_data(question_options)
+    return []
 
 
 def redacted_plan_session_payload(
@@ -816,4 +1203,5 @@ def redacted_plan_session_payload(
             }
             for message in messages
         ]
+        payload["question_options"] = _latest_question_options(messages)
     return payload
