@@ -35,11 +35,19 @@ type TrendBucket = {
 }
 
 type StatusCounts = {
+  total?: number
+  pending?: number
+  queued?: number
+  running?: number
   completed?: number
   succeeded?: number
   failed?: number
   bug_found?: number
+  cancelled?: number
+  active?: number
   pass_rate?: number
+  issue_rate?: number
+  bug_rate?: number
 }
 
 type QualityTrend = {
@@ -122,6 +130,14 @@ type ReusableAsset = {
   tone: string
 }
 
+type BreakdownItem = {
+  label: string
+  value: number
+  percent: number
+  barClass: string
+  textClass: string
+}
+
 type TrendChartModule = typeof import('../lib/qualityTrendChart')
 
 const trendSegments = [
@@ -168,7 +184,7 @@ const reusableCaseCount = computed(() => (
   + numericValue(evidenceSummary.value.runs_with_scripts)
 ))
 const reusableAssetCount = computed(() => reusableAssets.value.reduce((sum, asset) => sum + asset.count, 0))
-const reuseRate = computed(() => evidenceSummary.value.reproduction_rate || evidenceSummary.value.evidence_rate || 0)
+const reuseRate = computed(() => clampPercent(evidenceSummary.value.reproduction_rate || evidenceSummary.value.evidence_rate || 0))
 const hasAnyMemory = computed(() => Boolean(
   insights.value
   && (
@@ -178,6 +194,90 @@ const hasAnyMemory = computed(() => Boolean(
     || reusableAssetCount.value
   ),
 ))
+const statusTotal = computed(() => (
+  numericValue(statusCounts.value.total)
+  || numericValue(insights.value?.analyzed_runs)
+  || numericValue(insights.value?.window_run_count)
+  || (
+    numericValue(statusCounts.value.succeeded)
+    + numericValue(statusCounts.value.failed)
+    + numericValue(statusCounts.value.bug_found)
+    + numericValue(statusCounts.value.cancelled)
+    + numericValue(statusCounts.value.active)
+    + numericValue(statusCounts.value.running)
+  )
+))
+const statusBreakdownItems = computed<BreakdownItem[]>(() => {
+  const total = statusTotal.value
+  return [
+    {
+      label: '通过',
+      value: numericValue(statusCounts.value.succeeded),
+      barClass: 'bg-emerald-500',
+      textClass: 'text-emerald-700',
+    },
+    {
+      label: '缺陷',
+      value: numericValue(statusCounts.value.bug_found),
+      barClass: 'bg-rose-500',
+      textClass: 'text-rose-700',
+    },
+    {
+      label: '失败',
+      value: numericValue(statusCounts.value.failed),
+      barClass: 'bg-amber-500',
+      textClass: 'text-amber-700',
+    },
+    {
+      label: '取消',
+      value: numericValue(statusCounts.value.cancelled),
+      barClass: 'bg-gray-400',
+      textClass: 'text-gray-600',
+    },
+    {
+      label: '进行中',
+      value: numericValue(statusCounts.value.active) + numericValue(statusCounts.value.running),
+      barClass: 'bg-blue-500',
+      textClass: 'text-blue-700',
+    },
+  ].filter((item) => item.value > 0 || total === 0).map((item) => ({
+    ...item,
+    percent: total ? Number(((item.value / total) * 100).toFixed(1)) : 0,
+  }))
+})
+const evidenceCoverageItems = computed<BreakdownItem[]>(() => {
+  const total = numericValue(insights.value?.analyzed_runs) || statusTotal.value
+  return [
+    {
+      label: '运行证据',
+      value: numericValue(evidenceSummary.value.runs_with_evidence),
+      barClass: 'bg-blue-500',
+      textClass: 'text-blue-700',
+    },
+    {
+      label: '工具调用',
+      value: numericValue(evidenceSummary.value.runs_with_tool_calls),
+      barClass: 'bg-violet-500',
+      textClass: 'text-violet-700',
+    },
+    {
+      label: '复现步骤',
+      value: numericValue(evidenceSummary.value.runs_with_reproduction),
+      barClass: 'bg-emerald-500',
+      textClass: 'text-emerald-700',
+    },
+    {
+      label: '截图证据',
+      value: numericValue(evidenceSummary.value.runs_with_screenshots),
+      barClass: 'bg-indigo-500',
+      textClass: 'text-indigo-700',
+    },
+  ].map((item) => ({
+    ...item,
+    percent: total ? clampPercent((item.value / total) * 100) : 0,
+  }))
+})
+const topRiskThemes = computed<RecurringTheme[]>(() => highFrequencyThemes.value.slice(0, 3))
 
 const memoryStatCards = computed<StatCard[]>(() => [
   {
@@ -258,6 +358,10 @@ function numericValue(value: unknown) {
   return Number.isFinite(numeric) ? numeric : 0
 }
 
+function clampPercent(value: unknown) {
+  return Math.max(0, Math.min(100, numericValue(value)))
+}
+
 function formatNumber(value: unknown) {
   const numeric = numericValue(value)
   return Number.isInteger(numeric) ? String(numeric) : numeric.toFixed(1)
@@ -265,6 +369,10 @@ function formatNumber(value: unknown) {
 
 function countValue(value: unknown) {
   return numericValue(value)
+}
+
+function barWidth(percent: unknown) {
+  return `${clampPercent(percent)}%`
 }
 
 function limitText(value: string, maxLength = 900) {
@@ -701,7 +809,7 @@ watch(trendBuckets, () => {
       </div>
 
       <template v-else>
-        <div class="grid grid-cols-1 gap-4 xl:grid-cols-3">
+        <div class="grid grid-cols-1 items-start gap-4 xl:grid-cols-3">
           <section class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm xl:col-span-2">
             <div class="mb-5 flex flex-wrap items-start justify-between gap-3">
               <div>
@@ -761,23 +869,93 @@ watch(trendBuckets, () => {
             </p>
           </section>
 
-          <section class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
-            <div class="mb-4 flex items-center justify-between">
-              <div>
-                <h3 class="font-semibold text-gray-900">质量趋势</h3>
-                <p class="mt-1 text-xs text-gray-500">{{ trend.rationale || '暂无足够样本判断趋势。' }}</p>
+          <aside class="space-y-4">
+            <section class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+              <div class="mb-4 flex items-center justify-between gap-3">
+                <div>
+                  <h3 class="font-semibold text-gray-900">质量趋势</h3>
+                  <p class="mt-1 text-xs text-gray-500">{{ trend.rationale || '暂无足够样本判断趋势。' }}</p>
+                </div>
+                <div class="inline-flex shrink-0 items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-bold" :class="trendToneClass(trend.direction)">
+                  <TrendingUp :size="14" />
+                  <span>{{ trend.label || '样本不足' }}</span>
+                </div>
               </div>
-              <div class="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-bold" :class="trendToneClass(trend.direction)">
-                <TrendingUp :size="14" />
-                <span>{{ trend.label || '样本不足' }}</span>
-              </div>
-            </div>
 
-            <div v-if="trendBuckets.length" class="h-64 min-h-56 w-full">
-              <div ref="trendChartEl" class="h-full w-full"></div>
-            </div>
-            <div v-else class="flex h-36 items-center justify-center text-sm text-gray-400">暂无趋势数据</div>
-          </section>
+              <div v-if="trendBuckets.length" class="h-64 min-h-56 w-full">
+                <div ref="trendChartEl" class="h-full w-full"></div>
+              </div>
+              <div v-else class="flex h-36 items-center justify-center text-sm text-gray-400">暂无趋势数据</div>
+            </section>
+
+            <section class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+              <div class="mb-4 flex items-center justify-between gap-3">
+                <div>
+                  <h3 class="font-semibold text-gray-900">运行结果分布</h3>
+                  <p class="mt-1 text-xs text-gray-500">最近 {{ insights?.window_days || 30 }} 天已分析 {{ statusTotal }} 次运行。</p>
+                </div>
+                <span class="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs font-semibold text-gray-600">
+                  通过率 {{ formatNumber(statusCounts.pass_rate) }}%
+                </span>
+              </div>
+              <div class="space-y-3">
+                <div v-for="item in statusBreakdownItems" :key="item.label">
+                  <div class="mb-1 flex items-center justify-between text-xs">
+                    <span class="font-semibold text-gray-700">{{ item.label }}</span>
+                    <span class="font-bold" :class="item.textClass">{{ item.value }} / {{ formatNumber(item.percent) }}%</span>
+                  </div>
+                  <div class="h-2 overflow-hidden rounded-full bg-gray-100">
+                    <div class="h-full rounded-full" :class="item.barClass" :style="{ width: barWidth(item.percent) }"></div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+              <div class="mb-4 flex items-center justify-between gap-3">
+                <div>
+                  <h3 class="font-semibold text-gray-900">证据复用覆盖</h3>
+                  <p class="mt-1 text-xs text-gray-500">检查历史运行是否沉淀了下一次可复用证据。</p>
+                </div>
+                <span class="rounded-full border border-emerald-100 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
+                  {{ formatNumber(reuseRate) }}%
+                </span>
+              </div>
+              <div class="space-y-3">
+                <div v-for="item in evidenceCoverageItems" :key="item.label">
+                  <div class="mb-1 flex items-center justify-between text-xs">
+                    <span class="font-semibold text-gray-700">{{ item.label }}</span>
+                    <span class="font-bold" :class="item.textClass">{{ item.value }} / {{ formatNumber(item.percent) }}%</span>
+                  </div>
+                  <div class="h-2 overflow-hidden rounded-full bg-gray-100">
+                    <div class="h-full rounded-full" :class="item.barClass" :style="{ width: barWidth(item.percent) }"></div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+              <div class="mb-4 flex items-center justify-between gap-3">
+                <div>
+                  <h3 class="font-semibold text-gray-900">风险优先级</h3>
+                  <p class="mt-1 text-xs text-gray-500">按重复出现次数选择下次计划重点。</p>
+                </div>
+                <AlertTriangle :size="16" class="text-gray-400" />
+              </div>
+              <div v-if="topRiskThemes.length" class="space-y-3">
+                <div v-for="themeItem in topRiskThemes" :key="themeItem.theme" class="border-b border-gray-100 pb-3 last:border-b-0 last:pb-0">
+                  <div class="flex items-start justify-between gap-3">
+                    <p class="line-clamp-2 text-sm font-semibold text-gray-900">{{ themeItem.theme }}</p>
+                    <span class="shrink-0 rounded px-2 py-0.5 text-[10px] font-bold" :class="severityClass(themeItem.severity)">
+                      {{ themeItem.severity }}
+                    </span>
+                  </div>
+                  <p class="mt-1 text-xs text-gray-500">{{ themeItem.count }} 次出现 / {{ themeItem.category }}</p>
+                </div>
+              </div>
+              <p v-else class="py-6 text-center text-sm text-gray-400">暂无风险优先级</p>
+            </section>
+          </aside>
         </div>
 
         <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">

@@ -130,6 +130,30 @@ def test_chinese_message_extraction_for_api_no_auth_dynamic_and_safe_policies() 
     assert safe_payload.api_execution_policy == "safe_read_only"
 
 
+def test_api_plan_without_auth_boundary_keeps_collecting(monkeypatch) -> None:
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        response = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "Test API https://api.example.test/openapi.json with read-only checks."},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "collecting"
+    assert body["ready_to_execute"] is False
+    assert body["current_plan"] is None
+    assert any("是否需要鉴权" in message["content"] for message in body["messages"])
+
+
 def test_latest_user_source_overrides_stale_structured_payload_after_rejection() -> None:
     payload = normalize_planner_run_payload(
         {"source": "https://old.example.test/openapi.json", "test_type": "api"},
@@ -331,7 +355,7 @@ def test_intake_agent_plan_session_ready_api_target_returns_payload(
         ).json()
         response = client.post(
             f"/api/v1/agent-plans/sessions/{created['id']}/intake",
-            json={"message": "Test API https://api.example.test/openapi.json."},
+            json={"message": "Test API https://api.example.test/openapi.json. no auth."},
             headers=headers,
         )
 
@@ -381,7 +405,7 @@ def test_generate_agent_plan_session_after_ready_api_intake_returns_plan_payload
         ).json()
         ready = client.post(
             f"/api/v1/agent-plans/sessions/{created['id']}/intake",
-            json={"message": "Test API https://api.example.test/openapi.json."},
+            json={"message": "Test API https://api.example.test/openapi.json. no auth."},
             headers=headers,
         )
         response = client.post(
@@ -759,7 +783,7 @@ def test_planning_message_times_out_slow_llm_and_uses_fallback(monkeypatch) -> N
         created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
         response = client.post(
             f"/api/v1/agent-plans/{created['id']}/messages",
-            json={"content": "Test API https://api-timeout.example.test/openapi.json."},
+            json={"content": "Test API https://api-timeout.example.test/openapi.json. no auth."},
             headers=headers,
         )
 
@@ -927,7 +951,7 @@ def test_reject_then_regenerate_plan(monkeypatch) -> None:
 
         regenerated = client.post(
             f"/api/v1/agent-plans/{created['id']}/messages",
-            json={"content": "Use https://api.example.test/openapi.json for API read-only checks."},
+            json={"content": "Use https://api.example.test/openapi.json for API read-only checks. no auth."},
             headers=headers,
         )
 
@@ -979,7 +1003,7 @@ def test_create_run_after_ready_api_intake_marks_executed_and_returns_link(
         ).json()
         ready = client.post(
             f"/api/v1/agent-plans/sessions/{created['id']}/intake",
-            json={"message": "Test API https://api.example.test/openapi.json."},
+            json={"message": "Test API https://api.example.test/openapi.json. no auth."},
             headers=headers,
         )
         response = client.post(
@@ -1045,7 +1069,7 @@ def test_execute_after_create_run_reuses_existing_run(monkeypatch) -> None:
         ).json()
         ready = client.post(
             f"/api/v1/agent-plans/sessions/{created['id']}/intake",
-            json={"message": "Test API https://api.example.test/openapi.json."},
+            json={"message": "Test API https://api.example.test/openapi.json. no auth."},
             headers=headers,
         )
         created_run = client.post(
@@ -1135,7 +1159,7 @@ def test_execute_current_plan_uses_run_creation_path(monkeypatch) -> None:
         created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
         ready = client.post(
             f"/api/v1/agent-plans/{created['id']}/messages",
-            json={"content": "Test API https://api.example.test/openapi.json."},
+            json={"content": "Test API https://api.example.test/openapi.json. no auth."},
             headers=headers,
         )
         assert ready.status_code == 200
@@ -1270,7 +1294,7 @@ def test_edit_prior_user_message_rolls_back_and_regenerates(monkeypatch) -> None
 
         edited = client.put(
             f"/api/v1/agent-plans/{created['id']}/messages/{first_user_id}",
-            json={"content": "Test API https://new.example.test/openapi.json with read-only checks."},
+            json={"content": "Test API https://new.example.test/openapi.json with read-only checks. no auth."},
             headers=headers,
         )
 

@@ -99,6 +99,8 @@ def test_agent_plan_uses_streaming_and_live_message_controls() -> None:
     assert "editingRollbackSnapshot" in source
     assert "applyEditRollback" in source
     assert "sourceMessages.slice(0, index + 1)" in source
+    assert "执行未启动" in source
+    assert "toast.error(message)" in source
 
 
 def test_agent_plan_consumes_quality_memory_handoff_once() -> None:

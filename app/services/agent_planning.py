@@ -539,6 +539,11 @@ def _missing_questions(payload: PlannerRunPayload) -> list[str]:
         )
         or (payload.auth_config and payload.auth_config.enabled)
     )
+    if payload.test_type == "api" and payload.auth_mode == "auto" and not has_auth_material:
+        return [
+            "这个 API 目标是否需要鉴权？如需鉴权请提供测试 Token/Header 或登录凭据；如果可公开访问，请明确说明无需鉴权。",
+            "这次 API 运行的成功标准是什么？例如必须覆盖的接口、状态码或发布阻断条件。",
+        ]
     if payload.test_type == "ui" and payload.auth_mode == "auto" and not has_auth_material:
         return [
             "这个页面是否需要登录？如需登录请提供测试账号；如果是公开页面，请明确说明无需登录。",

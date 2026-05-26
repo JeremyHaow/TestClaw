@@ -140,14 +140,14 @@ function draftStatusClass(status: string) {
           </div>
         </div>
 
-        <div v-if="executeError" class="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-xs leading-5 text-red-700">
-          <AlertTriangle :size="15" class="mt-0.5 shrink-0" />
-          <span>{{ executeError }}</span>
-        </div>
       </div>
     </div>
 
     <div v-if="currentPlan && showActions" class="border-t border-gray-100 p-3">
+      <div v-if="executeError" class="mb-3 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-xs leading-5 text-red-700">
+        <AlertTriangle :size="15" class="mt-0.5 shrink-0" />
+        <span>{{ executeError }}</span>
+      </div>
       <div class="grid grid-cols-2 gap-2">
         <button
           type="button"

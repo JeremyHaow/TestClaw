@@ -25,6 +25,9 @@ def test_quality_memory_page_phase_6_2_labels_are_visible() -> None:
         "平均复用率",
         "查看记忆",
         "用于新计划",
+        "运行结果分布",
+        "证据复用覆盖",
+        "风险优先级",
         "已知阻塞点",
         "推荐下次策略",
     ]:
@@ -44,6 +47,9 @@ def test_quality_memory_page_preserves_insights_contract() -> None:
         "recommended_next_actions",
         "quality_trend",
         "renderTrendChart",
+        "statusBreakdownItems",
+        "evidenceCoverageItems",
+        "topRiskThemes",
     ]:
         assert hook in source
 

@@ -872,7 +872,10 @@ async function executePlan() {
     }
     executeError.value = '运行创建未返回任务编号。'
   } catch (error: any) {
-    executeError.value = errorMessage(error, '运行预检阻止了执行，请根据提示补充信息。')
+    const message = errorMessage(error, '运行预检阻止了执行，请根据提示补充信息。')
+    executeError.value = message
+    toast.error(message)
+    await nextTick()
   } finally {
     executing.value = false
   }
@@ -1065,6 +1068,17 @@ onBeforeUnmount(() => {
 
       <div class="min-h-0 flex-1 overflow-y-auto bg-[#f8faf9] px-4 py-4">
         <div class="space-y-4">
+          <div
+            v-if="executeError"
+            class="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm leading-6 text-red-700"
+          >
+            <AlertTriangle :size="16" class="mt-0.5 shrink-0" />
+            <div>
+              <div class="font-semibold text-red-800">执行未启动</div>
+              <div>{{ executeError }}</div>
+            </div>
+          </div>
+
           <AgentQuestionCard
             :current-step="currentStep"
             :question-group="currentIntakeGroup"
