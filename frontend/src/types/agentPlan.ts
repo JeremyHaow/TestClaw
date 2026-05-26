@@ -42,8 +42,10 @@ export type PlanningSession = {
   title: string
   status: string
   ready_to_execute: boolean
+  current_step?: string | null
   current_plan?: Record<string, any> | null
   current_run_payload?: Record<string, any> | null
+  structured_intake?: Partial<Record<IntakeStepId, StructuredIntakeStepState>>
   rejection_reason?: string | null
   executed_run_id?: string | null
   created_at?: string | null
@@ -64,6 +66,17 @@ export type IntakeStepId =
   | 'auth_boundary'
   | 'safety_boundary'
   | 'success_criteria'
+
+export type StructuredIntakeStepState = {
+  step?: IntakeStepId | string | null
+  status?: string | null
+  action?: string | null
+  label?: string | null
+  value?: string | null
+  message?: string | null
+  supplement?: string | null
+  summary?: string | null
+}
 
 export type IntakeStep = {
   id: IntakeStepId

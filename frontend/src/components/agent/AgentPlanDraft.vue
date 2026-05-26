@@ -47,6 +47,7 @@ function draftStatusClass(status: string) {
   if (status === '已选择' || status === '已收集' || status === '已生成') {
     return 'border-emerald-200 bg-emerald-50 text-emerald-700'
   }
+  if (status === '草稿') return 'border-blue-200 bg-blue-50 text-blue-700'
   if (status === '待补充') return 'border-amber-200 bg-amber-50 text-amber-700'
   if (status === '已跳过') return 'border-blue-200 bg-blue-50 text-blue-700'
   return 'border-gray-200 bg-gray-50 text-gray-500'

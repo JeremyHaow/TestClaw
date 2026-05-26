@@ -130,6 +130,67 @@ def test_agent_plan_intake_has_deterministic_target_choice_controls() -> None:
     assert "@click=\"emit('continue')\"" in question_source
 
 
+def test_agent_plan_local_intake_draft_does_not_advance_stepper() -> None:
+    source = PAGE.read_text(encoding="utf-8")
+    first_open = re.search(r"function firstOpenStepId\(\)[\s\S]*?\n}", source)
+    current_step = re.search(
+        r"const currentStepId = computed<IntakeStepId>\(\(\) => \{[\s\S]*?\n\}\)",
+        source,
+    )
+    step_tone = re.search(r"function stepTone\(stepId: IntakeStepId\)[\s\S]*?\n}", source)
+
+    assert first_open is not None
+    assert current_step is not None
+    assert step_tone is not None
+    assert "serverCurrentStepId" in current_step.group(0)
+    assert "serverConfirmedStepForNavigation(step.id)" in first_open.group(0)
+    assert "draftItemForStep(step.id)" not in first_open.group(0)
+    assert "draftItemForStep(stepId)" not in step_tone.group(0)
+    assert "serverConfirmedStepForNavigation(stepId)" in step_tone.group(0)
+
+
+def test_agent_plan_draft_item_can_show_local_draft_without_server_completion() -> None:
+    source = PAGE.read_text(encoding="utf-8")
+    draft_item = re.search(r"function draftItemForStep\(stepId: IntakeStepId\)[\s\S]*?\n}", source)
+    local_draft = re.search(r"function localDraftItemForStep\(stepId: IntakeStepId\)[\s\S]*?function serverDraftItemForStep", source)
+    server_navigation = re.search(
+        r"function serverConfirmedStepForNavigation\(stepId: IntakeStepId\)[\s\S]*?\n}",
+        source,
+    )
+
+    assert draft_item is not None
+    assert local_draft is not None
+    assert server_navigation is not None
+    assert "localDraftItemForStep(stepId) || serverDraftItemForStep(stepId)" in draft_item.group(0)
+    assert "selectedIntakeChoices.value[stepId]" in local_draft.group(0)
+    assert "intakeSupplement.value[stepId]" in local_draft.group(0)
+    assert "status: '草稿'" in local_draft.group(0)
+    assert "serverDraftItemForStep(stepId)" in server_navigation.group(0)
+    assert "localDraftItemForStep" not in server_navigation.group(0)
+
+
+def test_agent_plan_structured_intake_success_clears_local_step_draft() -> None:
+    source = PAGE.read_text(encoding="utf-8")
+    submit = re.search(r"async function submitStructuredIntake[\s\S]*?\n}", source)
+    clear_draft = re.search(r"function clearLocalIntakeDraft\(stepId: IntakeStepId\)[\s\S]*?\n}", source)
+
+    assert submit is not None
+    assert clear_draft is not None
+    assert "const stepId = currentStepId.value" in submit.group(0)
+    assert "selectedIntakeChoices.value[stepId] || null" in submit.group(0)
+    assert "intakeSupplement.value[stepId]" in submit.group(0)
+    assert "current_step: stepId" in submit.group(0)
+    assert "setActiveSession(response.data.session)" in submit.group(0)
+    assert "clearLocalIntakeDraft(stepId)" in submit.group(0)
+    for state_name in [
+        "selectedIntakeChoices",
+        "intakeSupplement",
+        "deferredIntakeSteps",
+        "skippedIntakeSteps",
+    ]:
+        assert f"{state_name}.value = withoutIntakeStep({state_name}.value, stepId)" in clear_draft.group(0)
+
+
 def test_agent_plan_consumes_quality_memory_handoff_once() -> None:
     source = PAGE.read_text(encoding="utf-8")
 

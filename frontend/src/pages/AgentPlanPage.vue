@@ -76,6 +76,7 @@ const canModifyActiveSession = computed(() => Boolean(activeSession.value && act
 const scopeItems = computed(() => toStringList(currentPlan.value?.scope))
 const stepItems = computed(() => toStringList(currentPlan.value?.steps))
 const safetyItems = computed(() => toStringList(currentPlan.value?.safety))
+const serverCurrentStepId = computed(() => normalizeStepId(activeSession.value?.current_step))
 const latestQuestionGroups = computed(() => {
   const sessionGroups = activeSession.value?.question_options
   const groups = Array.isArray(sessionGroups) && sessionGroups.length
@@ -87,6 +88,7 @@ const latestQuestionGroups = computed(() => {
 })
 const currentIntakeGroup = computed(() => latestQuestionGroups.value[0] || null)
 const currentStepId = computed<IntakeStepId>(() => {
+  if (serverCurrentStepId.value) return serverCurrentStepId.value
   const groupStep = currentIntakeGroup.value ? stepIdForGroup(currentIntakeGroup.value) : null
   if (groupStep) return groupStep
   if (planReady.value) return 'success_criteria'
@@ -311,8 +313,7 @@ function stepIdForGroup(group: PlannerQuestionOption): IntakeStepId | null {
 
 function firstOpenStepId(): IntakeStepId {
   for (const step of intakeSteps) {
-    const item = draftItemForStep(step.id)
-    if (item.status === '待确认') return step.id
+    if (!serverConfirmedStepForNavigation(step.id)) return step.id
   }
   return 'success_criteria'
 }
@@ -339,10 +340,8 @@ function stepIndex(stepId: IntakeStepId) {
 
 function stepTone(stepId: IntakeStepId) {
   const index = stepIndex(stepId)
-  if (index < currentStepIndex.value) return 'done'
   if (stepId === currentStepId.value) return 'active'
-  const item = draftItemForStep(stepId)
-  if (item.status !== '待确认') return 'done'
+  if (index < currentStepIndex.value || serverConfirmedStepForNavigation(stepId)) return 'done'
   return 'pending'
 }
 
@@ -361,21 +360,42 @@ function stepTextClass(stepId: IntakeStepId) {
 }
 
 function draftItemForStep(stepId: IntakeStepId) {
+  return localDraftItemForStep(stepId) || serverDraftItemForStep(stepId) || pendingDraftItemForStep(stepId)
+}
+
+function localDraftItemForStep(stepId: IntakeStepId) {
   const step = intakeSteps.find((item) => item.id === stepId) || intakeSteps[0]
   const selected = selectedIntakeChoices.value[stepId]
   const supplement = (intakeSupplement.value[stepId] || '').trim()
   if (skippedIntakeSteps.value[stepId]) {
-    return { id: stepId, label: step.label, status: '已跳过', value: '按默认策略继续规划' }
+    return { id: stepId, label: step.label, status: '草稿', value: '准备跳过这个非必填项' }
   }
   if (deferredIntakeSteps.value[stepId]) {
-    return { id: stepId, label: step.label, status: '待补充', value: '已标记为稍后补充' }
+    return { id: stepId, label: step.label, status: '草稿', value: '准备标记为稍后补充' }
   }
   if (selected || supplement) {
     const value = [
       selected ? choiceTitle(selected) : '',
       supplement ? intakeDisplayText(supplement) : '',
     ].filter(Boolean).join('；')
-    return { id: stepId, label: step.label, status: '已选择', value }
+    return { id: stepId, label: step.label, status: '草稿', value }
+  }
+  return null
+}
+
+function serverDraftItemForStep(stepId: IntakeStepId) {
+  const step = intakeSteps.find((item) => item.id === stepId) || intakeSteps[0]
+  const structured = activeSession.value?.structured_intake?.[stepId]
+  const structuredStatus = String(structured?.status || '').toLowerCase()
+  const structuredValue = structured?.summary || structured?.supplement || structured?.message || structured?.label || structured?.value
+  if (structuredStatus === 'skipped') {
+    return { id: stepId, label: step.label, status: '已跳过', value: structuredValue || '按默认策略继续规划' }
+  }
+  if (structuredStatus === 'deferred') {
+    return { id: stepId, label: step.label, status: '待补充', value: structuredValue || '已标记为稍后补充' }
+  }
+  if (structuredStatus === 'confirmed' && structuredValue) {
+    return { id: stepId, label: step.label, status: '已收集', value: structuredValue }
   }
   if (stepId === 'target_kind' && (currentPlan.value?.target || currentPayload.value?.source)) {
     return { id: stepId, label: step.label, status: '已收集', value: currentPlan.value?.target || currentPayload.value?.source }
@@ -392,7 +412,30 @@ function draftItemForStep(stepId: IntakeStepId) {
   if (stepId === 'success_criteria' && currentPlan.value?.summary) {
     return { id: stepId, label: step.label, status: '已生成', value: currentPlan.value.summary }
   }
+  return null
+}
+
+function pendingDraftItemForStep(stepId: IntakeStepId) {
+  const step = intakeSteps.find((item) => item.id === stepId) || intakeSteps[0]
   return { id: stepId, label: step.label, status: '待确认', value: '等待确认' }
+}
+
+function serverConfirmedStepForNavigation(stepId: IntakeStepId) {
+  const serverItem = serverDraftItemForStep(stepId)
+  return Boolean(serverItem && serverItem.status !== '待确认')
+}
+
+function withoutIntakeStep<T>(value: Partial<Record<IntakeStepId, T>>, stepId: IntakeStepId) {
+  const next = { ...value }
+  delete next[stepId]
+  return next
+}
+
+function clearLocalIntakeDraft(stepId: IntakeStepId) {
+  selectedIntakeChoices.value = withoutIntakeStep(selectedIntakeChoices.value, stepId)
+  intakeSupplement.value = withoutIntakeStep(intakeSupplement.value, stepId)
+  deferredIntakeSteps.value = withoutIntakeStep(deferredIntakeSteps.value, stepId)
+  skippedIntakeSteps.value = withoutIntakeStep(skippedIntakeSteps.value, stepId)
 }
 
 function buildIntakeContent(action: 'continue' | 'defer' | 'skip') {
@@ -830,7 +873,10 @@ async function submitPlannerContent(content: string, restoreDraftContent = '') {
 
 async function submitStructuredIntake(action: 'continue' | 'defer' | 'skip') {
   if (!activeSession.value || sending.value || intakeControlsDisabled.value) return false
-  if (action === 'continue' && !canContinueIntake.value) return false
+  const stepId = currentStepId.value
+  const selectedOption = selectedIntakeChoices.value[stepId] || null
+  const message = (intakeSupplement.value[stepId] || '').trim()
+  if (action === 'continue' && !selectedOption && !message) return false
   const sessionId = activeSession.value.id
   sending.value = true
   executeError.value = ''
@@ -838,13 +884,14 @@ async function submitStructuredIntake(action: 'continue' | 'defer' | 'skip') {
   try {
     const response = await api.post(`/agent-plans/sessions/${sessionId}/intake`, {
       action,
-      current_step: currentStepId.value,
-      selected_option: currentSelectedChoice.value,
-      message: currentSupplementText.value.trim() || null,
+      current_step: stepId,
+      selected_option: selectedOption,
+      message: message || null,
     })
     if (response.data?.session) {
       setActiveSession(response.data.session)
     }
+    clearLocalIntakeDraft(stepId)
     await scrollChat()
     return true
   } catch (error: any) {
