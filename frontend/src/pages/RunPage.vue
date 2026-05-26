@@ -319,9 +319,9 @@ const showLoginPayloadSettings = computed(() => ['login_body', 'login_headers'].
 const showAuthPrompt = computed(() => Boolean(preflight.value?.auth_error) && authMissingInputs.value.length > 0)
 const readiness = computed(() => preflight.value?.readiness || (sourceReady.value ? 'needs_review' : 'blocked'))
 const readinessLabel = computed(() => {
-  if (readiness.value === 'ready') return 'Ready'
-  if (readiness.value === 'blocked') return 'Blocked'
-  return 'Needs review'
+  if (readiness.value === 'ready') return '就绪'
+  if (readiness.value === 'blocked') return '阻塞'
+  return '需确认'
 })
 const sourceMissingMessage = computed(() => (isApiMode.value ? '请选择已保存接口文档' : '请输入目标页面 URL'))
 const hasBlockingPreflight = computed(() => preflight.value?.readiness === 'blocked')
@@ -887,8 +887,8 @@ onMounted(() => {
             <Bot :size="22" />
           </div>
           <div class="min-w-0">
-            <div class="tc-page-kicker">Mission Control</div>
-            <h2 class="mt-1 text-xl font-semibold tracking-tight text-gray-950">Testing Agent Workspace</h2>
+            <div class="tc-page-kicker">任务控制台</div>
+            <h2 class="mt-1 text-xl font-semibold tracking-tight text-gray-950">测试智能体工作台</h2>
             <p class="mt-1 max-w-3xl text-sm leading-6 text-gray-500">
               像分配测试任务一样描述目标、上下文和安全边界。TestClaw 会先预检，再自动规划 API/UI 路径、执行并沉淀证据。
             </p>
@@ -1425,7 +1425,7 @@ onMounted(() => {
           <div class="mb-4 flex items-center justify-between gap-3">
             <div class="flex items-center gap-2">
               <Bot :size="16" class="text-gray-500" />
-              <h3 class="text-sm font-bold text-gray-900">目标记忆 / Agent Memory</h3>
+              <h3 class="text-sm font-bold text-gray-900">目标记忆</h3>
             </div>
             <span
               v-if="targetMemory"

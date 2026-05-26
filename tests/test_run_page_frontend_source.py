@@ -35,6 +35,8 @@ def test_run_page_labels_remain_visible_after_extraction() -> None:
     source = _run_sources()
 
     for label in [
+        "任务控制台",
+        "测试智能体工作台",
         "任务委派",
         "测试模式",
         "API 执行策略",
@@ -44,10 +46,15 @@ def test_run_page_labels_remain_visible_after_extraction() -> None:
         "预检状态",
         "智能体执行流",
         "任务交接预览",
+        "就绪",
+        "阻塞",
+        "需确认",
     ]:
         assert label in source
 
-    assert "目标记忆" in source or "Agent Memory" in source
+    assert "目标记忆" in source
+    assert "Testing Agent Workspace" not in source
+    assert "Agent Memory" not in source
 
 
 def test_run_page_api_hooks_and_behaviors_remain_in_page() -> None:

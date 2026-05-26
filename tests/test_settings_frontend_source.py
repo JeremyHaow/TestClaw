@@ -17,12 +17,13 @@ def test_phase_6_9_providers_page_renders_model_role_and_strategy_cards() -> Non
     for hook in [
         'data-testid="provider-role-card"',
         'data-testid="agent-strategy-card"',
-        "Planner Model",
-        "Executor(Coder) Model",
-        "Vision Model",
+        "规划模型",
+        "执行模型",
+        "视觉模型",
         "用于生成测试计划和用例",
         "用于生成可执行脚本、断言和修复建议",
         "用于读取截图、页面状态和视觉证据",
+        "策略模式",
         "保守模式",
         "平衡模式",
         "探索模式",
@@ -45,6 +46,8 @@ def test_phase_6_9_providers_page_renders_model_role_and_strategy_cards() -> Non
 
     assert "不伪造未持久化的全局开关" in source
     assert "api_key_masked" in source
+    for old_copy in ["Planner Model", "Executor(Coder) Model", "Vision Model", "Strategy Modes", "Active"]:
+        assert old_copy not in source
 
 
 def test_phase_6_10_knowledge_page_renders_rag_cards_with_required_metadata() -> None:

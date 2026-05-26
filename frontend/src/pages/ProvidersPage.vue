@@ -89,25 +89,25 @@ const roleDefinitions: Array<{
 }> = [
   {
     role: 'planner',
-    title: 'Planner Model',
+    title: '规划模型',
     description: '用于生成测试计划和用例',
-    emptyHint: '未配置 Planner 默认模型',
+    emptyHint: '未配置默认规划模型',
     icon: BrainCircuit,
     accentClass: 'bg-emerald-50 text-emerald-700',
   },
   {
     role: 'coder',
-    title: 'Executor(Coder) Model',
+    title: '执行模型',
     description: '用于生成可执行脚本、断言和修复建议',
-    emptyHint: '未配置 Executor(Coder) 默认模型',
+    emptyHint: '未配置默认执行模型',
     icon: Code2,
     accentClass: 'bg-blue-50 text-blue-700',
   },
   {
     role: 'vision',
-    title: 'Vision Model',
+    title: '视觉模型',
     description: '用于读取截图、页面状态和视觉证据',
-    emptyHint: '未配置 Vision 默认模型',
+    emptyHint: '未配置默认视觉模型',
     icon: Eye,
     accentClass: 'bg-indigo-50 text-indigo-700',
   },
@@ -321,7 +321,7 @@ async function saveModel() {
 async function setDefault(id: string, role: string) {
   try {
     await api.put(`/providers/${id}/set-default`, null, { params: { role } })
-    toast.success(`已设置为默认 ${role} 模型`)
+    toast.success(`已设置为默认${roleDisplayLabel(role as ProviderRole)}模型`)
     await fetchItems()
   } catch (err: any) {
     toast.error(err?.response?.data?.detail || '设置默认模型失败')
@@ -384,17 +384,29 @@ async function testProvider(id: string) {
   }
 }
 
-function roleLabels(item: ProviderModel) {
-  const roles = []
-  if (item.is_default_planner) roles.push('Planner')
-  if (item.is_default_coder) roles.push('Coder')
-  if (item.is_default_vision) roles.push('Vision')
+function roleLabels(item: ProviderModel): ProviderRole[] {
+  const roles: ProviderRole[] = []
+  if (item.is_default_planner) roles.push('planner')
+  if (item.is_default_coder) roles.push('coder')
+  if (item.is_default_vision) roles.push('vision')
   return roles
+}
+
+function roleDisplayLabel(role: ProviderRole) {
+  if (role === 'planner') return '规划'
+  if (role === 'coder') return '执行'
+  return '视觉'
+}
+
+function roleToneClass(role: ProviderRole) {
+  if (role === 'planner') return 'border-emerald-100 bg-emerald-50 text-emerald-700'
+  if (role === 'coder') return 'border-blue-100 bg-blue-50 text-blue-700'
+  return 'border-indigo-100 bg-indigo-50 text-indigo-700'
 }
 
 function modelStatusLabel(model: ProviderModel | null) {
   if (!model) return '未配置'
-  return model.is_active ? 'Active' : 'Inactive'
+  return model.is_active ? '可用' : '停用'
 }
 
 onMounted(fetchItems)
@@ -404,17 +416,17 @@ onMounted(fetchItems)
   <div class="mx-auto max-w-7xl space-y-5 pb-10">
     <div class="flex flex-wrap items-start justify-between gap-3 border-b border-gray-200/80 pb-5">
       <div class="flex flex-col gap-1">
-        <div class="tc-page-kicker">Models</div>
+        <div class="tc-page-kicker">模型</div>
         <h2 class="text-xl font-semibold tracking-tight text-gray-950">模型与 Agent</h2>
         <p class="max-w-3xl text-sm text-gray-500">
-          先配置 AI Provider，再在 Provider 下维护具体模型。Planner/Coder/Vision 默认角色只设置在模型行上。
+          先配置模型服务商（Provider），再在服务商下维护具体模型。规划、执行和视觉默认角色只设置在模型行上。
         </p>
       </div>
       <button
         @click="openNewProvider"
         class="inline-flex items-center justify-center gap-2 rounded-lg bg-gray-950 px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-gray-800"
       >
-        <Plus :size="16" /> 新增 Provider
+        <Plus :size="16" /> 新增服务商
       </button>
     </div>
 
@@ -505,7 +517,7 @@ onMounted(fetchItems)
             </p>
           </div>
           <span class="rounded-full border border-gray-200 bg-white px-3 py-1 text-[10px] font-bold uppercase text-gray-500">
-            Strategy Modes
+            策略模式
           </span>
         </div>
         <div class="grid gap-3 lg:grid-cols-3">
@@ -540,14 +552,14 @@ onMounted(fetchItems)
       </section>
 
       <div v-if="!providerGroups.length" class="rounded-lg border border-gray-200 bg-white">
-        <EmptyState :icon="Bot" title="还没有 AI Provider" description="新增 Provider 并添加第一个模型后，Agent 运行预检才能选择可用模型。" />
+        <EmptyState :icon="Bot" title="还没有模型服务商" description="新增服务商并添加第一个模型后，Agent 运行预检才能选择可用模型。" />
       </div>
 
       <div v-else class="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
       <aside class="space-y-3 lg:sticky lg:top-4 lg:max-h-[calc(100vh-9rem)] lg:overflow-y-auto">
         <div class="rounded-lg border border-gray-200 bg-white p-3 shadow-sm">
           <div class="mb-3 flex items-center justify-between">
-            <h3 class="text-xs font-bold uppercase tracking-widest text-gray-400">Provider</h3>
+            <h3 class="text-xs font-bold uppercase tracking-widest text-gray-400">服务商</h3>
             <span class="text-xs font-mono text-gray-400">{{ providerGroups.length }}</span>
           </div>
           <div class="max-h-[calc(100vh-15rem)] space-y-2 overflow-y-auto pr-1">
@@ -563,12 +575,12 @@ onMounted(fetchItems)
                   <div class="truncate text-sm font-bold text-gray-900">{{ group.name }}</div>
                   <div class="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] font-bold uppercase text-gray-500">
                     <span class="rounded border border-gray-200 bg-white px-1.5 py-0.5">{{ group.type }}</span>
-                    <span class="rounded border border-gray-200 bg-white px-1.5 py-0.5">{{ group.models.length }} models</span>
+                    <span class="rounded border border-gray-200 bg-white px-1.5 py-0.5">{{ group.models.length }} 个模型</span>
                   </div>
                 </div>
                 <Server :size="16" class="shrink-0 text-gray-400" />
               </div>
-              <div class="mt-2 truncate text-[11px] font-mono text-gray-400">{{ group.base_url || 'default endpoint' }}</div>
+              <div class="mt-2 truncate text-[11px] font-mono text-gray-400">{{ group.base_url || '默认端点' }}</div>
               <div v-if="group.api_key_masked" class="mt-1 flex items-center gap-1 text-[11px] font-mono text-gray-400">
                 <KeyRound :size="12" /> {{ group.api_key_masked }}
               </div>
@@ -588,7 +600,7 @@ onMounted(fetchItems)
             </div>
             <div class="mt-1 truncate text-xs font-mono text-gray-400">{{ selectedProvider.base_url || '使用 SDK 默认 Base URL' }}</div>
             <p class="mt-2 text-xs text-gray-500">
-              角色默认值在具体模型上生效。新增同 Provider 模型时需要重新输入 API Key；后端不会返回明文密钥。
+              角色默认值在具体模型上生效。新增同服务商模型时需要重新输入 API Key；后端不会返回明文密钥。
             </p>
           </div>
           <button
@@ -626,22 +638,18 @@ onMounted(fetchItems)
                       v-for="role in roleLabels(model)"
                       :key="role"
                       class="rounded border px-2 py-0.5 text-[10px] font-bold"
-                      :class="{
-                        'border-emerald-100 bg-emerald-50 text-emerald-700': role === 'Planner',
-                        'border-blue-100 bg-blue-50 text-blue-700': role === 'Coder',
-                        'border-indigo-100 bg-indigo-50 text-indigo-700': role === 'Vision',
-                      }"
+                      :class="roleToneClass(role)"
                     >
-                      {{ role }}
+                      {{ roleDisplayLabel(role) }}
                     </span>
                   </div>
                   <span v-else class="text-xs text-gray-400">未设为默认</span>
                 </td>
                 <td class="px-5 py-4">
                   <div class="flex flex-wrap items-center justify-end gap-1.5">
-                    <button @click="setDefault(model.id, 'planner')" class="rounded border border-gray-200 bg-white px-2 py-1 text-[10px] font-bold text-gray-500 transition-all hover:bg-emerald-50 hover:text-emerald-700">Planner</button>
-                    <button @click="setDefault(model.id, 'coder')" class="rounded border border-gray-200 bg-white px-2 py-1 text-[10px] font-bold text-gray-500 transition-all hover:bg-blue-50 hover:text-blue-700">Coder</button>
-                    <button @click="setDefault(model.id, 'vision')" class="rounded border border-gray-200 bg-white px-2 py-1 text-[10px] font-bold text-gray-500 transition-all hover:bg-indigo-50 hover:text-indigo-700">Vision</button>
+                    <button @click="setDefault(model.id, 'planner')" class="rounded border border-gray-200 bg-white px-2 py-1 text-[10px] font-bold text-gray-500 transition-all hover:bg-emerald-50 hover:text-emerald-700">设为规划</button>
+                    <button @click="setDefault(model.id, 'coder')" class="rounded border border-gray-200 bg-white px-2 py-1 text-[10px] font-bold text-gray-500 transition-all hover:bg-blue-50 hover:text-blue-700">设为执行</button>
+                    <button @click="setDefault(model.id, 'vision')" class="rounded border border-gray-200 bg-white px-2 py-1 text-[10px] font-bold text-gray-500 transition-all hover:bg-indigo-50 hover:text-indigo-700">设为视觉</button>
                     <button @click="testProvider(model.id)" :disabled="testingId === model.id" class="rounded-lg p-1.5 text-gray-400 transition-all hover:bg-amber-50 hover:text-amber-600 disabled:opacity-50" title="测试连接">
                       <Zap :size="14" />
                     </button>
@@ -665,15 +673,15 @@ onMounted(fetchItems)
       <div class="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-xl">
         <div class="flex items-center justify-between border-b border-gray-100 px-6 py-4">
           <div>
-            <h3 class="text-sm font-bold text-gray-900">{{ modelFormMode === 'edit' ? '编辑模型' : '配置 Provider 与模型' }}</h3>
+            <h3 class="text-sm font-bold text-gray-900">{{ modelFormMode === 'edit' ? '编辑模型' : '配置服务商与模型' }}</h3>
             <p class="mt-1 text-xs text-gray-500">
-              {{ modelFormMode === 'edit' ? '留空 API Key 会保留当前密钥。' : '当前后端以一行模型配置保存 Provider 信息，因此新增时需要同时填写第一个模型。' }}
+              {{ modelFormMode === 'edit' ? '留空 API Key 会保留当前密钥。' : '当前后端以一行模型配置保存服务商信息，因此新增时需要同时填写第一个模型。' }}
             </p>
           </div>
           <button
             type="button"
-            aria-label="关闭 Provider 配置"
-            title="关闭 Provider 配置"
+            aria-label="关闭服务商配置"
+            title="关闭服务商配置"
             @click="closeModelForm"
             class="rounded-lg p-2 text-gray-400 transition-all hover:bg-gray-100 hover:text-gray-700"
           >
@@ -684,7 +692,7 @@ onMounted(fetchItems)
         <form class="space-y-5 px-6 py-5" @submit.prevent="saveModel">
           <section class="grid gap-4 md:grid-cols-2">
             <div>
-              <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">Provider 名称</label>
+              <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">服务商名称</label>
               <input v-model="modelForm.name" required placeholder="OpenAI / 内部网关"
                 class="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:bg-white" />
             </div>
@@ -734,37 +742,37 @@ onMounted(fetchItems)
                   class="w-full rounded-lg border border-gray-200 bg-white px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500" />
               </div>
               <div>
-                <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">Agent Type</label>
+                <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">Agent 类型</label>
                 <input v-model="modelForm.agent_type" placeholder="可选，例如 planner / coder"
                   class="w-full rounded-lg border border-gray-200 bg-white px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500" />
               </div>
               <div>
-                <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">Max Tokens</label>
+                <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">最大 Token 数</label>
                 <input v-model.number="modelForm.max_tokens" type="number" min="1"
                   class="w-full rounded-lg border border-gray-200 bg-white px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500" />
               </div>
               <div>
-                <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">Temperature</label>
+                <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">温度</label>
                 <input v-model.number="modelForm.temperature" type="number" min="0" max="2" step="0.1"
                   class="w-full rounded-lg border border-gray-200 bg-white px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500" />
               </div>
             </div>
 
             <div>
-              <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">System Prompt</label>
+              <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-400">系统提示词</label>
               <textarea v-model="modelForm.system_prompt" rows="3" placeholder="可选，覆盖该模型的系统提示词"
                 class="w-full resize-none rounded-lg border border-gray-200 bg-white px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500" />
             </div>
 
             <div class="grid gap-2 sm:grid-cols-3">
               <label class="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-bold text-gray-600">
-                <input v-model="modelForm.is_default_planner" type="checkbox" /> Planner 默认
+                <input v-model="modelForm.is_default_planner" type="checkbox" /> 规划默认
               </label>
               <label class="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-bold text-gray-600">
-                <input v-model="modelForm.is_default_coder" type="checkbox" /> Coder 默认
+                <input v-model="modelForm.is_default_coder" type="checkbox" /> 执行默认
               </label>
               <label class="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-bold text-gray-600">
-                <input v-model="modelForm.is_default_vision" type="checkbox" /> Vision 默认
+                <input v-model="modelForm.is_default_vision" type="checkbox" /> 视觉默认
               </label>
             </div>
           </section>
