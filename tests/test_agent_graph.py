@@ -14,7 +14,10 @@ def test_graph_routes_source_loader_through_rag_before_planning() -> None:
     assert ("source_loader", "mission_planner") in edges
     assert ("mission_planner", "knowledge_retriever") in edges
     assert ("knowledge_retriever", "planner") in edges
+    assert ("planner", "agent_supervisor") in edges
+    assert ("agent_supervisor", "tc_generator") in edges
     assert ("source_loader", "planner") not in edges
+    assert ("planner", "tc_generator") not in edges
     assert ("api_runner", "execution_evaluator") in edges
     assert ("ui_runner", "execution_evaluator") in edges
     assert ("ui_runner", "reporter") not in edges

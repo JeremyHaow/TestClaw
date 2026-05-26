@@ -5,13 +5,14 @@ from datetime import datetime
 from typing import Any
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from app.api.v1 import agent_plans
 from app.config import settings
 from app.core.security import hash_password
 from app.database import AsyncSessionLocal
 from app.main import app
-from app.models.agent_planning import AgentPlanningMessage
+from app.models.agent_planning import AgentPlan, AgentPlanningMessage
 from app.models.task import Task, TaskStatus, TestType as TaskTestType
 from app.models.user import User
 from app.services.agent_planning import (
@@ -44,6 +45,14 @@ async def _create_test_user(username: str, password: str) -> None:
             )
         )
         await session.commit()
+
+
+async def _count_structured_agent_plans(session_id: str) -> int:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(AgentPlan).where(AgentPlan.session_id == session_id)
+        )
+        return len(list(result.scalars()))
 
 
 def _message(content: str) -> AgentPlanningMessage:
@@ -367,6 +376,173 @@ def test_intake_agent_plan_session_ready_api_target_returns_payload(
         == "https://api.example.test/openapi.json"
     )
     assert body["next_question"] is None
+
+
+def test_structured_intake_continue_updates_state_without_chat_message() -> None:
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={},
+            headers=headers,
+        ).json()
+        response = client.post(
+            f"/api/v1/agent-plans/sessions/{created['id']}/intake",
+            json={
+                "action": "continue",
+                "current_step": "target_kind",
+                "selected_option": {
+                    "label": "API / 接口",
+                    "value": "api_openapi",
+                    "field": "target_kind",
+                    "step": "target_kind",
+                    "message": "测试目标类型：API / OpenAPI/Swagger 接口来源。",
+                },
+                "message": "https://api.example.test/openapi.json no auth",
+            },
+            headers=headers,
+        )
+        detail = client.get(
+            f"/api/v1/agent-plans/sessions/{created['id']}",
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session"]["status"] == "ready"
+    assert body["session"]["current_run_payload"]["source"] == "https://api.example.test/openapi.json"
+    assert body["session"]["current_run_payload"]["auth_mode"] == "none_confirmed"
+    assert body["session"]["messages"] == []
+    assert body["next_question"] is None
+    assert detail.status_code == 200
+    assert detail.json()["messages"] == []
+
+
+def test_structured_intake_target_choice_advances_to_next_missing_step() -> None:
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={},
+            headers=headers,
+        ).json()
+        response = client.post(
+            f"/api/v1/agent-plans/sessions/{created['id']}/intake",
+            json={
+                "action": "continue",
+                "current_step": "target_kind",
+                "selected_option": {
+                    "label": "Web UI / 网页",
+                    "value": "web_page",
+                    "field": "target_kind",
+                    "step": "target_kind",
+                    "message": "测试目标类型：浏览器 Web UI 页面。",
+                },
+            },
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session"]["status"] == "collecting"
+    assert body["session"]["messages"] == []
+    assert body["next_question"]["step"] == "scope"
+    assert body["missing_info"][0]["key"] == "scope"
+
+
+def test_structured_intake_rejects_required_step_skip() -> None:
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={},
+            headers=headers,
+        ).json()
+        response = client.post(
+            f"/api/v1/agent-plans/sessions/{created['id']}/intake",
+            json={"action": "skip", "current_step": "target_kind"},
+            headers=headers,
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "current_step cannot be skipped"
+
+
+def test_structured_intake_revisits_missing_target_after_other_steps() -> None:
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={},
+            headers=headers,
+        ).json()
+        session_id = created["id"]
+        client.post(
+            f"/api/v1/agent-plans/sessions/{session_id}/intake",
+            json={
+                "action": "continue",
+                "current_step": "target_kind",
+                "selected_option": {
+                    "label": "API / 接口",
+                    "value": "api_openapi",
+                    "field": "target_kind",
+                    "step": "target_kind",
+                    "message": "测试目标类型：API / OpenAPI/Swagger 接口来源。",
+                },
+            },
+            headers=headers,
+        )
+        client.post(
+            f"/api/v1/agent-plans/sessions/{session_id}/intake",
+            json={"action": "skip", "current_step": "coverage_scope"},
+            headers=headers,
+        )
+        client.post(
+            f"/api/v1/agent-plans/sessions/{session_id}/intake",
+            json={
+                "action": "continue",
+                "current_step": "auth_boundary",
+                "selected_option": {
+                    "label": "无需登录",
+                    "value": "no_auth",
+                    "field": "auth_boundary",
+                    "step": "auth_boundary",
+                    "message": "登录方式/凭证：目标公开访问，无需登录或鉴权。",
+                },
+            },
+            headers=headers,
+        )
+        client.post(
+            f"/api/v1/agent-plans/sessions/{session_id}/intake",
+            json={
+                "action": "continue",
+                "current_step": "safety_boundary",
+                "selected_option": {
+                    "label": "只读边界",
+                    "value": "safe_read_only",
+                    "field": "safety_boundary",
+                    "step": "safety_boundary",
+                    "message": "安全边界：只做只读检查，不创建、修改或删除数据。",
+                },
+            },
+            headers=headers,
+        )
+        response = client.post(
+            f"/api/v1/agent-plans/sessions/{session_id}/intake",
+            json={"action": "skip", "current_step": "success_criteria"},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session"]["status"] == "collecting"
+    assert body["session"]["current_step"] == "target"
+    assert body["next_question"]["step"] == "target"
+    assert body["missing_info"][0]["key"] == "target"
 
 
 def test_generate_agent_plan_session_before_ready_returns_400() -> None:
@@ -1228,6 +1404,40 @@ def test_delete_planning_session_removes_conversation(monkeypatch) -> None:
     assert deleted.status_code == 204
     assert fetched.status_code == 404
     assert all(item["id"] != created["id"] for item in listed.json())
+
+
+def test_delete_planning_session_removes_structured_plan_state() -> None:
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={},
+            headers=headers,
+        ).json()
+        response = client.post(
+            f"/api/v1/agent-plans/sessions/{created['id']}/intake",
+            json={
+                "action": "continue",
+                "current_step": "target_kind",
+                "selected_option": {
+                    "label": "API / 接口",
+                    "value": "api_openapi",
+                    "field": "target_kind",
+                    "step": "target_kind",
+                    "message": "测试目标类型：API / OpenAPI/Swagger 接口来源。",
+                },
+            },
+            headers=headers,
+        )
+        plan_count_before = asyncio.run(_count_structured_agent_plans(created["id"]))
+        deleted = client.delete(f"/api/v1/agent-plans/{created['id']}", headers=headers)
+        plan_count_after = asyncio.run(_count_structured_agent_plans(created["id"]))
+
+    assert response.status_code == 200
+    assert plan_count_before == 1
+    assert deleted.status_code == 204
+    assert plan_count_after == 0
 
 
 def test_delete_planning_message_rolls_back_following_messages(monkeypatch) -> None:

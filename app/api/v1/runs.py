@@ -65,6 +65,7 @@ class AuthAcquireConfig(BaseModel):
     username: str | None = None
     password: str | None = None
     captcha: str | None = None
+    csrf: str | None = None
     tenant: str | None = None
     login_url: str | None = None
     captcha_url: str | None = None
@@ -81,6 +82,7 @@ class AuthCredentials(BaseModel):
     username: str | None = None
     password: str | None = None
     captcha: str | None = None
+    csrf: str | None = None
 
 
 class RunCreate(BaseModel):

@@ -809,6 +809,285 @@ def test_run_preflight_auto_auth_extracts_cased_nested_authorization(monkeypatch
     assert "nested-cased-token" not in json.dumps(body)
 
 
+def test_run_preflight_auto_auth_infers_login_path_and_plain_token(monkeypatch) -> None:
+    calls = []
+    openapi = _auth_required_openapi()
+    openapi["paths"]["/login"] = openapi["paths"].pop("/auth/login")
+
+    class FakeResponse:
+        status_code = 200
+        headers = {}
+
+        def json(self) -> dict:
+            return {"token": "plain-login-token"}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setattr(api_auth.httpx, "AsyncClient", FakeAsyncClient)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": json.dumps(openapi),
+                "test_type": "api",
+                "auth_credentials": {"username": "admin", "password": "secret"},
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert calls[0]["url"] == "https://api.example.test/login"
+    assert calls[0]["json"] == {"username": "admin", "password": "secret"}
+    assert calls[1]["headers"] == {"Authorization": "Bearer plain-login-token"}
+    body = response.json()
+    assert body["auth_resolved"] is True
+    assert "plain-login-token" not in json.dumps(body)
+
+
+def test_run_preflight_auto_auth_extracts_nested_access_token_from_auth_token_path(
+    monkeypatch,
+) -> None:
+    calls = []
+    openapi = _auth_required_openapi()
+    openapi["paths"]["/auth/token"] = openapi["paths"].pop("/auth/login")
+    openapi["paths"]["/auth/token"]["post"]["operationId"] = "createAccessToken"
+
+    class FakeResponse:
+        status_code = 200
+        headers = {}
+
+        def json(self) -> dict:
+            return {"data": {"accessToken": "nested-access-token"}}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setattr(api_auth.httpx, "AsyncClient", FakeAsyncClient)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": json.dumps(openapi),
+                "test_type": "api",
+                "auth_credentials": {"username": "admin", "password": "secret"},
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert calls[0]["url"] == "https://api.example.test/auth/token"
+    assert calls[1]["headers"] == {"Authorization": "Bearer nested-access-token"}
+    assert response.json()["auth_resolved"] is True
+    assert "nested-access-token" not in json.dumps(response.json())
+
+
+def test_run_preflight_auto_auth_uses_set_cookie_from_session_endpoint(
+    monkeypatch,
+) -> None:
+    calls = []
+    openapi = _auth_required_openapi()
+    openapi["paths"]["/session"] = openapi["paths"].pop("/auth/login")
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"set-cookie": "sid=session-cookie-secret; Path=/; HttpOnly"}
+
+        def json(self) -> dict:
+            return {"ok": True}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setattr(api_auth.httpx, "AsyncClient", FakeAsyncClient)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": json.dumps(openapi),
+                "test_type": "api",
+                "auth_credentials": {"username": "admin", "password": "secret"},
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert calls[0]["url"] == "https://api.example.test/session"
+    assert calls[1]["headers"] == {"Cookie": "sid=session-cookie-secret; Path=/; HttpOnly"}
+    body = response.json()
+    assert body["auth_header_name"] == "Cookie"
+    assert body["auth_resolved"] is True
+    assert "session-cookie-secret" not in json.dumps(body)
+
+
+def test_run_preflight_auto_auth_with_no_protected_get_asks_smallest_validation_input(
+    monkeypatch,
+) -> None:
+    class FakeResponse:
+        status_code = 200
+        headers = {}
+
+        def json(self) -> dict:
+            return {"access_token": "login-token-no-validation"}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(api_auth.httpx, "AsyncClient", FakeAsyncClient)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": json.dumps(_protected_write_only_openapi()),
+                "test_type": "api",
+                "auth_credentials": {"username": "admin", "password": "secret"},
+                "auth_config": {"enabled": True, "login_url": "/login"},
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["readiness"] == "blocked"
+    assert body["auth_preflight"]["missing_fields"] == ["protected_read_only_endpoint"]
+    assert "受保护 GET/HEAD/OPTIONS" in body["auth_preflight"]["next_action"]
+    assert "login-token-no-validation" not in json.dumps(body)
+
+
+def test_run_preflight_auto_auth_reports_missing_csrf_field() -> None:
+    openapi = _auth_required_openapi()
+    schema = openapi["paths"]["/auth/login"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
+    schema["required"] = ["username", "password", "csrfToken"]
+    schema["properties"]["csrfToken"] = {"type": "string"}
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": json.dumps(openapi),
+                "test_type": "api",
+                "auth_credentials": {"username": "admin", "password": "secret"},
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["readiness"] == "blocked"
+    assert body["auth_missing_inputs"] == ["csrf"]
+    assert body["auth_required_fields"] == ["csrfToken"]
+    assert "csrfToken" in body["auth_error"]
+
+
+def test_run_preflight_credentials_override_stale_manual_token(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        headers = {}
+
+        def json(self) -> dict:
+            return {"access_token": "fresh-auto-token"}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setattr(api_auth.httpx, "AsyncClient", FakeAsyncClient)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": json.dumps(_auth_required_openapi()),
+                "test_type": "api",
+                "auth_mode": "manual",
+                "token": "stale-manual-token",
+                "headers": {"X-Trace": "trace-id"},
+                "auth_credentials": {"username": "admin", "password": "secret"},
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert calls[0]["url"] == "https://api.example.test/auth/login"
+    assert calls[1]["headers"] == {
+        "X-Trace": "trace-id",
+        "Authorization": "Bearer fresh-auto-token",
+    }
+    body = response.json()
+    assert body["auth_preflight"]["strategy"] == "auto_login"
+    assert body["auth_preflight"]["auth_mode"] == "auto"
+    serialized = json.dumps(body, ensure_ascii=False)
+    assert "stale-manual-token" not in serialized
+    assert "fresh-auto-token" not in serialized
+
+
 def test_run_preflight_auto_auth_infers_login_url_body_and_token(monkeypatch) -> None:
     calls = []
     openapi = _auth_required_openapi()

@@ -8,6 +8,7 @@ from langchain_openai import OpenAIEmbeddings
 from app.agent.json_utils import parse_llm_json
 from app.agent.nodes import (
     api_runner,
+    agent_supervisor,
     execution_evaluator,
     knowledge_retriever,
     mission_planner,
@@ -167,6 +168,210 @@ def test_tool_registry_exposes_evidence_evaluation_tool() -> None:
 
     assert "planner.evaluate_execution_evidence" in tool_names
     assert "planner.evaluate_execution_evidence" in planning["tools"]
+
+
+def test_tool_registry_exposes_actionable_skill_and_tool_contracts() -> None:
+    registry = build_tool_registry()
+    tools = {tool["name"]: tool for tool in registry["tools"]}
+    skills = {skill["name"]: skill for skill in registry["skills"]}
+
+    required_skills = {
+        "api-auth-discovery",
+        "human-intervention",
+        "intake-planning",
+        "browser-ui-exploration",
+        "quality-memory-reuse",
+        "evidence-evaluation",
+    }
+    required_tools = {
+        "auth.discover_candidates",
+        "auth.try_login",
+        "auth.extract_token_or_cookie",
+        "auth.validate_readonly",
+        "human.ask",
+        "intake.update_step",
+        "intake.generate_plan",
+        "ui.open",
+        "ui.snapshot",
+        "ui.click",
+        "ui.fill",
+        "ui.screenshot",
+        "ui.assert_visible",
+        "memory.retrieve",
+        "evidence.evaluate",
+    }
+
+    assert required_skills <= set(skills)
+    assert required_tools <= set(tools)
+    for skill_name in required_skills:
+        skill = skills[skill_name]
+        assert skill["required_inputs"]
+        assert skill["expected_observations"]
+        assert skill["failure_recovery"]
+        assert skill["safety_constraints"]
+        assert set(skill["tools"]) <= set(tools)
+
+    for tool_name in required_tools:
+        tool = tools[tool_name]
+        assert tool["schema_contract"] == "strict_json_schema"
+        assert tool["timeout_ms"] > 0
+        assert tool["retry_policy"]["max_attempts"] >= 1
+        assert tool["redaction_policy"]
+        for schema_key in ("input_schema", "output_schema"):
+            schema = tool[schema_key]
+            assert schema["type"] == "object"
+            assert schema["additionalProperties"] is False
+            assert isinstance(schema["properties"], dict)
+            assert sorted(schema["properties"]) == sorted(schema["required"])
+
+    assert tools["auth.try_login"]["permission_required"] == "credentials_present"
+    assert "password" in tools["auth.try_login"]["redaction_policy"]
+    assert tools["ui.fill"]["permission_required"] == "safe_ui_action"
+
+
+def test_tool_registry_selects_new_supervisor_skills_from_state() -> None:
+    api_skills = {
+        skill["name"]
+        for skill in select_skills_for_state(
+            {
+                "test_type": "api",
+                "input_type": "swagger_json",
+                "auth_credentials": {"username": "tester", "password": "secret"},
+                "parsed_api_schema": [
+                    {"method": "GET", "path": "/me", "auth_required": True}
+                ],
+                "rag_retrieval": {"status": "matched", "sources": [{"id": "k1"}]},
+                "auth_preflight": {
+                    "status": "blocked",
+                    "missing_fields": ["captcha"],
+                },
+            }
+        )
+    }
+    ui_skills = {
+        skill["name"]
+        for skill in select_skills_for_state(
+            {
+                "test_type": "ui",
+                "input_type": "url",
+                "ui_seed_url": "https://web.example.test",
+            }
+        )
+    }
+    memory_skills = {
+        skill["name"]
+        for skill in select_skills_for_state(
+            {
+                "test_type": "api",
+                "input_type": "swagger_json",
+                "target_memory": {"previous_run_count": 2, "confidence": "medium"},
+            }
+        )
+    }
+
+    assert "api-auth-discovery" in api_skills
+    assert "quality-memory-reuse" in api_skills
+    assert "human-intervention" in api_skills
+    assert "evidence-evaluation" in api_skills
+    assert "browser-ui-exploration" in ui_skills
+    assert "quality-memory-reuse" in memory_skills
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_records_bounded_tool_observations_without_secret_leak() -> None:
+    schema = [
+        {
+            "method": "POST",
+            "path": "/login",
+            "summary": "Password login",
+            "request_body_schema": {
+                "type": "object",
+                "required": ["username", "password"],
+                "properties": {"username": {"type": "string"}, "password": {"type": "string"}},
+            },
+        },
+        {"method": "GET", "path": "/me", "auth_required": True},
+        {"method": "POST", "path": "/items"},
+    ]
+    initial_actions = validate_agent_action_plan(
+        [
+            {
+                "tool_name": "api.derive_schema_requests",
+                "inputs": {"scope": "all_documented_safe_methods"},
+                "expected_observation": "selected request count",
+                "reason": "Select documented read-only API requests.",
+            }
+        ],
+        parsed_api_schema=schema,
+        execution_policy="safe_read_only",
+    )
+
+    state = await agent_supervisor.run(
+        {
+            "test_type": "api",
+            "input_type": "swagger_json",
+            "objective": "验证登录后的资料读取",
+            "target_url": "https://api.example.test",
+            "api_execution_policy": "safe_read_only",
+            "parsed_api_schema": schema,
+            "auth_credentials": {"username": "tester", "password": "secret-password"},
+            "auth_config": {"enabled": True},
+            "auth_preflight": {
+                "status": "blocked",
+                "missing_fields": ["captcha"],
+                "next_action": "请补充验证码后继续。",
+            },
+            "rag_retrieval": {
+                "mode": "vector",
+                "status": "matched",
+                "sources": [{"id": "k1", "title": "历史阻塞"}],
+            },
+            "agent_actions": initial_actions,
+            "workflow_steps": [],
+        }
+    )
+
+    observations = state["agent_action_observations"]
+    observed_tools = {observation["tool_name"] for observation in observations}
+    tool_calls = {call["tool"] for call in state["tool_calls"]}
+
+    assert {
+        "api.derive_schema_requests",
+        "auth.discover_candidates",
+        "human.ask",
+        "memory.retrieve",
+    } <= observed_tools
+    assert "agent.supervisor_loop" in tool_calls
+    assert any(
+        observation["tool_name"] == "api.derive_schema_requests"
+        and observation["status"] == "success"
+        and observation["output"]["selected_total"] == 1
+        for observation in observations
+    )
+    assert any(
+        observation["tool_name"] == "auth.discover_candidates"
+        and observation["status"] == "success"
+        and observation["output"]["login_candidate_count"] == 1
+        and observation["output"]["validation_candidate_count"] == 1
+        for observation in observations
+    )
+    assert any(
+        observation["tool_name"] == "human.ask"
+        and observation["status"] == "blocked"
+        and observation["output"]["requested_fields"] == ["captcha"]
+        for observation in observations
+    )
+    assert state["auth_discovery"]["login_path"] == "/login"
+    assert state["api_request_selection"]["selected"] == [{"method": "GET", "path": "/me"}]
+    persisted_trace = json.dumps(
+        {
+            "observations": state["agent_action_observations"],
+            "tool_calls": state["tool_calls"],
+            "auth_discovery": state["auth_discovery"],
+        },
+        ensure_ascii=False,
+    )
+    assert "secret-password" not in persisted_trace
 
 
 def test_agent_action_runtime_validates_and_records_model_tool_action() -> None:

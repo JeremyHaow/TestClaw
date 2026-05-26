@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
+  AlertTriangle,
   Bot,
   CheckCircle2,
   ChevronRight,
@@ -94,6 +95,11 @@ const currentStepId = computed<IntakeStepId>(() => {
 const currentStep = computed<IntakeStep>(() => (
   intakeSteps.find((step) => step.id === currentStepId.value) || intakeSteps[0]!
 ))
+const deterministicTargetGroup = computed<PlannerQuestionOption | null>(() => {
+  if (currentStepId.value !== 'target_kind' || currentIntakeGroup.value) return null
+  return targetKindGroupForSource(currentSupplementText.value || draft.value)
+})
+const displayedIntakeGroup = computed(() => currentIntakeGroup.value || deterministicTargetGroup.value)
 const currentSupplementText = computed({
   get: () => intakeSupplement.value[currentStepId.value] || '',
   set: (value: string) => {
@@ -101,12 +107,12 @@ const currentSupplementText = computed({
   },
 })
 const currentSelectedChoice = computed(() => selectedIntakeChoices.value[currentStepId.value] || null)
-const currentGroupRequired = computed(() => currentIntakeGroup.value?.required !== false)
+const currentGroupRequired = computed(() => displayedIntakeGroup.value?.required !== false)
 const canSkipCurrentStep = computed(() => {
-  if (!currentIntakeGroup.value) return false
+  if (!displayedIntakeGroup.value) return false
   return (
     currentGroupRequired.value === false
-    || currentIntakeGroup.value.options.some((option) => option.allows_skip || option.optional)
+    || displayedIntakeGroup.value.options.some((option) => option.allows_skip || option.optional)
   )
 })
 const canContinueIntake = computed(() => Boolean(currentSelectedChoice.value || currentSupplementText.value.trim()))
@@ -224,6 +230,76 @@ function inferStepFromQuestion(question: string): IntakeStepId | null {
   return null
 }
 
+function plannerChoice(
+  label: string,
+  title: string,
+  description: string,
+  value: string,
+  message: string,
+): PlannerQuestionChoice {
+  return {
+    label,
+    title,
+    description,
+    field: 'target_kind',
+    value,
+    step: 'target_kind',
+    message,
+  }
+}
+
+function sourceSignal(value: string) {
+  const text = value.trim()
+  const lower = text.toLowerCase()
+  const hasOpenApiText = /^\s*[{[]/.test(text) && /"paths"\s*:|"openapi"\s*:|"swagger"\s*:/.test(text)
+  const hasOpenApiYaml = /^\s*(openapi|swagger)\s*:/.test(lower) || /\n\s*paths\s*:/.test(lower)
+  const hasApiMarker = /\b(openapi|swagger|api-docs|v3\/api-docs|接口文档|接口|endpoint)\b/i.test(text)
+  const hasUiMarker = /\b(web|ui|page|browser|网页|页面|浏览器|后台|管理台)\b/i.test(text)
+  const hasUrl = /^https?:\/\//i.test(text)
+  const api = hasOpenApiText || hasOpenApiYaml || hasApiMarker || /\/(swagger|openapi|api-docs)(\/|\.|$)/i.test(text)
+  const ui = (hasUrl && !api) || hasUiMarker
+  if (api && !hasUiMarker) return 'api'
+  if (ui && !api) return 'ui'
+  if (api && ui) return 'ambiguous'
+  return 'ambiguous'
+}
+
+function targetKindGroupForSource(value: string): PlannerQuestionOption {
+  const apiChoice = plannerChoice(
+    'API / 接口',
+    'API / OpenAPI',
+    '用于接口文档、接口契约、只读接口覆盖或指定接口回归。',
+    'api_openapi',
+    '测试目标类型：API / OpenAPI/Swagger 接口来源。',
+  )
+  const uiChoice = plannerChoice(
+    'Web UI / 网页',
+    'Web UI 页面',
+    '用于浏览器页面、登录后业务流程、表单和页面可用性检查。',
+    'web_page',
+    '测试目标类型：浏览器 Web UI 页面。',
+  )
+  const customChoice = plannerChoice(
+    '自定义',
+    '自定义目标',
+    '用补充说明描述具体目标，但仍限定在 API 或浏览器 Web UI 范围内。',
+    'custom',
+    '测试目标类型：自定义 API/Web UI 目标，由补充说明限定。',
+  )
+  const signal = sourceSignal(value)
+  const options = signal === 'api'
+    ? [apiChoice, customChoice]
+    : signal === 'ui'
+      ? [uiChoice, customChoice]
+      : [apiChoice, uiChoice, customChoice]
+  return {
+    question: signal === 'ambiguous' ? '这个目标应按 API 还是 Web UI 规划？' : '已识别目标类型，请确认。',
+    step: 'target_kind',
+    required: true,
+    options,
+  }
+}
+
 function stepIdForGroup(group: PlannerQuestionOption): IntakeStepId | null {
   return (
     normalizeStepId(group.step)
@@ -243,6 +319,10 @@ function firstOpenStepId(): IntakeStepId {
 
 function choiceTitle(option: PlannerQuestionChoice) {
   return option.title || option.label
+}
+
+function intakeDisplayText(value: unknown, limit = 240) {
+  return redactSensitiveText(value, limit)
 }
 
 function selectIntakeChoice(group: PlannerQuestionOption, option: PlannerQuestionChoice) {
@@ -291,7 +371,10 @@ function draftItemForStep(stepId: IntakeStepId) {
     return { id: stepId, label: step.label, status: '待补充', value: '已标记为稍后补充' }
   }
   if (selected || supplement) {
-    const value = [selected ? choiceTitle(selected) : '', supplement].filter(Boolean).join('；')
+    const value = [
+      selected ? choiceTitle(selected) : '',
+      supplement ? intakeDisplayText(supplement) : '',
+    ].filter(Boolean).join('；')
     return { id: stepId, label: step.label, status: '已选择', value }
   }
   if (stepId === 'target_kind' && (currentPlan.value?.target || currentPayload.value?.source)) {
@@ -565,6 +648,7 @@ async function handlePlannerStreamEvent(
     }
     if (data?.session) {
       setActiveSession(data.session)
+      resetIntakeState()
     }
     await scrollChat()
     return
@@ -744,6 +828,33 @@ async function submitPlannerContent(content: string, restoreDraftContent = '') {
   }
 }
 
+async function submitStructuredIntake(action: 'continue' | 'defer' | 'skip') {
+  if (!activeSession.value || sending.value || intakeControlsDisabled.value) return false
+  if (action === 'continue' && !canContinueIntake.value) return false
+  const sessionId = activeSession.value.id
+  sending.value = true
+  executeError.value = ''
+  processEvents.value = []
+  try {
+    const response = await api.post(`/agent-plans/sessions/${sessionId}/intake`, {
+      action,
+      current_step: currentStepId.value,
+      selected_option: currentSelectedChoice.value,
+      message: currentSupplementText.value.trim() || null,
+    })
+    if (response.data?.session) {
+      setActiveSession(response.data.session)
+    }
+    await scrollChat()
+    return true
+  } catch (error: any) {
+    toast.error(errorMessage(error, '继续规划失败'))
+    return false
+  } finally {
+    sending.value = false
+  }
+}
+
 async function sendMessage() {
   const content = draft.value.trim()
   if (!content || sending.value) return
@@ -756,9 +867,7 @@ async function sendMessage() {
 
 async function continueIntake() {
   if (!canContinueIntake.value || sending.value || intakeControlsDisabled.value) return
-  const content = buildIntakeContent('continue')
-  if (!content.trim()) return
-  await submitPlannerContent(content)
+  await submitStructuredIntake('continue')
 }
 
 async function deferCurrentStep() {
@@ -766,7 +875,7 @@ async function deferCurrentStep() {
   const stepId = currentStepId.value
   deferredIntakeSteps.value = { ...deferredIntakeSteps.value, [stepId]: true }
   skippedIntakeSteps.value = { ...skippedIntakeSteps.value, [stepId]: false }
-  const sent = await submitPlannerContent(buildIntakeContent('defer'))
+  const sent = await submitStructuredIntake('defer')
   if (!sent) {
     deferredIntakeSteps.value = { ...deferredIntakeSteps.value, [stepId]: false }
   }
@@ -777,7 +886,7 @@ async function skipCurrentStep() {
   const stepId = currentStepId.value
   skippedIntakeSteps.value = { ...skippedIntakeSteps.value, [stepId]: true }
   deferredIntakeSteps.value = { ...deferredIntakeSteps.value, [stepId]: false }
-  const sent = await submitPlannerContent(buildIntakeContent('skip'))
+  const sent = await submitStructuredIntake('skip')
   if (!sent) {
     skippedIntakeSteps.value = { ...skippedIntakeSteps.value, [stepId]: false }
   }
@@ -847,6 +956,7 @@ async function rejectPlan() {
     )
     processEvents.value = []
     setActiveSession(response.data)
+    resetIntakeState()
     draft.value = draft.value.trim()
     await scrollChat()
   } catch (error: any) {
@@ -924,6 +1034,7 @@ async function deleteMessage(message: PlanMessage) {
     }
     processEvents.value = []
     setActiveSession(response.data)
+    resetIntakeState()
     await scrollChat()
   } catch (error: any) {
     toast.error(errorMessage(error, '删除消息失败'))
@@ -1081,7 +1192,7 @@ onBeforeUnmount(() => {
 
           <AgentQuestionCard
             :current-step="currentStep"
-            :question-group="currentIntakeGroup"
+            :question-group="displayedIntakeGroup"
             :status="currentDraftStatus"
             :selected-choice="currentSelectedChoice"
             v-model:supplement="currentSupplementText"

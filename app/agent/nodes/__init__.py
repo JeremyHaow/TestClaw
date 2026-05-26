@@ -1,6 +1,7 @@
 from app.agent.nodes import (
     api_executor,
     api_runner,
+    agent_supervisor,
     execution_evaluator,
     input_classifier,
     knowledge_retriever,
@@ -18,6 +19,7 @@ from app.agent.nodes import (
 __all__ = [
     "api_executor",
     "api_runner",
+    "agent_supervisor",
     "execution_evaluator",
     "input_classifier",
     "knowledge_retriever",

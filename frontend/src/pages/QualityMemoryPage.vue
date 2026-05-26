@@ -724,8 +724,8 @@ watch(trendBuckets, () => {
 </script>
 
 <template>
-  <div class="mx-auto max-w-7xl space-y-5 pb-10">
-    <section class="rounded-2xl border border-blue-100 bg-white p-5 shadow-sm">
+  <div class="flex min-h-[calc(100vh-7.25rem)] flex-col gap-4 pb-4">
+    <section class="rounded-lg border border-blue-100 bg-white p-4 shadow-sm">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div class="max-w-3xl">
           <div class="tc-page-kicker">Quality Memory</div>
@@ -809,8 +809,8 @@ watch(trendBuckets, () => {
       </div>
 
       <template v-else>
-        <div class="grid grid-cols-1 items-start gap-4 xl:grid-cols-3">
-          <section class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm xl:col-span-2">
+        <div class="grid min-h-0 flex-1 grid-cols-1 items-stretch gap-4 xl:grid-cols-[minmax(0,1.7fr)_minmax(340px,0.9fr)]">
+          <section class="flex min-h-[420px] flex-col rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
             <div class="mb-5 flex flex-wrap items-start justify-between gap-3">
               <div>
                 <h3 class="font-semibold text-gray-900">目标记忆列表</h3>
@@ -821,7 +821,7 @@ watch(trendBuckets, () => {
               </span>
             </div>
 
-            <div v-if="targetMemories.length" class="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            <div v-if="targetMemories.length" class="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto pr-1 lg:grid-cols-2 xl:max-h-[calc(100vh-25rem)]">
               <article
                 v-for="memory in targetMemories"
                 :key="memory.target"
@@ -869,7 +869,7 @@ watch(trendBuckets, () => {
             </p>
           </section>
 
-          <aside class="space-y-4">
+          <aside class="grid min-h-0 grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-1 xl:overflow-y-auto xl:pr-1">
             <section class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
               <div class="mb-4 flex items-center justify-between gap-3">
                 <div>
@@ -882,7 +882,7 @@ watch(trendBuckets, () => {
                 </div>
               </div>
 
-              <div v-if="trendBuckets.length" class="h-64 min-h-56 w-full">
+              <div v-if="trendBuckets.length" class="h-72 min-h-56 w-full">
                 <div ref="trendChartEl" class="h-full w-full"></div>
               </div>
               <div v-else class="flex h-36 items-center justify-center text-sm text-gray-400">暂无趋势数据</div>
@@ -958,8 +958,8 @@ watch(trendBuckets, () => {
           </aside>
         </div>
 
-        <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
-          <section class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm lg:col-span-2">
+        <div class="grid grid-cols-1 items-stretch gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(300px,0.8fr)]">
+          <section class="flex min-h-[320px] flex-col rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
             <div class="mb-4 flex flex-wrap items-start justify-between gap-3">
               <div>
                 <h3 class="font-semibold text-gray-900">高频主题</h3>
@@ -970,7 +970,7 @@ watch(trendBuckets, () => {
               </span>
             </div>
 
-            <div v-if="highFrequencyThemes.length" class="space-y-3">
+            <div v-if="highFrequencyThemes.length" class="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
               <article
                 v-for="themeItem in highFrequencyThemes"
                 :key="themeItem.theme"
@@ -1000,7 +1000,7 @@ watch(trendBuckets, () => {
             </p>
           </section>
 
-          <section class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+          <section class="flex min-h-[320px] flex-col rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
             <div class="mb-4 flex items-center justify-between">
               <div>
                 <h3 class="font-semibold text-gray-900">已知阻塞点</h3>
@@ -1008,7 +1008,7 @@ watch(trendBuckets, () => {
               </div>
               <AlertTriangle :size="16" class="text-gray-400" />
             </div>
-            <div v-if="affectedSurfaces.length" class="space-y-3">
+            <div v-if="affectedSurfaces.length" class="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
               <div
                 v-for="surface in affectedSurfaces"
                 :key="`${surface.type}-${surface.name}`"

@@ -93,9 +93,9 @@ def _normalize_name(value: str) -> str:
 
 
 _LOGIN_METHODS = {"POST", "PUT", "PATCH"}
-_LOGIN_MARKERS = ("login", "signin", "token", "auth")
+_LOGIN_MARKERS = ("login", "signin", "token", "auth", "session", "csrf", "xsrf")
 _SIMPLE_LOGIN_PATHS = {"/login", "/auth/login", "/user/login", "/system/login"}
-_SIMPLE_LOGIN_SEGMENTS = {"login", "signin"}
+_SIMPLE_LOGIN_SEGMENTS = {"login", "signin", "session"}
 _SPECIALIZED_LOGIN_MARKERS = (
     "xcx",
     "sms",
@@ -234,6 +234,8 @@ def _login_field_kind(field_name: str) -> str | None:
         return "captcha"
     if normalized == "code":
         return "captcha"
+    if any(marker in normalized for marker in ("csrf", "csrftoken", "xsrf", "xsrftoken")):
+        return "csrf"
     return None
 
 
@@ -291,7 +293,7 @@ def _login_endpoint_score(
         score += 45
     if last_segment in _SIMPLE_LOGIN_SEGMENTS:
         score += 80
-    elif last_segment == "token":
+    elif last_segment in {"token", "session"}:
         score += 30
     if "login" in normalized_path:
         score += 35
@@ -300,6 +302,8 @@ def _login_endpoint_score(
     if "token" in normalized_path:
         score += 10
     if "auth" in normalized_path:
+        score += 8
+    if "session" in normalized_path:
         score += 8
 
     has_username = any(_login_field_kind(field) == "username" for field in field_names)
@@ -450,6 +454,9 @@ def find_token_value(payload: Any) -> str | None:
         "idToken",
         "authorization",
         "Authorization",
+        "session",
+        "sessionId",
+        "session_id",
         "authToken",
         "bearerToken",
         "data.access_token",
@@ -460,6 +467,9 @@ def find_token_value(payload: Any) -> str | None:
         "data.idToken",
         "data.authorization",
         "data.Authorization",
+        "data.session",
+        "data.sessionId",
+        "data.session_id",
         "data.authToken",
         "data.bearerToken",
         "result.access_token",
@@ -468,11 +478,17 @@ def find_token_value(payload: Any) -> str | None:
         "result.jwt",
         "result.authorization",
         "result.Authorization",
+        "result.session",
+        "result.sessionId",
+        "result.session_id",
         "body.access_token",
         "body.accessToken",
         "body.token",
         "body.authorization",
         "body.Authorization",
+        "body.session",
+        "body.sessionId",
+        "body.session_id",
     )
     for path in candidate_paths:
         value = extract_path_value(payload, path)
@@ -489,6 +505,8 @@ def find_token_value(payload: Any) -> str | None:
                 "jwt",
                 "idtoken",
                 "authorization",
+                "session",
+                "sessionid",
                 "authtoken",
                 "bearertoken",
             }:
@@ -505,6 +523,51 @@ def find_token_value(payload: Any) -> str | None:
     elif isinstance(payload, list):
         for item in payload:
             nested = find_token_value(item)
+            if nested:
+                return nested
+    return None
+
+
+def find_cookie_value(payload: Any) -> str | None:
+    candidate_paths = (
+        "cookie",
+        "Cookie",
+        "set_cookie",
+        "setCookie",
+        "session_cookie",
+        "sessionCookie",
+        "data.cookie",
+        "data.Cookie",
+        "data.set_cookie",
+        "data.setCookie",
+        "data.session_cookie",
+        "data.sessionCookie",
+        "result.cookie",
+        "result.Cookie",
+        "result.set_cookie",
+        "result.setCookie",
+        "body.cookie",
+        "body.Cookie",
+        "body.set_cookie",
+        "body.setCookie",
+    )
+    for path in candidate_paths:
+        value = extract_path_value(payload, path)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            normalized = _normalize_name(str(key))
+            if normalized in {"cookie", "setcookie", "sessioncookie"}:
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            nested = find_cookie_value(value)
+            if nested:
+                return nested
+    elif isinstance(payload, list):
+        for item in payload:
+            nested = find_cookie_value(item)
             if nested:
                 return nested
     return None
@@ -632,7 +695,7 @@ async def load_auth_endpoints(source: str, input_type: str) -> tuple[str, list[d
 
 def _simple_credentials(config: dict[str, Any]) -> dict[str, str]:
     credentials: dict[str, str] = {}
-    for name in ("username", "password", "captcha", "tenant"):
+    for name in ("username", "password", "captcha", "tenant", "csrf"):
         value = config.get(name)
         if isinstance(value, str) and value.strip():
             credentials[name] = value.strip()
@@ -676,6 +739,10 @@ def _credential_for_field(field_name: str, credentials: dict[str, str]) -> str |
         marker in normalized for marker in ("tenant", "tenantid", "tenantcode")
     ):
         return credentials["tenant"]
+    if credentials.get("csrf") and any(
+        marker in normalized for marker in ("csrf", "csrftoken", "xsrf", "xsrftoken")
+    ):
+        return credentials["csrf"]
     return None
 
 
@@ -708,6 +775,8 @@ def _input_key_for_field(field_name: str) -> str:
         )
     ):
         return "captcha"
+    if any(marker in normalized for marker in ("csrf", "csrftoken", "xsrf", "xsrftoken")):
+        return "csrf"
     return "login_body"
 
 
@@ -1149,10 +1218,19 @@ async def resolve_auto_auth_headers(
         token = find_token_value(response_payload)
 
     header_name = str(config_data.get("header_name") or "Authorization").strip() or "Authorization"
-    if not token and header_name.lower() == "cookie":
-        cookie_value = response.headers.get("set-cookie")
-        if cookie_value:
-            token = cookie_value
+    cookie_value = response.headers.get("set-cookie") or find_cookie_value(response_payload)
+    if not cookie_value:
+        try:
+            cookie_value = "; ".join(
+                f"{name}={value}" for name, value in response.cookies.items()
+            )
+        except Exception:
+            cookie_value = ""
+    if not token and header_name.lower() == "cookie" and cookie_value:
+        token = cookie_value
+    elif not token and cookie_value:
+        token = cookie_value
+        header_name = "Cookie"
 
     if not token:
         detail = "登录成功，但响应中没有找到 Token"

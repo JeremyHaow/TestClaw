@@ -18,7 +18,7 @@ from app.agent.nodes.source_loader import classify_input
 from app.config import settings
 from app.core.llm_gateway import llm_gateway
 from app.core.redaction import redact_sensitive_data, redact_sensitive_text
-from app.models.agent_planning import AgentPlanningMessage, AgentPlanningSession
+from app.models.agent_planning import AgentPlan, AgentPlanningMessage, AgentPlanningSession
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +103,7 @@ class PlannerAuthCredentials(BaseModel):
     username: str | None = None
     password: str | None = None
     captcha: str | None = None
+    csrf: str | None = None
 
 
 class PlannerAuthAcquireConfig(BaseModel):
@@ -112,6 +113,7 @@ class PlannerAuthAcquireConfig(BaseModel):
     username: str | None = None
     password: str | None = None
     captcha: str | None = None
+    csrf: str | None = None
     tenant: str | None = None
     login_url: str | None = None
     captcha_url: str | None = None
@@ -1241,6 +1243,11 @@ class AgentPlanningService:
         messages = await self.list_messages(db, session_id=session.id)
         for message in messages:
             await db.delete(message)
+        plan_result = await db.execute(
+            select(AgentPlan).where(AgentPlan.session_id == session.id)
+        )
+        for plan in plan_result.scalars():
+            await db.delete(plan)
         await db.delete(session)
         await db.commit()
 

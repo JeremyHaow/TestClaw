@@ -127,6 +127,7 @@ def parse_task_detail(task_orm) -> dict:
         "api_execution_policy": parsed.get("api_execution_policy"),
         "allow_out_of_schema_api_cases": parsed.get("allow_out_of_schema_api_cases"),
         "api_path_prefix_rewrite": parsed.get("api_path_prefix_rewrite"),
+        "auth_discovery": parsed.get("auth_discovery"),
         "rag_context": parsed.get("rag_context"),
         "rag_retrieval": parsed.get("rag_retrieval"),
         "cancelled": parsed.get("cancelled", False),

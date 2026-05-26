@@ -130,6 +130,7 @@ const snapshotKeys = [
   'api_execution_policy',
   'allow_out_of_schema_api_cases',
   'api_path_prefix_rewrite',
+  'auth_discovery',
 ]
 
 function parseExecutionLog(value: any) {
@@ -719,6 +720,7 @@ const toolCalls = computed(() => ensureList(run.value?.tool_calls || run.value?.
 const recentToolCalls = computed(() => toolCalls.value.slice().reverse())
 const pagedToolCalls = computed(() => indexedPage(recentToolCalls.value, toolCallPage.value, toolCallPageSize))
 const skillPlan = computed(() => ensureList(run.value?.skill_plan || run.value?.final_report?.skill_plan))
+const agentActionObservations = computed(() => ensureList(run.value?.agent_action_observations))
 const toolSummary = computed(() => run.value?.tool_summary || run.value?.final_report?.tool_summary || run.value?.artifacts?.tool_summary || null)
 const agentEvaluations = computed<any[]>(() => ensureList(run.value?.agent_evaluations || run.value?.final_report?.agent_diagnostics?.evaluations))
 const latestAgentEvaluation = computed(() => run.value?.evidence_evaluation || run.value?.final_report?.agent_diagnostics?.latest_evaluation || lastItem(agentEvaluations.value))
@@ -797,7 +799,7 @@ function ragScoreLabel(source: any) {
 }
 const hasRagSurface = computed(() => Boolean(ragRetrieval.value || run.value?.rag_context))
 const hasAgentEvaluationSurface = computed(() => Boolean(latestAgentEvaluation.value || agentEvaluations.value.length))
-const hasToolSurface = computed(() => toolCalls.value.length > 0 || skillPlan.value.length > 0 || Boolean(toolSummary.value) || hasRagSurface.value || hasAgentEvaluationSurface.value)
+const hasToolSurface = computed(() => toolCalls.value.length > 0 || skillPlan.value.length > 0 || agentActionObservations.value.length > 0 || Boolean(toolSummary.value) || hasRagSurface.value || hasAgentEvaluationSurface.value)
 const triageSummary = computed(() => run.value?.triage_summary || null)
 const triageAffectedSurfaces = computed(() => ensureList(triageSummary.value?.affected_surfaces))
 const pagedTriageAffectedSurfaces = computed(() => indexedPage(triageAffectedSurfaces.value, triageSurfacePage.value, triageSurfacePageSize))
@@ -1938,6 +1940,38 @@ watch(
                 {{ tool }}
               </span>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="agentActionObservations.length" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
+        <div class="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
+            <Zap :size="14" /> Supervisor 动作观察
+          </h3>
+          <span class="rounded bg-gray-100 px-2 py-1 text-[10px] font-bold text-gray-500">{{ agentActionObservations.length }} 条</span>
+        </div>
+        <div class="grid gap-3 lg:grid-cols-2">
+          <div
+            v-for="observation in agentActionObservations.slice().reverse().slice(0, 8)"
+            :key="`${observation.action_id}-${observation.stage}-${observation.timestamp}`"
+            class="rounded-lg border border-gray-100 bg-gray-50 p-3"
+          >
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <div class="truncate font-mono text-xs font-bold text-gray-800">{{ observation.tool_name }}</div>
+                <div class="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-gray-400">
+                  <span>{{ observation.stage }}</span>
+                  <span>{{ observation.layer }}</span>
+                  <span>{{ observation.risk }}</span>
+                </div>
+              </div>
+              <span class="shrink-0 rounded px-2 py-0.5 text-[10px] font-bold" :class="toolStatusClass(observation.status)">
+                {{ observation.status }}
+              </span>
+            </div>
+            <p class="mt-2 line-clamp-2 text-xs leading-5 text-gray-600">{{ observation.observation }}</p>
+            <pre v-if="observation.output" class="mt-2 max-h-28 overflow-auto rounded bg-white p-2 text-[10px] font-mono text-gray-500 border border-gray-100 whitespace-pre-wrap break-words">{{ formatPreview(observation.output, 900) }}</pre>
           </div>
         </div>
       </div>

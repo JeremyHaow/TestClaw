@@ -3,21 +3,27 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from app.core.dependencies import CurrentUser, DbSession
 from app.core.redaction import redact_sensitive_data, redact_sensitive_text
-from app.models.agent_planning import AgentPlanningMessage, AgentPlanningSession
+from app.models.agent_planning import AgentPlan, AgentPlanningMessage, AgentPlanningSession
 from app.models.task import Task
 from app.schemas.task import parse_task_detail
 from app.services.agent_planning import (
+    PLAN_SESSION_COLLECTING,
     PLAN_SESSION_EXECUTED,
     PLAN_SESSION_READY,
+    _build_basic_plan,
+    _missing_questions,
     agent_planning_service,
+    normalize_planner_run_payload,
     parse_json_object_text,
     redacted_plan_session_payload,
 )
@@ -51,6 +57,7 @@ class AgentPlanIntakeRequest(BaseModel):
     message: str | None = None
     selected_option: Any | None = None
     current_step: str | None = None
+    action: str | None = None
 
 
 class AgentPlanRejectRequest(BaseModel):
@@ -93,6 +100,28 @@ INTAKE_FIELD_LABELS = {
     "safety": "安全边界",
     "success": "成功标准",
 }
+STRUCTURED_INTAKE_STEP_IDS = [
+    "target_kind",
+    "coverage_scope",
+    "auth_boundary",
+    "safety_boundary",
+    "success_criteria",
+]
+STRUCTURED_TO_LEGACY_STEP = {
+    "target_kind": "target",
+    "coverage_scope": "scope",
+    "auth_boundary": "auth",
+    "safety_boundary": "safety",
+    "success_criteria": "success",
+}
+STRUCTURED_FIELD_BY_STEP = {
+    "target_kind": "target_json",
+    "coverage_scope": "scope_json",
+    "auth_boundary": "auth_json",
+    "safety_boundary": "safety_json",
+    "success_criteria": "success_json",
+}
+STRUCTURED_REQUIRED_STEPS = {"target_kind", "auth_boundary", "safety_boundary"}
 
 
 async def _load_owned_session(session_id: str, db: DbSession, user: CurrentUser):
@@ -117,6 +146,34 @@ def _agent_plan_current_step(session: AgentPlanningSession) -> str:
     if session.status == PLAN_SESSION_READY or session.current_run_payload:
         return "review"
     return "target"
+
+
+def _canonical_intake_step(value: Any) -> str | None:
+    normalized = str(value or "").strip().lower()
+    aliases = {
+        "target": "target_kind",
+        "target_kind": "target_kind",
+        "target_type": "target_kind",
+        "source": "target_kind",
+        "scope": "coverage_scope",
+        "coverage": "coverage_scope",
+        "coverage_scope": "coverage_scope",
+        "auth": "auth_boundary",
+        "login": "auth_boundary",
+        "credentials": "auth_boundary",
+        "auth_boundary": "auth_boundary",
+        "safety": "safety_boundary",
+        "policy": "safety_boundary",
+        "safety_boundary": "safety_boundary",
+        "success": "success_criteria",
+        "criteria": "success_criteria",
+        "success_criteria": "success_criteria",
+    }
+    return aliases.get(normalized)
+
+
+def _structured_step_required(step: str) -> bool:
+    return step in STRUCTURED_REQUIRED_STEPS
 
 
 def _agent_plan_session_alias_payload(
@@ -188,6 +245,399 @@ def _intake_message_content(payload: AgentPlanIntakeRequest) -> str:
     if message:
         parts.append(message)
     return "\n".join(parts).strip()
+
+
+def _is_structured_intake(payload: AgentPlanIntakeRequest) -> bool:
+    return bool(
+        payload.current_step
+        or payload.selected_option is not None
+        or str(payload.action or "").strip().lower() in {"continue", "defer", "skip"}
+    )
+
+
+async def _load_or_create_structured_plan(
+    db: DbSession,
+    session: AgentPlanningSession,
+) -> AgentPlan:
+    result = await db.execute(select(AgentPlan).where(AgentPlan.session_id == session.id))
+    plan = result.scalars().first()
+    if plan is not None:
+        return plan
+    plan = AgentPlan(
+        session_id=session.id,
+        title=session.title or "新计划",
+        objective="",
+        status=PLAN_SESSION_COLLECTING,
+    )
+    db.add(plan)
+    await db.flush()
+    return plan
+
+
+def _structured_step_payload(payload: AgentPlanIntakeRequest) -> dict[str, Any]:
+    action = str(payload.action or "continue").strip().lower() or "continue"
+    step = _canonical_intake_step(payload.current_step) or "target_kind"
+    selected = redact_sensitive_data(payload.selected_option)
+    message = _intake_text(payload.message, limit=900) or ""
+    option_summary = _selected_option_summary(selected, step)
+    if action == "skip":
+        status = "skipped"
+        summary = f"{INTAKE_FIELD_LABELS[STRUCTURED_TO_LEGACY_STEP[step]]}：已跳过"
+    elif action == "defer":
+        status = "deferred"
+        summary = f"{INTAKE_FIELD_LABELS[STRUCTURED_TO_LEGACY_STEP[step]]}：稍后补充"
+    else:
+        status = "confirmed"
+        summary = option_summary or message
+    if message and option_summary and message not in option_summary:
+        summary = f"{option_summary}\n{message}"
+    value = selected.get("value") if isinstance(selected, dict) else None
+    label = selected.get("label") if isinstance(selected, dict) else None
+    return redact_sensitive_data(
+        {
+            "step": step,
+            "status": status,
+            "action": action,
+            "label": label,
+            "value": value,
+            "message": option_summary,
+            "supplement": message,
+            "summary": summary,
+        }
+    )
+
+
+def _structured_plan_step_data(plan: AgentPlan, step: str) -> dict[str, Any]:
+    field_name = STRUCTURED_FIELD_BY_STEP[step]
+    value = getattr(plan, field_name, None)
+    return value if isinstance(value, dict) else {}
+
+
+def _structured_plan_content(plan: AgentPlan) -> str:
+    lines: list[str] = []
+    for step in STRUCTURED_INTAKE_STEP_IDS:
+        data = _structured_plan_step_data(plan, step)
+        if not data:
+            continue
+        label = INTAKE_FIELD_LABELS[STRUCTURED_TO_LEGACY_STEP[step]]
+        summary = _intake_text(data.get("summary"), limit=900)
+        if summary:
+            lines.append(f"{label}：{summary}")
+    return "\n".join(lines).strip()
+
+
+def _structured_plan_current_step(plan: AgentPlan, session: AgentPlanningSession) -> str:
+    if session.status == PLAN_SESSION_EXECUTED:
+        return "executed"
+    if session.status == PLAN_SESSION_READY or session.current_run_payload:
+        return "review"
+    handled = {"confirmed", "deferred", "skipped"}
+    for step in STRUCTURED_INTAKE_STEP_IDS:
+        data = _structured_plan_step_data(plan, step)
+        if not data or data.get("status") not in handled:
+            return STRUCTURED_TO_LEGACY_STEP[step]
+
+    content = _structured_plan_content(plan)
+    if content:
+        fake_messages = [
+            AgentPlanningMessage(session_id=session.id, role="user", content=content)
+        ]
+        payload = normalize_planner_run_payload({}, fake_messages)
+        if not payload.source:
+            return "target"
+        missing_text = "\n".join(_missing_questions(payload))
+        if "登录" in missing_text or "鉴权" in missing_text or "Token" in missing_text:
+            return "auth"
+        if "安全" in missing_text:
+            return "safety"
+        if "成功" in missing_text or "断言" in missing_text:
+            return "success"
+
+    for step in STRUCTURED_INTAKE_STEP_IDS:
+        data = _structured_plan_step_data(plan, step)
+        if _structured_step_required(step) and data.get("status") != "confirmed":
+            return STRUCTURED_TO_LEGACY_STEP[step]
+    return "success"
+
+
+def _structured_question_for_step(step: str) -> dict[str, Any] | None:
+    option_groups = {
+        "target_kind": {
+            "question": "要先确定哪类测试目标？",
+            "required": True,
+            "options": [
+                {
+                    "label": "API / 接口",
+                    "title": "API / OpenAPI",
+                    "description": "用于接口文档、接口契约、只读接口覆盖或指定接口回归。",
+                    "field": "target_kind",
+                    "value": "api_openapi",
+                    "step": "target_kind",
+                    "message": "测试目标类型：API / OpenAPI/Swagger 接口来源。",
+                },
+                {
+                    "label": "Web UI / 网页",
+                    "title": "Web UI 页面",
+                    "description": "用于浏览器页面、登录后业务流程、表单和页面可用性检查。",
+                    "field": "target_kind",
+                    "value": "web_page",
+                    "step": "target_kind",
+                    "message": "测试目标类型：浏览器 Web UI 页面。",
+                },
+                {
+                    "label": "自定义",
+                    "title": "自定义目标",
+                    "description": "用补充说明描述具体目标，但仍限定在 API 或浏览器 Web UI 范围内。",
+                    "field": "target_kind",
+                    "value": "custom",
+                    "step": "target_kind",
+                    "message": "测试目标类型：自定义 API/Web UI 目标，由补充说明限定。",
+                },
+            ],
+        },
+        "coverage_scope": {
+            "question": "先按哪个测试范围规划？",
+            "required": False,
+            "options": [
+                {
+                    "label": "冒烟范围",
+                    "title": "冒烟检查",
+                    "description": "优先覆盖关键入口、基础可用性和发布前阻断风险。",
+                    "field": "coverage_scope",
+                    "value": "smoke",
+                    "step": "coverage_scope",
+                    "allows_skip": True,
+                    "optional": True,
+                    "message": "覆盖范围：关键路径和基础可用性冒烟检查。",
+                },
+                {
+                    "label": "回归范围",
+                    "title": "回归范围",
+                    "description": "覆盖核心流程、主要回归风险和历史问题区域。",
+                    "field": "coverage_scope",
+                    "value": "regression",
+                    "step": "coverage_scope",
+                    "allows_skip": True,
+                    "optional": True,
+                    "message": "覆盖范围：核心流程、主要回归风险和历史问题。",
+                },
+                {
+                    "label": "接口契约",
+                    "title": "接口契约",
+                    "description": "适合 OpenAPI/Swagger 输入，关注文档契约、状态码和响应结构。",
+                    "field": "coverage_scope",
+                    "value": "api_contract",
+                    "step": "coverage_scope",
+                    "allows_skip": True,
+                    "optional": True,
+                    "message": "覆盖范围：接口契约、状态码和响应结构检查。",
+                },
+            ],
+        },
+        "auth_boundary": {
+            "question": "目标的登录或鉴权边界是什么？",
+            "required": True,
+            "options": [
+                {
+                    "label": "无需登录",
+                    "title": "公开访问",
+                    "description": "目标可匿名访问，计划按无需登录或鉴权处理。",
+                    "field": "auth_boundary",
+                    "value": "no_auth",
+                    "step": "auth_boundary",
+                    "message": "登录方式/凭证：目标公开访问，无需登录或鉴权。",
+                },
+                {
+                    "label": "提供账号",
+                    "title": "登录流程",
+                    "description": "使用测试账号、密码、验证码说明或登录步骤完成登录。",
+                    "field": "auth_boundary",
+                    "value": "login_flow",
+                    "step": "auth_boundary",
+                    "message": "登录方式/凭证：目标需要登录流程和测试账号。",
+                },
+                {
+                    "label": "手动鉴权",
+                    "title": "Token / Header",
+                    "description": "使用 Token、Cookie 或 Header 作为 API/UI 访问凭证。",
+                    "field": "auth_boundary",
+                    "value": "manual_auth",
+                    "step": "auth_boundary",
+                    "message": "登录方式/凭证：使用手动提供的 Token、Cookie 或 Header。",
+                },
+            ],
+        },
+        "safety_boundary": {
+            "question": "安全边界是什么？",
+            "required": True,
+            "options": [
+                {
+                    "label": "只读边界",
+                    "title": "只读检查",
+                    "description": "不创建、修改或删除数据；API 默认限制为安全只读方法。",
+                    "field": "safety_boundary",
+                    "value": "safe_read_only",
+                    "step": "safety_boundary",
+                    "message": "安全边界：只做只读检查，不创建、修改或删除数据。",
+                },
+                {
+                    "label": "鉴权只读",
+                    "title": "带鉴权只读",
+                    "description": "允许携带凭证访问受保护资源，但仍不执行写入动作。",
+                    "field": "safety_boundary",
+                    "value": "safe_with_auth",
+                    "step": "safety_boundary",
+                    "message": "安全边界：允许带鉴权只读访问，不执行写入动作。",
+                },
+                {
+                    "label": "测试环境写入",
+                    "title": "允许测试写入",
+                    "description": "仅限测试环境，并在约定范围内创建、修改或删除测试数据。",
+                    "field": "safety_boundary",
+                    "value": "write_allowed",
+                    "step": "safety_boundary",
+                    "message": "安全边界：测试环境允许在约定范围内写入测试数据。",
+                },
+            ],
+        },
+        "success_criteria": {
+            "question": "结果怎样才算成功？",
+            "required": False,
+            "options": [
+                {
+                    "label": "证据充分",
+                    "title": "证据充分",
+                    "description": "每个覆盖点都需要结果、证据、失败原因或明确跳过原因。",
+                    "field": "success_criteria",
+                    "value": "evidence_complete",
+                    "step": "success_criteria",
+                    "allows_skip": True,
+                    "optional": True,
+                    "message": "成功标准：每个覆盖点都有结果、证据、失败原因或明确跳过原因。",
+                },
+                {
+                    "label": "阻断优先",
+                    "title": "阻断问题优先",
+                    "description": "优先发现发布阻断问题，并给出可复现步骤和证据。",
+                    "field": "success_criteria",
+                    "value": "blocking_findings",
+                    "step": "success_criteria",
+                    "allows_skip": True,
+                    "optional": True,
+                    "message": "成功标准：优先发现发布阻断问题，并提供可复现证据。",
+                },
+            ],
+        },
+    }
+    group = option_groups.get(step)
+    if group is None:
+        return None
+    return redact_sensitive_data({**group, "step": step})
+
+
+def _structured_missing_info(plan: AgentPlan, session: AgentPlanningSession) -> list[dict[str, Any]]:
+    if session.status == PLAN_SESSION_READY:
+        return []
+    current = _structured_plan_current_step(plan, session)
+    if current in {"review", "executed"}:
+        return []
+    canonical = _canonical_intake_step(current)
+    if not canonical:
+        return []
+    group = _structured_question_for_step(canonical)
+    return [
+        {
+            "key": current,
+            "label": INTAKE_FIELD_LABELS.get(current, current),
+            "required": bool(group.get("required", True)) if group else True,
+        }
+    ]
+
+
+def _structured_draft(plan: AgentPlan) -> dict[str, dict[str, Any]]:
+    draft: dict[str, dict[str, Any]] = {}
+    for step in STRUCTURED_INTAKE_STEP_IDS:
+        legacy = STRUCTURED_TO_LEGACY_STEP[step]
+        data = _structured_plan_step_data(plan, step)
+        status = str(data.get("status") or "")
+        if status == "confirmed":
+            item_status = "confirmed"
+        elif status == "deferred":
+            item_status = "pending"
+        elif status == "skipped":
+            item_status = "skipped"
+        else:
+            item_status = "pending"
+        draft[legacy] = {
+            "value": data.get("summary") if data else None,
+            "status": item_status,
+        }
+    return redact_sensitive_data(draft)
+
+
+def _update_session_from_structured_plan(
+    session: AgentPlanningSession,
+    plan: AgentPlan,
+) -> None:
+    content = _structured_plan_content(plan)
+    if not content:
+        session.status = PLAN_SESSION_COLLECTING
+        session.current_plan = None
+        session.current_run_payload = None
+        return
+    fake_messages = [
+        AgentPlanningMessage(session_id=session.id, role="user", content=content)
+    ]
+    payload = normalize_planner_run_payload({}, fake_messages)
+    questions = _missing_questions(payload)
+    if questions or not payload.source:
+        session.status = PLAN_SESSION_COLLECTING
+        session.current_plan = None
+        session.current_run_payload = None
+        plan.status = PLAN_SESSION_COLLECTING
+        plan.objective = payload.objective
+        plan.recommended_run_payload_json = None
+        return
+    current_plan = _build_basic_plan(payload)
+    run_payload = payload.model_dump(mode="json", exclude_none=True)
+    session.status = PLAN_SESSION_READY
+    session.current_plan = json.dumps(current_plan, ensure_ascii=False, default=str)
+    session.current_run_payload = json.dumps(run_payload, ensure_ascii=False, default=str)
+    session.rejection_reason = None
+    plan.status = PLAN_SESSION_READY
+    plan.title = _intake_text(current_plan.get("target"), limit=160) or session.title
+    plan.objective = payload.objective
+    plan.api_plan_json = current_plan if payload.test_type == "api" else None
+    plan.ui_plan_json = current_plan if payload.test_type == "ui" else None
+    plan.recommended_run_payload_json = redact_sensitive_data(run_payload)
+
+
+def _structured_intake_payload(
+    session: AgentPlanningSession,
+    messages: list[AgentPlanningMessage],
+    plan: AgentPlan,
+) -> dict[str, Any]:
+    session_payload = _agent_plan_session_alias_payload(session, messages)
+    current = _structured_plan_current_step(plan, session)
+    canonical = _canonical_intake_step(current)
+    group = None if session.status == PLAN_SESSION_READY else (
+        _structured_question_for_step(canonical) if canonical else None
+    )
+    session_payload["current_step"] = current
+    session_payload["structured_intake"] = redact_sensitive_data(
+        {
+            step: _structured_plan_step_data(plan, step)
+            for step in STRUCTURED_INTAKE_STEP_IDS
+        }
+    )
+    session_payload["question_options"] = [group] if group else []
+    return {
+        "extracted": _agent_plan_extracted(session_payload),
+        "draft": _structured_draft(plan),
+        "next_question": _agent_plan_next_question([group] if group else []),
+        "missing_info": _structured_missing_info(plan, session),
+        "session": session_payload,
+    }
 
 
 def _question_group_step(group: dict[str, Any]) -> str | None:
@@ -572,6 +1022,28 @@ async def intake_agent_plan_session_alias(
 ):
     session = await _load_owned_session(session_id, db, user)
     _ensure_session_mutable(session)
+    if _is_structured_intake(payload):
+        step = _canonical_intake_step(payload.current_step)
+        if step is None:
+            raise HTTPException(status_code=400, detail="current_step is required")
+        action = str(payload.action or "continue").strip().lower() or "continue"
+        if action not in {"continue", "defer", "skip"}:
+            raise HTTPException(status_code=400, detail="unsupported intake action")
+        if action == "skip" and _structured_step_required(step):
+            raise HTTPException(status_code=400, detail="current_step cannot be skipped")
+        if action == "continue" and payload.selected_option is None and not str(payload.message or "").strip():
+            raise HTTPException(status_code=400, detail="message is required")
+        plan = await _load_or_create_structured_plan(db, session)
+        setattr(plan, STRUCTURED_FIELD_BY_STEP[step], _structured_step_payload(payload))
+        plan.updated_at = datetime.utcnow()
+        session.updated_at = datetime.utcnow()
+        _update_session_from_structured_plan(session, plan)
+        await db.commit()
+        await db.refresh(session)
+        await db.refresh(plan)
+        messages = await agent_planning_service.list_messages(db, session_id=session.id)
+        return _structured_intake_payload(session, messages, plan)
+
     content = _intake_message_content(payload)
     if not content:
         raise HTTPException(status_code=400, detail="message is required")

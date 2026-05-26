@@ -98,3 +98,24 @@ def test_quality_memory_page_renders_memory_theme_and_asset_cards_without_raw_js
 
     assert "<pre" not in source.lower()
     assert "JSON.stringify" not in source
+
+
+def test_quality_memory_page_uses_responsive_viewport_filling_layout() -> None:
+    source = _source()
+
+    assert "mx-auto max-w-7xl" not in source
+    assert 'class="flex min-h-[calc(100vh-7.25rem)] flex-col gap-4 pb-4"' in source
+    assert "xl:grid-cols-[minmax(0,1.7fr)_minmax(340px,0.9fr)]" in source
+    assert "xl:max-h-[calc(100vh-25rem)]" in source
+    assert "xl:overflow-y-auto" in source
+    assert source.count("overflow-y-auto") >= 4
+    for label in [
+        "质量趋势",
+        "运行结果分布",
+        "证据复用覆盖",
+        "风险优先级",
+        "高频主题",
+        "已知阻塞点",
+        "可复用资产",
+    ]:
+        assert label in source

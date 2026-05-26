@@ -92,6 +92,15 @@ def test_agent_plan_uses_streaming_and_live_message_controls() -> None:
     assert "skipCurrentStep" in source
     assert "deferCurrentStep" in source
     assert "continueIntake" in source
+    assert "submitStructuredIntake" in source
+    assert "/agent-plans/sessions/${sessionId}/intake" in source
+    assert "intakeDisplayText(supplement)" in source
+    assert "eventName === 'final'" in source
+    assert "resetIntakeState()" in source
+    assert "submitPlannerContent(content)" not in re.search(
+        r"async function continueIntake\(\)[\s\S]*?\n}",
+        source,
+    ).group(0)
     assert "applyChoiceToDraft" not in source
     assert "sendChoice" not in source
     assert "await sendMessage()" not in source
@@ -101,6 +110,24 @@ def test_agent_plan_uses_streaming_and_live_message_controls() -> None:
     assert "sourceMessages.slice(0, index + 1)" in source
     assert "执行未启动" in source
     assert "toast.error(message)" in source
+
+
+def test_agent_plan_intake_has_deterministic_target_choice_controls() -> None:
+    source = _combined_agent_plan_source()
+    question_source = QUESTION_CARD.read_text(encoding="utf-8")
+
+    assert "targetKindGroupForSource" in source
+    assert "sourceSignal" in source
+    assert "api_openapi" in source
+    assert "web_page" in source
+    assert "custom" in source
+    assert "displayedIntakeGroup" in source
+    assert ':question-group="displayedIntakeGroup"' in source
+    assert "currentSupplementText" in source
+    assert 'v-model="supplementModel"' in question_source
+    assert "set: (value: string) => emit('update:supplement', value)" in question_source
+    assert "@keydown.enter" not in question_source
+    assert "@click=\"emit('continue')\"" in question_source
 
 
 def test_agent_plan_consumes_quality_memory_handoff_once() -> None:

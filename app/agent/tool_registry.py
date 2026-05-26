@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,6 +16,12 @@ class ToolCapability:
     risk: str
     input_schema: dict[str, Any]
     output_schema: dict[str, Any]
+    timeout_ms: int = 8000
+    retry_policy: dict[str, Any] = field(default_factory=lambda: {"max_attempts": 1})
+    redaction_policy: list[str] = field(
+        default_factory=lambda: ["headers", "token", "cookie", "password", "captcha", "secret"]
+    )
+    permission_required: str = "none"
 
 
 @dataclass(frozen=True)
@@ -25,6 +31,65 @@ class AutomationSkill:
     description: str
     triggers: list[str]
     tools: list[str]
+    required_inputs: list[str] = field(default_factory=list)
+    expected_observations: list[str] = field(default_factory=list)
+    failure_recovery: list[str] = field(default_factory=list)
+    safety_constraints: list[str] = field(default_factory=list)
+
+
+JSON_SCHEMA_PRIMITIVES = {"string", "number", "integer", "boolean", "array", "object", "null"}
+
+
+def _schema_property(contract: Any) -> dict[str, Any]:
+    if isinstance(contract, dict):
+        if contract.get("type") or contract.get("properties") or contract.get("oneOf") or contract.get("anyOf"):
+            return dict(contract)
+        return {"type": "object", "additionalProperties": True}
+
+    text = str(contract or "string").strip()
+    normalized = text.lower().replace("optional ", "")
+    if normalized in {"any", "*"}:
+        return {}
+
+    tokens = [token.strip() for token in normalized.split("|") if token.strip()]
+    if tokens and all(token in JSON_SCHEMA_PRIMITIVES for token in tokens):
+        types = ["null" if token == "null" else token for token in tokens]
+        schema: dict[str, Any] = {"type": types[0] if len(types) == 1 else sorted(set(types))}
+        if "array" in types:
+            schema.setdefault("items", {})
+        if "object" in types:
+            schema.setdefault("additionalProperties", True)
+        return schema
+
+    enum_tokens = [token.strip() for token in text.split("|") if token.strip()]
+    if len(enum_tokens) > 1:
+        return {"type": "string", "enum": enum_tokens}
+    if normalized in JSON_SCHEMA_PRIMITIVES:
+        return _schema_property(normalized)
+    return {"type": "string", "description": text}
+
+
+def _strict_object_schema(contract: dict[str, Any]) -> dict[str, Any]:
+    if contract.get("type") == "object" and isinstance(contract.get("properties"), dict):
+        strict = dict(contract)
+        strict.setdefault("required", sorted(strict["properties"]))
+        strict.setdefault("additionalProperties", False)
+        return strict
+    properties = {str(key): _schema_property(value) for key, value in contract.items()}
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": sorted(properties),
+        "additionalProperties": False,
+    }
+
+
+def _tool_contract(tool: ToolCapability) -> dict[str, Any]:
+    payload = asdict(tool)
+    payload["input_schema"] = _strict_object_schema(payload["input_schema"])
+    payload["output_schema"] = _strict_object_schema(payload["output_schema"])
+    payload["schema_contract"] = "strict_json_schema"
+    return payload
 
 
 TOOL_CAPABILITIES: tuple[ToolCapability, ...] = (
@@ -100,6 +165,57 @@ TOOL_CAPABILITIES: tuple[ToolCapability, ...] = (
         },
     ),
     ToolCapability(
+        name="memory.retrieve",
+        layer="memory",
+        skill="quality-memory-reuse",
+        description="Retrieve prior failures, selectors, auth notes, risky surfaces, and reusable test assets with local redaction and source metadata.",
+        risk="read_only",
+        input_schema={"query": "string", "target": "string", "limit": "number"},
+        output_schema={"sources": "array", "summary": "string", "redacted": "boolean"},
+    ),
+    ToolCapability(
+        name="auth.discover_candidates",
+        layer="auth",
+        skill="api-auth-discovery",
+        description="Inspect OpenAPI paths, operations, request schemas, response schemas, and security schemes to find login/token/session/csrf/captcha and read-only validation candidates.",
+        risk="credential_sensitive",
+        input_schema={"source": "string", "target_url": "string", "credential_fields": "array"},
+        output_schema={"login_candidates": "array", "validation_candidates": "array", "missing_inputs": "array"},
+        redaction_policy=["credentials", "headers", "token", "cookie", "password", "captcha", "csrf"],
+    ),
+    ToolCapability(
+        name="auth.try_login",
+        layer="auth",
+        skill="api-auth-discovery",
+        description="Execute a locally validated login/token/session request using credential fields mapped from schema names and configured safety limits.",
+        risk="network_credential",
+        input_schema={"method": "POST|PUT|PATCH", "url": "string", "body": "object", "headers": "object"},
+        output_schema={"ok": "boolean", "status_code": "number", "response_shape": "object"},
+        permission_required="credentials_present",
+        redaction_policy=["body", "headers", "token", "cookie", "password", "captcha", "csrf"],
+    ),
+    ToolCapability(
+        name="auth.extract_token_or_cookie",
+        layer="auth",
+        skill="api-auth-discovery",
+        description="Extract token, authorization header, session id, cookie, or Set-Cookie value from nested/cased response payloads and headers.",
+        risk="credential_sensitive",
+        input_schema={"response_payload": "object", "headers": "object", "token_path": "string|null"},
+        output_schema={"header_name": "string|null", "extracted": "boolean", "source": "string"},
+        redaction_policy=["response_payload", "headers", "token", "cookie", "session"],
+    ),
+    ToolCapability(
+        name="auth.validate_readonly",
+        layer="auth",
+        skill="api-auth-discovery",
+        description="Validate resolved auth material only against protected documented GET/HEAD/OPTIONS endpoints.",
+        risk="network_read_only",
+        input_schema={"candidates": "array", "headers": "object"},
+        output_schema={"success_count": "number", "validation_results": "array"},
+        permission_required="read_only_endpoint",
+        redaction_policy=["headers", "token", "cookie", "authorization"],
+    ),
+    ToolCapability(
         name="planner.analyze_ui_execution_context",
         layer="planner",
         skill="test-planning",
@@ -107,6 +223,34 @@ TOOL_CAPABILITIES: tuple[ToolCapability, ...] = (
         risk="read_only",
         input_schema={"ui_cases": "array", "setup_result": "object", "post_setup_snapshot": "string"},
         output_schema={"decisions": "array"},
+    ),
+    ToolCapability(
+        name="intake.update_step",
+        layer="planner",
+        skill="intake-planning",
+        description="Persist a structured intake step without creating an ordinary chat message.",
+        risk="read_only",
+        input_schema={"session_id": "string", "step": "string", "choice": "object", "supplement": "string"},
+        output_schema={"current_step": "string", "draft": "object", "ready_to_generate": "boolean"},
+    ),
+    ToolCapability(
+        name="intake.generate_plan",
+        layer="planner",
+        skill="intake-planning",
+        description="Generate a run payload from structured target, scope, auth, safety, and success criteria intake state.",
+        risk="read_only",
+        input_schema={"intake_state": "object"},
+        output_schema={"plan": "object", "run_payload": "object", "missing_info": "array"},
+    ),
+    ToolCapability(
+        name="human.ask",
+        layer="supervisor",
+        skill="human-intervention",
+        description="Ask the user for the smallest missing field, approval, captcha, credential route, or environment choice needed to continue.",
+        risk="human_input",
+        input_schema={"missing_fields": "array", "reason": "string", "choices": "array"},
+        output_schema={"question": "string", "blocking": "boolean", "requested_fields": "array"},
+        redaction_policy=["reason", "choices", "missing_fields"],
     ),
     ToolCapability(
         name="planner.evaluate_execution_evidence",
@@ -217,6 +361,64 @@ TOOL_CAPABILITIES: tuple[ToolCapability, ...] = (
         output_schema={"status_code": "number", "stdout": "string", "stderr": "string"},
     ),
     ToolCapability(
+        name="ui.open",
+        layer="ui",
+        skill="browser-ui-exploration",
+        description="Open a browser page for safe visual and accessibility exploration.",
+        risk="browser_read",
+        input_schema={"url": "string", "session": "string"},
+        output_schema={"opened": "boolean", "final_url": "string", "title": "string"},
+    ),
+    ToolCapability(
+        name="ui.snapshot",
+        layer="ui",
+        skill="browser-ui-exploration",
+        description="Capture an accessibility snapshot for model-visible UI exploration without exposing secrets.",
+        risk="browser_read",
+        input_schema={"session": "string"},
+        output_schema={"snapshot": "string", "element_count": "number"},
+        redaction_policy=["snapshot", "input_values"],
+    ),
+    ToolCapability(
+        name="ui.click",
+        layer="ui",
+        skill="browser-ui-exploration",
+        description="Click a validated visible element selector or accessibility ref inside the browser session.",
+        risk="browser_action",
+        input_schema={"selector_or_ref": "string", "session": "string"},
+        output_schema={"clicked": "boolean", "observation": "string"},
+        permission_required="safe_ui_action",
+    ),
+    ToolCapability(
+        name="ui.fill",
+        layer="ui",
+        skill="browser-ui-exploration",
+        description="Fill a validated form field with redacted input handling.",
+        risk="credential_sensitive",
+        input_schema={"selector_or_ref": "string", "value": "string", "session": "string"},
+        output_schema={"filled": "boolean", "observation": "string"},
+        redaction_policy=["value", "selector_or_ref"],
+        permission_required="safe_ui_action",
+    ),
+    ToolCapability(
+        name="ui.screenshot",
+        layer="ui",
+        skill="browser-ui-exploration",
+        description="Capture a screenshot artifact for evidence and later report synthesis.",
+        risk="browser_read",
+        input_schema={"session": "string", "label": "string"},
+        output_schema={"path": "string", "stored": "boolean"},
+    ),
+    ToolCapability(
+        name="ui.assert_visible",
+        layer="ui",
+        skill="browser-ui-exploration",
+        description="Assert that expected text or element state is visible in the browser surface.",
+        risk="read_only",
+        input_schema={"expected": "string", "snapshot": "string"},
+        output_schema={"passed": "boolean", "reason": "string"},
+    ),
+    ToolCapability(
         name="ui.smart_wait",
         layer="ui",
         skill="browser-ui-testing",
@@ -243,6 +445,15 @@ TOOL_CAPABILITIES: tuple[ToolCapability, ...] = (
         input_schema={"api_results": "object", "ui_results": "object", "tool_calls": "array"},
         output_schema={"summary": "string", "bugs_found": "array", "recommendations": "array"},
     ),
+    ToolCapability(
+        name="evidence.evaluate",
+        layer="reporter",
+        skill="evidence-evaluation",
+        description="Evaluate whether current observations are enough to report, continue, replan, or request human input.",
+        risk="read_only",
+        input_schema={"observations": "array", "success_criteria": "array", "tool_calls": "array"},
+        output_schema={"sufficient": "boolean", "next_action": "string", "missing_evidence": "array"},
+    ),
 )
 
 
@@ -253,6 +464,10 @@ AUTOMATION_SKILLS: tuple[AutomationSkill, ...] = (
         description="Create and maintain the mission-level Plan-Execute/ReAct control artifact and role delegation trace.",
         triggers=["any run", "complex objective", "multi-step mission"],
         tools=["agent.create_mission_plan"],
+        required_inputs=["objective", "input_type", "test_type"],
+        expected_observations=["mission subgoals", "role roster", "delegation trace"],
+        failure_recovery=["Continue with a compact default mission plan when model planning is unavailable."],
+        safety_constraints=["visible_reason_only", "redact_tool_context"],
     ),
     AutomationSkill(
         name="test-planning",
@@ -267,6 +482,21 @@ AUTOMATION_SKILLS: tuple[AutomationSkill, ...] = (
             "planner.analyze_ui_execution_context",
             "planner.evaluate_execution_evidence",
         ],
+        required_inputs=["objective", "target", "safety_policy"],
+        expected_observations=["strategy contract", "validated tool plan"],
+        failure_recovery=["Use deterministic fallback strategy when planner output is invalid."],
+        safety_constraints=["strict_json", "local_normalization", "redact_secrets"],
+    ),
+    AutomationSkill(
+        name="intake-planning",
+        layer="planner",
+        description="Collect target, scope, auth, safety, and success criteria as structured intake state before creating a run.",
+        triggers=["agent plan mode", "clarifying question", "structured choice"],
+        tools=["intake.update_step", "intake.generate_plan"],
+        required_inputs=["session_id", "current_step"],
+        expected_observations=["draft state", "next missing field", "run payload readiness"],
+        failure_recovery=["Ask for the smallest missing intake field instead of sending a fake chat turn."],
+        safety_constraints=["no_secret_echo", "supported_api_or_web_ui_only"],
     ),
     AutomationSkill(
         name="rag-knowledge-retrieval",
@@ -274,6 +504,37 @@ AUTOMATION_SKILLS: tuple[AutomationSkill, ...] = (
         description="Vector-retrieve prior bug knowledge and tester notes, then inject relevant context into LangChain planner/case-generator prompts.",
         triggers=["any run with matching knowledge", "re-run on known target", "historical failure themes"],
         tools=["memory.retrieve_rag_context"],
+        required_inputs=["objective", "target"],
+        expected_observations=["redacted sources", "retrieval mode", "source count"],
+        failure_recovery=["Continue with explicit no-memory observation when retrieval is unavailable."],
+        safety_constraints=["redacted_context", "bounded_token_budget"],
+    ),
+    AutomationSkill(
+        name="quality-memory-reuse",
+        layer="memory",
+        description="Reuse prior failures, selectors, auth notes, known risky surfaces, and accepted test assets as bounded planning context.",
+        triggers=["quality memory handoff", "repeat target", "historical blocker", "asset reuse"],
+        tools=["memory.retrieve"],
+        required_inputs=["target", "objective"],
+        expected_observations=["memory summary", "source metadata", "redaction status"],
+        failure_recovery=["Proceed without memory while recording that no reusable context was found."],
+        safety_constraints=["do_not_reuse_secret_values", "source_metadata_only"],
+    ),
+    AutomationSkill(
+        name="api-auth-discovery",
+        layer="auth",
+        description="Infer and validate login/token/session/cookie/captcha/csrf routes from OpenAPI and user-provided credentials.",
+        triggers=["api auth required", "credentials present", "manual token stale", "security scheme detected"],
+        tools=[
+            "auth.discover_candidates",
+            "auth.try_login",
+            "auth.extract_token_or_cookie",
+            "auth.validate_readonly",
+        ],
+        required_inputs=["OpenAPI schema", "target_url", "credentials or explicit manual auth"],
+        expected_observations=["login candidate", "token/cookie source", "protected read-only validation"],
+        failure_recovery=["Ask only for missing login endpoint, field name, captcha/csrf, token path, or validation endpoint."],
+        safety_constraints=["safe_readonly_validation_only", "redact_credentials", "no_write_methods"],
     ),
     AutomationSkill(
         name="api-contract-testing",
@@ -288,6 +549,10 @@ AUTOMATION_SKILLS: tuple[AutomationSkill, ...] = (
             "api.json_path_assert",
             "api.schema_assert",
         ],
+        required_inputs=["OpenAPI schema or selected API cases", "execution policy"],
+        expected_observations=["request selection", "HTTP evidence", "assertion results"],
+        failure_recovery=["Record skipped endpoints with guardrail diagnostics."],
+        safety_constraints=["schema_only", "safe_methods_only_by_default"],
     ),
     AutomationSkill(
         name="api-mock-data-generation",
@@ -295,6 +560,10 @@ AUTOMATION_SKILLS: tuple[AutomationSkill, ...] = (
         description="Generate schema-aware JSON request bodies for write_allowed or authenticated API checks that need request payloads.",
         triggers=["OpenAPI requestBody", "write_allowed API run", "API case with request body schema"],
         tools=["api.generate_mock_json_body"],
+        required_inputs=["request body schema", "required fields"],
+        expected_observations=["generated field list", "body shape"],
+        failure_recovery=["Skip body synthesis and record missing schema when the request schema is invalid."],
+        safety_constraints=["no_secret_seed_values", "schema_constrained_generation"],
     ),
     AutomationSkill(
         name="api-chain-orchestration",
@@ -302,6 +571,10 @@ AUTOMATION_SKILLS: tuple[AutomationSkill, ...] = (
         description="Orchestrate API dependencies by extracting values from upstream responses and injecting them into downstream requests.",
         triggers=["cases with depends_on or extract", "auth chain", "data-driven API suites"],
         tools=["api.extract_value", "api.inject_dependency"],
+        required_inputs=["upstream evidence", "dependency map"],
+        expected_observations=["extracted variable names", "resolved downstream templates"],
+        failure_recovery=["Skip dependent requests with an explicit missing dependency observation."],
+        safety_constraints=["redact_extracted_sensitive_values", "schema_only_dependencies"],
     ),
     AutomationSkill(
         name="browser-ui-testing",
@@ -309,6 +582,43 @@ AUTOMATION_SKILLS: tuple[AutomationSkill, ...] = (
         description="Run UI automation through playwright-cli with snapshots, actions, smart waits, screenshots, and browser state reuse.",
         triggers=["ui", "full", "auto with URL", "pre-test setup instructions"],
         tools=["ui.playwright_cli", "ui.smart_wait", "ui.snapshot_assert"],
+        required_inputs=["url or authenticated context"],
+        expected_observations=["command result", "snapshot", "screenshot"],
+        failure_recovery=["Ask for login/setup context or replan from fresh snapshot."],
+        safety_constraints=["redact_fill_values", "avoid_destructive_actions"],
+    ),
+    AutomationSkill(
+        name="browser-ui-exploration",
+        layer="ui",
+        description="Explore live browser surfaces with open, snapshot, click, fill, screenshot, and visible assertions under local UI action guardrails.",
+        triggers=["ui exploration", "browser surface unknown", "need screenshot evidence", "form workflow"],
+        tools=["ui.open", "ui.snapshot", "ui.click", "ui.fill", "ui.screenshot", "ui.assert_visible"],
+        required_inputs=["url", "safe action policy"],
+        expected_observations=["page title", "snapshot", "screenshot path", "visible assertion"],
+        failure_recovery=["Ask for selector, login context, captcha handling, or approval when blocked."],
+        safety_constraints=["redact_input_values", "block_destructive_actions_without_policy"],
+    ),
+    AutomationSkill(
+        name="evidence-evaluation",
+        layer="reporter",
+        description="Judge whether collected API/UI/tool evidence is enough to report, continue, replan, or request human input.",
+        triggers=["after API execution", "after UI execution", "blocked run", "before report"],
+        tools=["evidence.evaluate", "planner.evaluate_execution_evidence"],
+        required_inputs=["tool observations", "success criteria"],
+        expected_observations=["sufficiency decision", "missing evidence", "next action"],
+        failure_recovery=["Use deterministic sufficiency thresholds when model evaluation is unavailable."],
+        safety_constraints=["visible_reason_only", "no_hidden_chain_of_thought"],
+    ),
+    AutomationSkill(
+        name="human-intervention",
+        layer="supervisor",
+        description="Pause or block with the smallest concrete missing input, approval, captcha, credential route, or environment choice.",
+        triggers=["auth blocked", "captcha required", "unsafe action requested", "missing target", "environment unavailable"],
+        tools=["human.ask"],
+        required_inputs=["blocker reason", "missing fields"],
+        expected_observations=["requested fields", "blocking status"],
+        failure_recovery=["Keep run blocked with actionable next step until user supplies the missing input."],
+        safety_constraints=["ask_smallest_missing_info", "redact_context"],
     ),
     AutomationSkill(
         name="test-reporting",
@@ -316,6 +626,10 @@ AUTOMATION_SKILLS: tuple[AutomationSkill, ...] = (
         description="Build a traceable report from test results, artifacts, tool calls, and failure evidence.",
         triggers=["any completed run"],
         tools=["reporter.failure_analysis"],
+        required_inputs=["execution results", "evidence", "tool trace"],
+        expected_observations=["findings", "recommendations", "reusable assets"],
+        failure_recovery=["Report blockers and coverage gaps when execution is incomplete."],
+        safety_constraints=["redact_secrets", "evidence_linked_findings"],
     ),
 )
 
@@ -323,13 +637,13 @@ AUTOMATION_SKILLS: tuple[AutomationSkill, ...] = (
 def build_tool_registry() -> dict[str, Any]:
     return {
         "version": "2026-05-25",
-        "tools": [asdict(tool) for tool in TOOL_CAPABILITIES],
+        "tools": [_tool_contract(tool) for tool in TOOL_CAPABILITIES],
         "skills": [asdict(skill) for skill in AUTOMATION_SKILLS],
     }
 
 
 def tool_capabilities_by_name() -> dict[str, dict[str, Any]]:
-    return {tool.name: asdict(tool) for tool in TOOL_CAPABILITIES}
+    return {tool.name: _tool_contract(tool) for tool in TOOL_CAPABILITIES}
 
 
 def allowed_tool_names() -> set[str]:
@@ -370,9 +684,18 @@ def select_skills_for_state(state: dict[str, Any]) -> list[dict[str, Any]]:
     )
 
     selected = ["agent-supervision", "test-planning"]
-    if state.get("rag_retrieval") or state.get("rag_context"):
+    if state.get("rag_retrieval") or state.get("rag_context") or state.get("target_memory"):
         selected.append("rag-knowledge-retrieval")
+        selected.append("quality-memory-reuse")
     if test_type in {"api", "full"} or (test_type == "auto" and has_api):
+        auth_preflight = state.get("auth_preflight") if isinstance(state.get("auth_preflight"), dict) else {}
+        if (
+            state.get("auth_credentials")
+            or state.get("auth_config")
+            or auth_preflight
+            or any(isinstance(endpoint, dict) and endpoint.get("auth_required") for endpoint in (state.get("parsed_api_schema") or []))
+        ):
+            selected.append("api-auth-discovery")
         selected.append("api-contract-testing")
     if has_api and has_request_body_schema:
         selected.append("api-mock-data-generation")
@@ -380,6 +703,13 @@ def select_skills_for_state(state: dict[str, Any]) -> list[dict[str, Any]]:
         selected.append("api-chain-orchestration")
     if test_type in {"ui", "full"} or (test_type == "auto" and has_ui) or has_setup:
         selected.append("browser-ui-testing")
+        selected.append("browser-ui-exploration")
+    if (
+        isinstance(state.get("auth_preflight"), dict)
+        and str(state["auth_preflight"].get("status") or "").lower() == "blocked"
+    ) or state.get("last_error"):
+        selected.append("human-intervention")
+    selected.append("evidence-evaluation")
     selected.append("test-reporting")
 
     skills_by_name = {skill.name: skill for skill in AUTOMATION_SKILLS}
@@ -426,6 +756,7 @@ def _role_for_layer(layer: str) -> str:
         "supervisor": "supervisor_planner",
         "planner": "supervisor_planner",
         "memory": "memory_researcher",
+        "auth": "api_executor",
         "api": "api_executor",
         "ui": "ui_explorer",
         "reporter": "reporter",
@@ -437,6 +768,12 @@ def _default_visible_reason(tool_name: str, layer: str) -> str:
         return "Create or update the visible mission control plan."
     if tool_name.startswith("memory."):
         return "Retrieve bounded historical context before deciding the next test action."
+    if tool_name.startswith("auth."):
+        return "Discover and validate credential handling under the local read-only auth policy."
+    if tool_name.startswith("human."):
+        return "Ask for the smallest missing input needed to continue safely."
+    if tool_name.startswith("intake."):
+        return "Update structured intake state without turning the choice into chat text."
     if tool_name.startswith("planner.evaluate"):
         return "Compare execution evidence with mission goals and choose the next bounded action."
     if tool_name.startswith("planner."):

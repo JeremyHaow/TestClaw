@@ -59,6 +59,7 @@ EXECUTION_LOG_KEYS = (
     "auth_headers",
     "custom_headers",
     "auth_preflight",
+    "auth_discovery",
     "current_step",
     "progress_events",
     "cancelled",

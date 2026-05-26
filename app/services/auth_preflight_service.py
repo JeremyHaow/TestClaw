@@ -45,8 +45,11 @@ async def prepare_run_auth(
 ) -> tuple[dict[str, str], AuthResolution]:
     headers = normalize_headers(payload.headers)
     merge_token_header(payload.token, headers)
+    auth_mode = normalize_auth_mode(payload)
+    if auth_mode == "auto" and has_login_credentials(payload):
+        headers = _headers_without_auth_material(headers)
     resolution = await resolve_auto_auth_headers(
-        payload.auth_config,
+        auth_config_with_credentials(payload, enabled=auth_mode == "auto"),
         source=source,
         input_type=input_type,
         target_url=target_url,
@@ -60,6 +63,8 @@ def normalize_auth_mode(payload: Any) -> str:
     mode = (payload.auth_mode or "auto").strip().lower()
     if mode not in AUTH_MODES:
         mode = "auto"
+    if mode == "manual" and has_login_credentials(payload):
+        return "auto"
     if mode == "auto":
         legacy_headers = normalize_headers(payload.headers)
         merge_token_header(payload.token, legacy_headers)
@@ -82,12 +87,12 @@ def auth_credentials_dict(payload: Any) -> dict[str, str]:
     credentials = payload.auth_credentials
     data: dict[str, str] = {}
     if credentials is not None:
-        for key in ("username", "password", "captcha"):
+        for key in ("username", "password", "captcha", "csrf"):
             value = getattr(credentials, key, None)
             if isinstance(value, str) and value.strip():
                 data[key] = value.strip()
     config = coerce_auth_config(payload.auth_config)
-    for key in ("username", "password", "captcha", "tenant"):
+    for key in ("username", "password", "captcha", "csrf", "tenant"):
         value = config.get(key)
         if isinstance(value, str) and value.strip() and key not in data:
             data[key] = value.strip()
@@ -102,7 +107,7 @@ def auth_config_with_credentials(
 ) -> dict[str, Any]:
     config = coerce_auth_config(payload.auth_config)
     credentials = auth_credentials_dict(payload)
-    for key in ("username", "password", "captcha", "tenant"):
+    for key in ("username", "password", "captcha", "csrf", "tenant"):
         if credentials.get(key) and not config.get(key):
             config[key] = credentials[key]
     if captcha_text:
@@ -121,6 +126,14 @@ def has_login_credentials(payload: Any) -> bool:
     if isinstance(body, dict) and body:
         return True
     return False
+
+
+def _headers_without_auth_material(headers: dict[str, str]) -> dict[str, str]:
+    return {
+        key: value
+        for key, value in headers.items()
+        if not is_sensitive_header(key)
+    }
 
 
 def auth_preflight_fingerprint(payload: Any) -> str:
@@ -383,6 +396,8 @@ async def run_auth_preflight(
     endpoints = await load_preflight_endpoints(source, input_type)
     headers = normalize_headers(payload.headers)
     merge_token_header(payload.token, headers)
+    if auth_mode == "auto" and has_login_credentials(payload):
+        headers = _headers_without_auth_material(headers)
     runtime_auth_config: dict[str, Any] | None = None
     auth_resolution = AuthResolution(ok=False)
     steps: list[Any] = [

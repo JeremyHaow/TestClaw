@@ -2,6 +2,7 @@ from langgraph.graph import END, StateGraph
 
 from app.agent.nodes import (
     api_runner,
+    agent_supervisor,
     execution_evaluator,
     input_classifier,
     knowledge_retriever,
@@ -87,6 +88,7 @@ def build_graph():
     graph.add_node("mission_planner", mission_planner.run)
     graph.add_node("knowledge_retriever", knowledge_retriever.run)
     graph.add_node("planner", planner.run)
+    graph.add_node("agent_supervisor", agent_supervisor.run)
     graph.add_node("tc_generator", tc_generator.run)
     graph.add_node("api_runner", api_runner.run)
     graph.add_node("execution_evaluator", execution_evaluator.run)
@@ -105,7 +107,8 @@ def build_graph():
     graph.add_edge("source_loader", "mission_planner")
     graph.add_edge("mission_planner", "knowledge_retriever")
     graph.add_edge("knowledge_retriever", "planner")
-    graph.add_edge("planner", "tc_generator")
+    graph.add_edge("planner", "agent_supervisor")
+    graph.add_edge("agent_supervisor", "tc_generator")
     graph.add_conditional_edges(
         "ui_login",
         _after_ui_login,

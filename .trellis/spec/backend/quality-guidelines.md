@@ -252,7 +252,7 @@ task = await create_run(RunCreate(**run_payload), db, user)
 
 - Graph path:
   ```text
-  input_classifier -> source_loader -> mission_planner -> knowledge_retriever -> planner -> tc_generator -> api_runner/ui_login -> execution_evaluator -> reporter -> knowledge_sink
+  input_classifier -> source_loader -> mission_planner -> knowledge_retriever -> planner -> agent_supervisor -> tc_generator -> api_runner/ui_login -> execution_evaluator -> reporter -> knowledge_sink
   ```
 - Persisted execution-log keys:
   ```python
@@ -274,6 +274,7 @@ task = await create_run(RunCreate(**run_payload), db, user)
 
 - Active graph wiring must not register or route through legacy `coder`, `executor`, `analyzer`, or `healer` nodes.
 - `mission_planner` runs before memory retrieval and persists a real `agent_mission_plan` containing subgoals, memory needs, environment needs, selected skills, execution order, and success criteria.
+- `agent_supervisor` runs after planner strategy selection and before fixed case generation. It may add validated skill/tool observations, auth discovery, memory retrieval, and human-input blockers, but it must continue through the existing deterministic execution path until a full supervisor loop replaces it.
 - Downstream planner, case generator, and evidence evaluator prompts must consume the mission plan as bounded context.
 - Multi-agent collaboration is role-based and persisted through `agent_roster` and `agent_delegation_trace`; expected roles include supervisor/planner, memory researcher, API executor, UI explorer, evidence evaluator, and reporter when relevant to the run.
 - ReAct-style trace fields are visible operational summaries only: concise `reason`, `action`, selected `tool`, `observation`, `evidence`, and `next_decision`. Do not store hidden chain-of-thought.
@@ -299,6 +300,7 @@ task = await create_run(RunCreate(**run_payload), db, user)
 
 - Unit: complex objective decomposes into multiple mission subgoals with active role delegation.
 - Unit: active graph nodes/edges exclude `coder`, `executor`, `analyzer`, and `healer`.
+- Unit: active graph routes `planner -> agent_supervisor -> tc_generator`.
 - Unit: `build_execution_log_payload(...)` preserves `agent_mission_plan`, `agent_roster`, `agent_delegation_trace`, and `agent_react_trace`.
 - Unit: default vector backend selects database storage.
 - Unit: Milvus backend selection exposes config metadata without requiring a runtime dependency.
