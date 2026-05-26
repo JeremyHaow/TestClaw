@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.api.v1 import runs
 from app.main import app
-from app.services import api_auth
+from app.services import api_auth, auth_preflight_service
 
 
 def _token(client: TestClient) -> str:
@@ -298,6 +298,103 @@ def test_run_preflight_blocks_auth_required_api_without_credentials() -> None:
     )
     assert auth_prompt["status"] == "missing"
     assert "Token" in auth_prompt["action"]
+
+
+def test_run_preflight_none_confirmed_validates_direct_api_url(monkeypatch) -> None:
+    calls: list[tuple[str, str, dict | None]] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {"url": "https://api.example.test/health"}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs):
+            calls.append((method, url, kwargs.get("headers")))
+            return FakeResponse()
+
+    monkeypatch.setattr(auth_preflight_service.httpx, "AsyncClient", FakeAsyncClient)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": "https://api.example.test/health",
+                "test_type": "api",
+                "auth_mode": "none_confirmed",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert calls == [("GET", "https://api.example.test/health", None)]
+    assert body["auth_preflight"]["status"] == "passed"
+    assert body["auth_preflight"]["can_start"] is True
+    assert body["auth_preflight"]["validation_results"][0]["url"] == "https://api.example.test/health"
+
+
+def test_run_preflight_manual_auth_validates_direct_api_url(monkeypatch) -> None:
+    calls: list[tuple[str, str, dict | None]] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {"ok": True}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs):
+            calls.append((method, url, kwargs.get("headers")))
+            return FakeResponse()
+
+    monkeypatch.setattr(auth_preflight_service.httpx, "AsyncClient", FakeAsyncClient)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": "https://api.example.test/private/profile",
+                "test_type": "api",
+                "auth_mode": "manual",
+                "token": "manual-token-secret",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert calls == [
+        (
+            "GET",
+            "https://api.example.test/private/profile",
+            {"Authorization": "Bearer manual-token-secret"},
+        )
+    ]
+    assert body["auth_preflight"]["status"] == "passed"
+    assert body["auth_preflight"]["can_start"] is True
+    assert "manual-token-secret" not in json.dumps(body, ensure_ascii=False)
 
 
 def test_run_preflight_mission_preview_does_not_expose_manual_auth_values(monkeypatch) -> None:

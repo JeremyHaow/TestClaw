@@ -244,6 +244,16 @@ def api_validation_candidates(
     return candidates
 
 
+def direct_url_validation_candidates(input_type: str, target_url: str) -> list[dict[str, str]]:
+    if input_type != "url" or not target_url.startswith(("http://", "https://")):
+        return []
+    parsed = urlsplit(target_url)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    return [{"method": "GET", "url": target_url, "path": path}]
+
+
 def is_preflight_auth_failure(status_code: int, payload: Any) -> bool:
     if status_code in {401, 403}:
         return True
@@ -374,7 +384,7 @@ async def run_auth_preflight(
     headers = normalize_headers(payload.headers)
     merge_token_header(payload.token, headers)
     runtime_auth_config: dict[str, Any] | None = None
-    auth_resolution = AuthResolution(ok=False, detail="未执行自动鉴权")
+    auth_resolution = AuthResolution(ok=False)
     steps: list[Any] = [
         RunAuthPreflightStep(
             key="mode",
@@ -495,10 +505,11 @@ async def run_auth_preflight(
         protected_only=False,
         limit=3,
     )
+    direct_candidates = direct_url_validation_candidates(input_type, target_url)
     captcha_context: CaptchaContextResolution | None = None
 
     if auth_mode == "none_confirmed":
-        candidates = protected_candidates or any_read_candidates
+        candidates = protected_candidates or any_read_candidates or direct_candidates
         if not candidates:
             steps.append(
                 RunAuthPreflightStep(
@@ -571,7 +582,7 @@ async def run_auth_preflight(
                 next_action="填写 Token/Header 后重新预检。",
             )
             return auth_preflight, headers, None, auth_resolution
-        candidates = protected_candidates
+        candidates = protected_candidates or direct_candidates
         if not candidates:
             steps.append(
                 RunAuthPreflightStep(
