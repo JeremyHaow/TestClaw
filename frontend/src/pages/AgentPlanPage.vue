@@ -255,12 +255,18 @@ function sourceSignal(value: string) {
   const lower = text.toLowerCase()
   const hasOpenApiText = /^\s*[{[]/.test(text) && /"paths"\s*:|"openapi"\s*:|"swagger"\s*:/.test(text)
   const hasOpenApiYaml = /^\s*(openapi|swagger)\s*:/.test(lower) || /\n\s*paths\s*:/.test(lower)
-  const hasApiMarker = /\b(openapi|swagger|api-docs|v3\/api-docs|接口文档|接口|endpoint)\b/i.test(text)
-  const hasUiMarker = /\b(web|ui|page|browser|网页|页面|浏览器|后台|管理台)\b/i.test(text)
-  const hasUrl = /^https?:\/\//i.test(text)
-  const api = hasOpenApiText || hasOpenApiYaml || hasApiMarker || /\/(swagger|openapi|api-docs)(\/|\.|$)/i.test(text)
-  const ui = (hasUrl && !api) || hasUiMarker
-  if (api && !hasUiMarker) return 'api'
+  const hasUrl = /https?:\/\/\S+/i.test(text)
+  const hasOpenApiMarker = /\b(openapi|swagger|api-docs|v3\/api-docs)\b/i.test(text) || /接口文档/.test(text)
+  const hasOpenApiUrl = /https?:\/\/\S*(swagger|openapi|api-docs|v3\/api-docs)(\/|\.|\?|#|$)/i.test(text)
+    || /\/(swagger|openapi|api-docs)(\/|\.|\?|#|$)/i.test(text)
+  const hasApiResponseSemantics = /\b(json|status\s*code|status|headers?|body|endpoint|assertions?|response|request|fields?)\b/i.test(text)
+    || /(响应|状态码|字段|请求头|响应头|响应体|请求体|接口|端点|断言|返回)/.test(text)
+  const hasUiMarker = /\b(web|ui|page|browser)\b/i.test(text) || /(网页|页面|浏览器|后台|管理台)/.test(text)
+  const openApi = hasOpenApiText || hasOpenApiYaml || hasOpenApiMarker || hasOpenApiUrl
+  const api = openApi || (hasUrl && hasApiResponseSemantics)
+  const ui = hasUiMarker
+  if (openApi) return 'api'
+  if (api && !ui) return 'api'
   if (ui && !api) return 'ui'
   if (api && ui) return 'ambiguous'
   return 'ambiguous'

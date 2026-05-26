@@ -137,6 +137,7 @@
 - Frontend structured intake navigation must be driven only by server-confirmed state (`current_step`, `structured_intake`, `current_plan`, or `current_run_payload`). Local option selection, supplemental textarea text, and optimistic skip/defer flags may appear as draft text in the plan draft panel, but must not cause `currentStepId`, `firstOpenStepId`, or the stepper to treat a step as complete before a successful intake response.
 - `稍后补充` records a field as intentionally deferred and must not masquerade as a target URL, credential, or answer. `跳过` is available only for optional/non-blocking steps.
 - TestClaw Plan Mode supports only API testing and browser-based Web UI testing. Local normalization must filter or replace planner options for unsupported target types such as desktop software, native apps, mobile apps, iOS apps, or Android apps before API/SSE payloads reach the frontend.
+- Frontend deterministic target detection must not classify a plain `http(s)` URL as Web UI by URL shape alone. OpenAPI/Swagger/API-doc URLs or schema text classify as API; explicit UI/page/browser markers classify as Web UI; direct URL text with API response semantics such as `响应`, `JSON`, `状态码`, `字段`, `header`, `body`, `接口`, `endpoint`, or `断言` classifies as API. Plain direct URLs stay ambiguous, and ambiguous target-kind choices must include the API option.
 - Each structured intake step must include a free-form supplemental path, usually a textarea, so users are not limited to presets.
 - Placeholder option messages such as `稍后补充具体地址`, `我会直接粘贴目标 URL`, or `我会补充关于...具体说明` are invalid. Sanitization must drop them before storing/returning `question_options`; target-kind groups left empty after filtering should fall back to supported API/Web UI/custom choices.
 - Fallback collecting turns should expose only the highest-priority current option group. The frontend should render only the latest assistant message's first one or two high-quality option groups to avoid flooding the chat.
@@ -162,6 +163,7 @@
 - Secret-bearing user messages or run payloads -> serialized responses contain `[REDACTED]`, not raw values.
 - Secret-bearing question option messages -> serialized responses and SSE final payloads contain `[REDACTED]`, not raw values.
 - Unsupported target options or placeholder option messages from the model -> sanitize them out before persistence/serialization; if the target group becomes empty, replace it with supported API/Web UI/custom choices.
+- Target supplemental text `https://httpbin.org/get 响应需要包含 url 字段` -> deterministic target choices include `API / OpenAPI`; plain `https://example.com` -> choices are not UI-only; `https://example.com 页面` -> may be Web UI.
 - Required structured intake step with no selected option or supplemental text -> frontend keeps `继续` disabled; optional/non-blocking step may expose `跳过`.
 
 ### 5. Good/Base/Bad Cases
@@ -200,6 +202,7 @@
 - Regression: backend sanitization removes placeholder option messages and serializes canonical `step`/`field` metadata for planner-provided and fallback `question_options`.
 - Regression: frontend source renders stepper/card intake controls, selection state, supplemental textarea, and `跳过`/`稍后补充`/`继续` actions without using the old text-chip draft append behavior; editing an old message immediately hides later messages through a rollback snapshot.
 - Regression: frontend source keeps local structured intake drafts out of navigation completion logic; textarea input or local choice selection must not advance from `target_kind` to `coverage_scope` until `submitStructuredIntake()` succeeds, applies the returned server session state, and clears the completed step's local draft.
+- Regression: frontend source target detection treats direct URLs with API response wording as API and plain direct URLs as ambiguous/not UI-only.
 - Regression: slow planner LLM calls time out and fall back without hanging the planning request.
 - Execute path: monkeypatch or otherwise isolate run creation/preflight and assert planning execution delegates to the existing run creation path.
 - Frontend build: Plan Mode route and navigation compile with the session/message/plan response shape.

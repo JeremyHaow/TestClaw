@@ -23,6 +23,14 @@ def _combined_agent_plan_source() -> str:
     )
 
 
+def _function_source(function_name: str, source: str | None = None) -> str:
+    page_source = source if source is not None else PAGE.read_text(encoding="utf-8")
+    pattern = rf"function {re.escape(function_name)}\([^)]*\)[^{{]*\{{[\s\S]*?\n\}}"
+    match = re.search(pattern, page_source)
+    assert match is not None
+    return match.group(0)
+
+
 def _button_visible_text(template: str, click_handler: str) -> str:
     pattern = re.compile(rf"<button\b(?=[^>]*@click=\"{click_handler}\")[\s\S]*?</button>")
     match = pattern.search(template)
@@ -128,6 +136,36 @@ def test_agent_plan_intake_has_deterministic_target_choice_controls() -> None:
     assert "set: (value: string) => emit('update:supplement', value)" in question_source
     assert "@keydown.enter" not in question_source
     assert "@click=\"emit('continue')\"" in question_source
+
+
+def test_agent_plan_direct_api_url_with_response_semantics_gets_api_choice() -> None:
+    source = PAGE.read_text(encoding="utf-8")
+    signal_source = _function_source("sourceSignal", source)
+    target_group_source = _function_source("targetKindGroupForSource", source)
+
+    assert "hasApiResponseSemantics" in signal_source
+    assert (
+        "const api = openApi || (hasUrl && hasApiResponseSemantics)"
+        in signal_source
+    )
+    assert "响应|状态码|字段" in signal_source
+    assert "headers?|body|endpoint" in signal_source
+    assert "断言" in signal_source
+    assert "if (api && !ui) return 'api'" in signal_source
+    assert "? [apiChoice, customChoice]" in target_group_source
+
+
+def test_agent_plan_plain_http_url_is_ambiguous_not_ui_only() -> None:
+    signal_source = _function_source("sourceSignal")
+    target_group_source = _function_source("targetKindGroupForSource")
+
+    assert (
+        "const ui = (hasUrl && !api) || hasUiMarker"
+        not in signal_source
+    )
+    assert "const ui = hasUiMarker" in signal_source
+    assert "return 'ambiguous'" in signal_source
+    assert ": [apiChoice, uiChoice, customChoice]" in target_group_source
 
 
 def test_agent_plan_local_intake_draft_does_not_advance_stepper() -> None:
