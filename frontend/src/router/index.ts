@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import AdminLayout from '../layouts/AdminLayout.vue'
 import LoginPage from '../pages/LoginPage.vue'
+import AgentPlanPage from '../pages/AgentPlanPage.vue'
 import RunPage from '../pages/RunPage.vue'
 import RunDetailPage from '../pages/RunDetailPage.vue'
 import HistoryPage from '../pages/HistoryPage.vue'
@@ -19,8 +20,9 @@ const router = createRouter({
       path: '/',
       component: AdminLayout,
       children: [
-        { path: '', redirect: '/run' },
-        { path: 'dashboard', redirect: '/run' },
+        { path: '', redirect: '/agent-plan' },
+        { path: 'dashboard', redirect: '/agent-plan' },
+        { path: 'agent-plan', component: AgentPlanPage },
         { path: 'run', component: RunPage },
         { path: 'runs/:id', component: RunDetailPage },
         { path: 'history', component: HistoryPage },
@@ -42,7 +44,7 @@ router.beforeEach((to) => {
     return '/login'
   }
   if (to.path === '/login' && token) {
-    return '/run'
+    return '/agent-plan'
   }
 })
 

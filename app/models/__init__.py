@@ -1,4 +1,5 @@
 from app.models.api_document import ApiDocument
+from app.models.agent_planning import AgentPlanningMessage, AgentPlanningSession
 from app.models.bug_report import BugReport
 from app.models.environment import Environment
 from app.models.knowledge import KnowledgeEntry
@@ -11,6 +12,8 @@ from app.models.visual_baseline import VisualBaseline
 
 __all__ = [
     "ApiDocument",
+    "AgentPlanningMessage",
+    "AgentPlanningSession",
     "BugReport",
     "Environment",
     "KnowledgeEntry",

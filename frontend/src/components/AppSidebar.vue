@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
-  Bot, BrainCircuit, History, Cpu, FileCode, Globe, Layers, BookOpen, ChevronLeft, ChevronRight
+  Bot, BrainCircuit, History, Cpu, FileCode, Globe, Layers, BookOpen, ChevronLeft, ChevronRight, SlidersHorizontal
 } from 'lucide-vue-next'
 import { useSidebar } from '../composables/useSidebar'
 
@@ -15,7 +15,8 @@ const navGroups = [
   {
     label: 'Workspace',
     items: [
-      { path: '/run', label: '测试智能体', icon: Bot },
+      { path: '/agent-plan', label: '计划模式', icon: Bot },
+      { path: '/run', label: '手动模式', icon: SlidersHorizontal },
       { path: '/history', label: '运行历史', icon: History },
       { path: '/quality-memory', label: '质量记忆', icon: BrainCircuit },
     ],

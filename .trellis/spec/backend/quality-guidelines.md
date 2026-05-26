@@ -46,6 +46,102 @@
 - UI may describe Multi-Agent only as role-based agent orchestration: Planner/Coder/Vision model defaults plus LangGraph nodes for planning, case generation, execution, reporting, and memory.
 - Do not imply autonomous peer-to-peer agent collaboration unless the backend implements that behavior.
 
+## Scenario: Agent Plan Mode Session Contract
+
+### 1. Scope / Trigger
+
+- Trigger: users can chat with a planning layer before creating a TestClaw run.
+- Applies to `app/api/v1/agent_plans.py`, `app/services/agent_planning.py`, `app/models/agent_planning.py`, `app/api/v1/runs.py`, and the Plan Mode Vue page.
+- Purpose: keep conversational planning separate from execution while preserving the existing run preflight/create/worker dispatch contract.
+
+### 2. Signatures
+
+- DB tables:
+  ```text
+  agent_planning_sessions(id, user_id, title, status, current_plan, current_run_payload, rejection_reason, executed_run_id, created_at, updated_at)
+  agent_planning_messages(id, session_id, role, content, plan_json, created_at)
+  ```
+- API:
+  ```text
+  POST /api/v1/agent-plans
+  GET /api/v1/agent-plans
+  GET /api/v1/agent-plans/{session_id}
+  POST /api/v1/agent-plans/{session_id}/messages
+  POST /api/v1/agent-plans/{session_id}/reject
+  POST /api/v1/agent-plans/{session_id}/execute
+  ```
+- Planner JSON contract:
+  ```json
+  {
+    "response": "...",
+    "status": "collecting|ready",
+    "questions": [],
+    "ready_to_execute": false,
+    "plan": {},
+    "run_payload": {}
+  }
+  ```
+
+### 3. Contracts
+
+- Planner LLM output must be strict JSON only. Local code must tolerate invalid/unavailable LLM output with a deterministic fallback.
+- `run_payload` may contain only the fields accepted by run creation: `source`, `test_type`, `objective`, `base_url`, `auth_mode`, `captcha_mode`, `auth_credentials`, `auth_config`, `token`, `headers`, `api_execution_policy`, `allow_out_of_schema_api_cases`, and `setup_instructions`.
+- Local normalization, not the model, owns allowed values for `test_type`, auth/captcha modes, API execution policy, and secret extraction.
+- Local fallback extraction must be generic and multilingual enough for normal Chinese/English tester messages: Chinese labels such as username/account/password/captcha, API/UI intent, no-auth phrases, captcha mode phrases, and safe/write policy phrases should normalize into the same `run_payload` contract as English messages.
+- When several user messages contain sources, the latest user-provided source wins over older sources and over stale structured LLM `run_payload.source` values. Rejection/regeneration must not keep the first target forever.
+- Fallback planning must ask for missing target/source and may produce a safe basic plan when enough generic target information exists. Do not add product-specific target branches.
+- Plan rejection clears `current_plan` and `current_run_payload`, records a rejection reason, and leaves the session open for later user messages to regenerate a plan.
+- Plan execution must call the existing run creation path or shared lower-level run functions. It must not duplicate auth preflight, task creation, Celery dispatch, or synchronous fallback behavior.
+- API responses must redact tokens, passwords, cookies, captcha/MFA/OTP values, sessions, API keys, auth headers, and setup text before returning sessions/messages/plans.
+
+### 4. Validation & Error Matrix
+
+- Missing/unknown session id or wrong user -> `404 Planning session not found`.
+- Blank chat message -> request validation error.
+- Whitespace-only chat message -> `400 content is required` and no empty `AgentPlanningMessage` row is stored.
+- Message without target/source -> `status="collecting"`, `ready_to_execute=false`, and a concrete question.
+- LLM unavailable or invalid JSON -> fallback response; no 500 from the planning turn.
+- Reject with no current plan -> `400 No current plan to reject`.
+- Execute without `current_run_payload` -> `400 No executable plan is ready`.
+- Existing `/runs` preflight blocks execution -> propagate the run creation `HTTPException` so the UI can show the blocker.
+- Secret-bearing user messages or run payloads -> serialized responses contain `[REDACTED]`, not raw values.
+
+### 5. Good/Base/Bad Cases
+
+- Good: user describes a Swagger URL and objective, receives a plan card, approves it, and `/agent-plans/{id}/execute` creates the run through `/runs` behavior.
+- Good: user rejects a UI plan, types "use API read-only checks instead", and the regenerated payload uses the later target/mode.
+- Good: user writes `请测试管理后台页面 ... 用户名 ... 密码 ... 固定验证码 ...` and fallback extraction normalizes UI mode, auto auth credentials, static captcha, and the requested API policy without product-specific branches.
+- Base: no Planner provider is configured; fallback asks for a target or creates a safe basic plan from a URL/OpenAPI source.
+- Bad: executing a plan manually creates `Task` rows and dispatches workers from the planning route, bypassing auth preflight.
+- Bad: plan/session/list responses echo raw `token=...`, `password=...`, `Cookie`, `Authorization`, captcha, session, or API-key values.
+
+### 6. Tests Required
+
+- Integration: create/list/get planning session with current user's sessions only.
+- Integration: adding a message with missing target returns a collecting response and question.
+- Integration: enough target information returns `ready_to_execute=true`, `current_plan`, and redacted `current_run_payload`.
+- Regression: reject clears executable state, records the reason, and a later message regenerates a plan from later instructions.
+- Execute path: monkeypatch or otherwise isolate run creation/preflight and assert planning execution delegates to the existing run creation path.
+- Frontend build: Plan Mode route and navigation compile with the session/message/plan response shape.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+task = Task(objective=payload["objective"], target_url=payload["source"])
+db.add(task)
+run_agent_task.delay(task.id, ...)
+```
+
+#### Correct
+
+```python
+from app.api.v1.runs import RunCreate, create_run
+
+task = await create_run(RunCreate(**run_payload), db, user)
+```
+
 ## Scenario: Mission Plan Agent Orchestration and Vector Memory Boundary
 
 ### 1. Scope / Trigger
