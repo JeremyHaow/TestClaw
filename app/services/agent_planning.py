@@ -49,7 +49,10 @@ _KEY_VALUE_TOKEN_RE = re.compile(
 )
 _API_INTENT_RE = re.compile(r"(?i)\b(api|openapi|swagger|endpoint)\b|接口")
 _UI_INTENT_RE = re.compile(r"(?i)\b(ui|browser|page|web|login page|screen)\b|页面|浏览器|管理后台|后台")
-_NO_AUTH_RE = re.compile(r"(?i)\b(no auth|public)\b|无需鉴权|公开|不需要登录")
+_NO_AUTH_RE = re.compile(
+    r"(?i)\b(no auth|public|login not required)\b|"
+    r"无需鉴权|公开|不需要登录|无需登录|不用登录|不需要登陆|无需登陆|不用登陆"
+)
 _DYNAMIC_CAPTCHA_RE = re.compile(r"(?i)dynamic captcha|动态验证码|图片验证码")
 _STATIC_CAPTCHA_RE = re.compile(r"(?i)static captcha|fixed captcha|固定验证码|验证码")
 _SAFE_WITH_AUTH_RE = re.compile(r"(?i)authenticated read|read-only with auth|带鉴权只读|鉴权只读")
@@ -390,7 +393,12 @@ def normalize_planner_run_payload(
     source_input_type = classify_input(source) if source else "unknown"
     base_url = _clean_url(payload.get("base_url")) or _extract_base_url_from_openapi_source(source)
     intent_text = latest_user_text or conversation_text
-    test_type = _infer_test_type(payload, source, intent_text)
+    test_type_text = (
+        intent_text
+        if _API_INTENT_RE.search(intent_text.lower()) or _UI_INTENT_RE.search(intent_text.lower())
+        else conversation_text
+    )
+    test_type = _infer_test_type(payload, source, test_type_text)
     credentials = _merge_credentials(payload, conversation_text)
     token = _token_from_payload_or_text(payload, conversation_text)
     headers = _headers_from_payload(payload.get("headers"))

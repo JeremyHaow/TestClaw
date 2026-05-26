@@ -252,6 +252,37 @@ def test_ui_plan_with_no_auth_confirmation_is_ready(monkeypatch) -> None:
     assert body["current_run_payload"]["auth_mode"] == "none_confirmed"
 
 
+def test_ui_auth_boundary_followup_preserves_ui_mode(monkeypatch) -> None:
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        first = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "测试页面 https://example.com ，只做 UI 只读冒烟检查。"},
+            headers=headers,
+        )
+        followup = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "确认无需登录。"},
+            headers=headers,
+        )
+
+    assert first.status_code == 200
+    assert first.json()["status"] == "collecting"
+    assert followup.status_code == 200
+    body = followup.json()
+    assert body["status"] == "ready"
+    assert body["current_run_payload"]["test_type"] == "ui"
+    assert body["current_run_payload"]["source"] == "https://example.com"
+    assert body["current_run_payload"]["auth_mode"] == "none_confirmed"
+
+
 def test_reject_then_regenerate_plan(monkeypatch) -> None:
     async def fake_llm(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("planner unavailable")
