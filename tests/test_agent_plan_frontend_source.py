@@ -3,6 +3,8 @@ from pathlib import Path
 
 
 PAGE = Path(__file__).resolve().parents[1] / "frontend/src/pages/AgentPlanPage.vue"
+LOGIN_PAGE = Path(__file__).resolve().parents[1] / "frontend/src/pages/LoginPage.vue"
+ROUTER = Path(__file__).resolve().parents[1] / "frontend/src/router/index.ts"
 
 
 def _template_source() -> str:
@@ -32,3 +34,13 @@ def test_agent_plan_page_static_template_text_is_localized() -> None:
     visible_text = re.sub(r"\s+", " ", visible_text)
 
     assert re.search(r"\b[A-Za-z]{2,}\b", visible_text) is None
+
+
+def test_agent_plan_is_default_entry_after_login_and_root_redirects() -> None:
+    login_source = LOGIN_PAGE.read_text(encoding="utf-8")
+    router_source = ROUTER.read_text(encoding="utf-8")
+
+    assert "router.push('/agent-plan')" in login_source
+    assert "router.push('/run')" not in login_source
+    assert "redirect: '/agent-plan'" in router_source
+    assert "return '/agent-plan'" in router_source

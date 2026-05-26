@@ -13,7 +13,7 @@ async function submit() {
   error.value = ''
   try {
     await auth.login(username.value, password.value)
-    router.push('/run')
+    router.push('/agent-plan')
   } catch (err: any) {
     error.value = err?.response?.data?.detail || '登录失败'
   }
