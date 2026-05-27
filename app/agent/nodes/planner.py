@@ -18,7 +18,7 @@ from app.agent.strategy import (
     strategy_summary,
 )
 from app.agent.tool_registry import install_tool_context, record_tool_call
-from app.core.llm_gateway import llm_gateway
+from app.core.llm_gateway import ainvoke_with_timeout, llm_gateway
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,12 @@ async def run(state: AgentState) -> AgentState:
     mission_plan = state.get("agent_mission_plan") or {}
     db = state.get("db_session")
     install_tool_context(state)
+    await persist_progress(
+        state,
+        "planner",
+        "running",
+        "Analyzing mission context and selecting a test strategy",
+    )
 
     # --- Pre-analysis: scene detection + auth chain ---
     scene_hints = []
@@ -160,7 +166,11 @@ async def run(state: AgentState) -> AgentState:
                 api_schema_summary=schema_summary,
                 rag_context=rag_context,
             )
-            resp = await llm.ainvoke([HumanMessage(content=prompt)])
+            resp = await ainvoke_with_timeout(
+                llm,
+                [HumanMessage(content=prompt)],
+                call_name="planner.plan",
+            )
             content = resp.content if hasattr(resp, "content") else str(resp)
             parsed = parse_llm_json_object(str(content))
             if isinstance(parsed, dict):
@@ -318,7 +328,11 @@ async def run(state: AgentState) -> AgentState:
                     default=str,
                 )[:4000],
             )
-            strategy_resp = await llm.ainvoke([HumanMessage(content=strategy_prompt)])
+            strategy_resp = await ainvoke_with_timeout(
+                llm,
+                [HumanMessage(content=strategy_prompt)],
+                call_name="planner.strategy",
+            )
             strategy_content = (
                 strategy_resp.content if hasattr(strategy_resp, "content") else str(strategy_resp)
             )

@@ -9,7 +9,7 @@ from langchain_core.messages import HumanMessage
 from app.agent.progress import persist_progress
 from app.agent.prompts import UI_TEST_PLANNER_PROMPT
 from app.agent.state import AgentState
-from app.core.llm_gateway import llm_gateway
+from app.core.llm_gateway import ainvoke_with_timeout, llm_gateway
 from app.tools.playwright_commands import command_name, normalize_playwright_commands
 
 logger = logging.getLogger(__name__)
@@ -895,7 +895,11 @@ async def run(state: AgentState) -> AgentState:
                 page_snapshot=explored_snapshot[:8000],
                 login_info=login_info,
             )
-            resp = await llm.ainvoke([HumanMessage(content=prompt)])
+            resp = await ainvoke_with_timeout(
+                llm,
+                [HumanMessage(content=prompt)],
+                call_name="ui_test_planner.generate_cases",
+            )
             content = resp.content if hasattr(resp, "content") else str(resp)
 
             text = content.strip()

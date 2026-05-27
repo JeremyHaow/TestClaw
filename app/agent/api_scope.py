@@ -74,6 +74,25 @@ def objective_requests_all_safe_get_coverage(objective: Any) -> bool:
         token in compact for token in chinese_all
     ):
         return True
+    chinese_coverage_actions = ("覆盖", "遍历", "验证", "测试", "检查", "执行")
+    chinese_safe_terms = (
+        "安全接口",
+        "安全端点",
+        "只读接口",
+        "只读端点",
+        "文档化接口",
+        "文档化端点",
+        "已文档化",
+        "接口文档",
+        "openapi",
+        "swagger",
+    )
+    if (
+        any(token in compact for token in chinese_all)
+        and any(token in compact for token in chinese_coverage_actions)
+        and any(token in compact for token in chinese_safe_terms)
+    ):
+        return True
 
     english_patterns = (
         r"\ball\s+(?:the\s+)?(?:safe\s+|read\s+only\s+|readonly\s+)?get\s+(?:requests?|endpoints?|apis?)\b",

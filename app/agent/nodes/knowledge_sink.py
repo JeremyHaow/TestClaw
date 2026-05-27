@@ -6,7 +6,7 @@ from langchain_core.messages import HumanMessage
 
 from app.agent.prompts import RCA_PROMPT
 from app.agent.state import AgentState
-from app.core.llm_gateway import llm_gateway
+from app.core.llm_gateway import ainvoke_with_timeout, llm_gateway
 from app.core.redaction import redact_sensitive_text
 from app.services.knowledge_service import knowledge_service
 
@@ -48,7 +48,11 @@ async def run(state: AgentState) -> AgentState:
                 stderr=stderr[:3000],
                 network_logs="No network logs available",
             )
-            resp = await llm.ainvoke([HumanMessage(content=prompt)])
+            resp = await ainvoke_with_timeout(
+                llm,
+                [HumanMessage(content=prompt)],
+                call_name="knowledge_sink.generate_rca",
+            )
             content = resp.content if hasattr(resp, "content") else str(resp)
             text = content.strip()
             if text.startswith("```"):

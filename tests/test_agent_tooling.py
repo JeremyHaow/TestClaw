@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from app.agent.action_runtime import (
 from app.agent.progress import build_execution_log_payload, determine_final_status
 from app.agent.strategy import normalize_agent_strategy_decision
 from app.agent.tool_registry import build_tool_registry, select_skills_for_state
+from app.config import settings
 from app.core.llm_gateway import LLMGateway
 from app.core.redaction import REDACTED_VALUE
 from app.models.agent_planning import AgentPlanningMessage
@@ -2507,6 +2509,54 @@ async def test_model_strategy_all_documented_safe_methods_drives_schema_coverage
         and trace["observation"].startswith("success; selected_total=2")
         for trace in result["agent_react_trace"]
     )
+
+
+@pytest.mark.asyncio
+async def test_planner_llm_timeout_records_progress_and_uses_fallback_strategy(monkeypatch) -> None:
+    class SlowPlanner:
+        calls = 0
+
+        async def ainvoke(self, _messages):
+            self.calls += 1
+            await asyncio.sleep(1)
+
+    slow_planner = SlowPlanner()
+
+    async def fake_get_planner(_db):
+        return slow_planner
+
+    monkeypatch.setattr(settings, "AGENT_PLAN_LLM_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(planner.llm_gateway, "get_planner", fake_get_planner)
+
+    state = await planner.run(
+        {
+            "db_session": object(),
+            "test_type": "api",
+            "input_type": "swagger_json",
+            "objective": "请覆盖所有已文档化的安全接口，记录每个接口的执行证据",
+            "target_url": "https://api.example.test",
+            "api_execution_policy": "safe_read_only",
+            "parsed_api_schema": [
+                {"method": "GET", "path": "/stock", "response_status": "200"},
+                {"method": "GET", "path": "/dict", "response_status": "200"},
+                {"method": "POST", "path": "/stock", "response_status": "200"},
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    assert slow_planner.calls == 2
+    assert [step["status"] for step in state["workflow_steps"] if step["node"] == "planner"] == [
+        "done"
+    ]
+    progress = [
+        event["status"] for event in state["progress_events"] if event["node"] == "planner"
+    ]
+    assert progress == ["running", "done"]
+    strategy = state["agent_strategy_decision"]
+    assert strategy["source"] == "agent_strategy_fallback"
+    assert strategy["coverage_scope"] == "all_documented_safe_methods"
+    assert "planner.strategy timed out" in strategy["fallback_reason"]
 
 
 @pytest.mark.asyncio

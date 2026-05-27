@@ -1,3 +1,5 @@
+import asyncio
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,6 +11,26 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from app.config import settings
 from app.core.security import decrypt_value
 from app.models.llm_provider import LLMProvider, ProviderType
+
+
+class LLMInvocationTimeoutError(TimeoutError):
+    """Raised when a model call exceeds TestClaw's runtime budget."""
+
+
+async def ainvoke_with_timeout(
+    llm: BaseChatModel,
+    messages: object,
+    *,
+    timeout_seconds: float | None = None,
+    call_name: str = "llm.ainvoke",
+) -> object:
+    timeout = max(float(timeout_seconds or settings.AGENT_PLAN_LLM_TIMEOUT_SECONDS or 12.0), 0.05)
+    try:
+        return await asyncio.wait_for(llm.ainvoke(messages), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        raise LLMInvocationTimeoutError(
+            f"{call_name} timed out after {timeout:.1f}s"
+        ) from exc
 
 
 class LLMGateway:

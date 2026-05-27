@@ -23,7 +23,7 @@ from app.agent.strategy import (
 )
 from app.agent.tool_registry import record_tool_call
 from app.config import settings
-from app.core.llm_gateway import llm_gateway
+from app.core.llm_gateway import ainvoke_with_timeout, llm_gateway
 
 logger = logging.getLogger(__name__)
 
@@ -507,7 +507,11 @@ async def run(state: AgentState) -> AgentState:
                 input_type=input_type,
                 rag_context=rag_context,
             )
-            resp = await llm.ainvoke([HumanMessage(content=prompt)])
+            resp = await ainvoke_with_timeout(
+                llm,
+                [HumanMessage(content=prompt)],
+                call_name="tc_generator.generate_cases",
+            )
             content = resp.content if hasattr(resp, "content") else str(resp)
             parsed = parse_llm_json(str(content), expected="any")
             if parsed is None:

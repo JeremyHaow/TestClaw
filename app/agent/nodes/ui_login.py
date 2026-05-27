@@ -11,7 +11,7 @@ from app.agent.progress import persist_progress
 from app.agent.prompts import LOGIN_ASSIST_PROMPT, LOGIN_DETAILS_PROMPT, LOGIN_VERIFY_PROMPT
 from app.agent.state import AgentState
 from app.agent.tool_registry import install_tool_context, record_tool_call
-from app.core.llm_gateway import llm_gateway
+from app.core.llm_gateway import ainvoke_with_timeout, llm_gateway
 from app.tools.playwright_commands import command_name, normalize_playwright_commands
 
 logger = logging.getLogger(__name__)
@@ -100,7 +100,11 @@ async def _verify_setup_result_with_llm(
             initial_snapshot=initial_snapshot[:4000],
             post_snapshot=post_snapshot[:5000],
         )
-        resp = await llm.ainvoke([HumanMessage(content=prompt)])
+        resp = await ainvoke_with_timeout(
+            llm,
+            [HumanMessage(content=prompt)],
+            call_name="ui_login.verify_setup",
+        )
         content = resp.content if hasattr(resp, "content") else str(resp)
         parsed = _parse_json_object(str(content))
         verified = bool(parsed.get("verified"))
@@ -234,7 +238,11 @@ async def _recognize_dynamic_captcha_with_vision(
                 },
             ]
         )
-        resp = await llm.ainvoke([message])
+        resp = await ainvoke_with_timeout(
+            llm,
+            [message],
+            call_name="ui_login.recognize_dynamic_captcha",
+        )
         content = resp.content if hasattr(resp, "content") else str(resp)
         captcha = _extract_captcha_text_from_model_response(str(content))
         if captcha:
@@ -372,7 +380,11 @@ async def _extract_login_details_with_llm(
             login_instructions=login_instructions,
             target_url=target_url,
         )
-        resp = await llm.ainvoke([HumanMessage(content=prompt)])
+        resp = await ainvoke_with_timeout(
+            llm,
+            [HumanMessage(content=prompt)],
+            call_name="ui_login.parse_login_details",
+        )
         content = resp.content if hasattr(resp, "content") else str(resp)
         return _parse_login_details_response(str(content))
     except Exception as exc:
@@ -659,7 +671,11 @@ async def run(state: AgentState) -> AgentState:
             login_details=json.dumps(login_details, ensure_ascii=False),
             target_url=target_url,
         )
-        resp = await llm.ainvoke([HumanMessage(content=prompt)])
+        resp = await ainvoke_with_timeout(
+            llm,
+            [HumanMessage(content=prompt)],
+            call_name="ui_login.generate_setup_commands",
+        )
         content = resp.content if hasattr(resp, "content") else str(resp)
 
         # Parse LLM response into commands

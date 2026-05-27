@@ -4,7 +4,7 @@ from langchain_core.messages import HumanMessage
 
 from app.agent.prompts import HEALER_PROMPT
 from app.agent.state import AgentState
-from app.core.llm_gateway import llm_gateway
+from app.core.llm_gateway import ainvoke_with_timeout, llm_gateway
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,11 @@ async def run(state: AgentState) -> AgentState:
                 old_locator=old_locator,
                 new_dom="DOM structure not available in current context",
             )
-            resp = await llm.ainvoke([HumanMessage(content=prompt)])
+            resp = await ainvoke_with_timeout(
+                llm,
+                [HumanMessage(content=prompt)],
+                call_name="healer.repair_script",
+            )
             content = resp.content if hasattr(resp, "content") else str(resp)
             text = content.strip()
             if text.startswith("```python"):

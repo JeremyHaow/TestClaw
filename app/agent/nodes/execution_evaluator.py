@@ -19,7 +19,7 @@ from app.agent.state import AgentState
 from app.agent.strategy import STRATEGY_SCHEMA_SOURCE, strategy_summary
 from app.agent.tool_registry import install_tool_context, record_tool_call
 from app.config import settings
-from app.core.llm_gateway import llm_gateway
+from app.core.llm_gateway import ainvoke_with_timeout, llm_gateway
 from app.core.redaction import redact_sensitive_data
 
 logger = logging.getLogger(__name__)
@@ -462,7 +462,11 @@ async def _model_decision(
             )[:3000],
             allowed_actions=", ".join(allowed_actions),
         )
-        resp = await llm.ainvoke([HumanMessage(content=prompt)])
+        resp = await ainvoke_with_timeout(
+            llm,
+            [HumanMessage(content=prompt)],
+            call_name="execution_evaluator.evaluate_evidence",
+        )
         content = resp.content if hasattr(resp, "content") else str(resp)
         parsed = _parse_json_object(str(content))
         return (parsed or None), None

@@ -14,7 +14,7 @@ from app.agent.prompts import UI_EXECUTION_CONTEXT_PROMPT
 from app.agent.state import AgentState
 from app.agent.tool_registry import install_tool_context, record_tool_call, summarize_tool_calls
 from app.config import settings
-from app.core.llm_gateway import llm_gateway
+from app.core.llm_gateway import ainvoke_with_timeout, llm_gateway
 from app.tools.playwright_commands import (
     command_name,
     normalize_playwright_commands,
@@ -337,7 +337,11 @@ async def _analyze_ui_execution_context(state: AgentState, ui_cases: list[dict])
                 default=str,
             )[:8000],
         )
-        resp = await llm.ainvoke([HumanMessage(content=prompt)])
+        resp = await ainvoke_with_timeout(
+            llm,
+            [HumanMessage(content=prompt)],
+            call_name="ui_runner.plan_execution_context",
+        )
         content = resp.content if hasattr(resp, "content") else str(resp)
         parsed = _parse_json_object(str(content))
         raw_decisions = parsed.get("decisions")
