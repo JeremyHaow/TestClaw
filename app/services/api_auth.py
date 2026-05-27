@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse, urljoin
@@ -746,6 +747,55 @@ def _credential_for_field(field_name: str, credentials: dict[str, str]) -> str |
     return None
 
 
+_CREDENTIAL_PLACEHOLDER_RE = re.compile(
+    r"\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}|\$\{\s*([A-Za-z0-9_.-]+)\s*\}"
+)
+
+
+def _credential_for_placeholder(name: str, credentials: dict[str, str]) -> str | None:
+    normalized = _normalize_name(name)
+    direct_aliases = {
+        "user": "username",
+        "name": "username",
+        "username": "username",
+        "account": "username",
+        "password": "password",
+        "passwd": "password",
+        "pwd": "password",
+        "captcha": "captcha",
+        "code": "captcha",
+        "tenant": "tenant",
+        "tenantid": "tenant",
+        "csrf": "csrf",
+        "csrftoken": "csrf",
+        "xsrf": "csrf",
+        "xsrftoken": "csrf",
+    }
+    direct_key = direct_aliases.get(normalized)
+    if direct_key and credentials.get(direct_key):
+        return credentials[direct_key]
+    return _credential_for_field(name, credentials)
+
+
+def _replace_credential_placeholders(value: Any, credentials: dict[str, str]) -> Any:
+    if not credentials:
+        return value
+    if isinstance(value, str):
+        def replace(match: re.Match[str]) -> str:
+            placeholder = match.group(1) or match.group(2) or ""
+            return _credential_for_placeholder(placeholder, credentials) or match.group(0)
+
+        return _CREDENTIAL_PLACEHOLDER_RE.sub(replace, value)
+    if isinstance(value, list):
+        return [_replace_credential_placeholders(item, credentials) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _replace_credential_placeholders(item, credentials)
+            for key, item in value.items()
+        }
+    return value
+
+
 def _input_key_for_field(field_name: str) -> str:
     normalized = _normalize_name(field_name)
     if any(
@@ -811,10 +861,10 @@ def build_login_body(
     config: dict[str, Any], login_endpoint: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     body = config.get("body")
-    if isinstance(body, dict) and body:
-        return body
-
     credentials = _simple_credentials(config)
+    if isinstance(body, dict) and body:
+        return _replace_credential_placeholders(body, credentials)
+
     if not credentials:
         return body if isinstance(body, dict) else {}
 
@@ -999,7 +1049,10 @@ async def fetch_captcha_context(
             next_action="填写 Base URL，或把验证码 URL 改成完整 http(s) 地址。",
         )
 
-    request_headers = normalize_headers(config_data.get("headers"))
+    credentials = _simple_credentials(config_data)
+    request_headers = normalize_headers(
+        _replace_credential_placeholders(config_data.get("headers"), credentials)
+    )
     try:
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
             response = await client.get(captcha_url, headers=request_headers or None)
@@ -1129,7 +1182,10 @@ async def resolve_auto_auth_headers(
         endpoint_content_type = login_endpoint.get("request_body_content_type")
         content_type = "form" if "form" in str(endpoint_content_type or "").lower() else "json"
     content_type = content_type or "json"
-    request_headers = normalize_headers(config_data.get("headers"))
+    credentials = _simple_credentials(config_data)
+    request_headers = normalize_headers(
+        _replace_credential_placeholders(config_data.get("headers"), credentials)
+    )
     request_body = build_login_body(config_data, login_endpoint)
     missing_fields = missing_required_body_fields(request_body, login_endpoint)
     if missing_fields:

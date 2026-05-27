@@ -693,6 +693,7 @@ if captcha_required and not captcha.captcha_text:
 - A successful auto-login injects resolved `auth_headers` into the worker state. A runtime `auth_config` may also be passed to the worker only for refresh/re-acquire, but it must not be included in `Task.execution_log` or tool-call evidence.
 - Manual Token/Header is the primary simple path. `auth_config` can supplement it with "refresh on expiry" credentials rather than replacing the manual header path.
 - When `auth_config.body` is omitted, build the login body from `username`, `password`, `captcha`, and `tenant`, mapping onto the login endpoint schema fields when available.
+- When `auth_config.body` or `auth_config.headers` contains credential placeholders such as `{{username}}`, `${password}`, `${csrf}`, or `{{ tenantId }}`, replace them from `auth_credentials`/`auth_config` before sending login or captcha requests. Unknown placeholders stay unchanged and must not be treated as supplied credentials.
 - Relative `login_url` values are resolved against the run target/base URL; absolute `http(s)` URLs are used as-is.
 - When `login_url` is omitted, infer it from OpenAPI login/auth/token endpoints when possible.
 - Login inference must be credential-aware and schema-driven: prefer simple account-password endpoints such as `/login`, `/auth/login`, `/user/login`, or `/system/login`; prefer schemas/parameters with username/account/loginName/userName plus password/pwd fields; and penalize specialized markers such as `xcx`, `sms`, `email`, `wechat`, `oauth`, `sso`, `refresh`, `logout`, `register`, and `captcha` when their required fields cannot be supplied from `auth_config` or `auth_credentials`.
@@ -708,6 +709,7 @@ if captcha_required and not captcha.captcha_text:
 - Auth-required API + auto auth login returns 4xx/5xx -> preflight is blocked and create run returns `400`.
 - Auth-required API + auto auth login returns HTTP 200 with `{"code":500,"msg":"Password input error","data":null}` -> preflight is blocked as login/credential failure and must not suggest `token_path`.
 - Auth-required API + OpenAPI lists `/xcxLogin`, `/smsLogin`, `/emailLogin`, and `/login` + username/password credentials -> inferred login URL is `/login`; preflight must not submit to a specialized endpoint requiring unsupplied fields such as `xcxCode`, `smsCode`, or `emailCode`.
+- Auth-required API + `auth_config.body={"username":"{{username}}","password":"${password}"}` + supplied credentials -> login request sends concrete credential values, not literal placeholders.
 - Auth-required API + auto auth succeeds but `token_path` is missing -> preflight is blocked and create run returns `400`.
 - Auth-required API + auto auth succeeds -> preflight reports `auth_resolved=true`, create run injects `Authorization: Bearer <token>`.
 - Non-auth API + auto auth fails -> warn only; do not block the run solely for optional auth failure.
@@ -716,6 +718,7 @@ if captcha_required and not captcha.captcha_text:
 ### 5. Good/Base/Bad Cases
 
 - Good: user provides `/auth/login`, login JSON body, and `data.token`; preflight proves the token can be acquired and the worker receives an Authorization header.
+- Good: user provides credentials once and references them from custom login headers/body with placeholders; auto-login resolves those templates before the request while still redacting secrets from responses/logs.
 - Good: user provides username/password and the OpenAPI has both `/login` and specialized mini-program/SMS/email login variants; inference selects the simple password-login schema and maps credentials to fields such as `loginName`/`pwd`.
 - Good: user provides a current token plus username/password/captcha/tenant; the runner refreshes after a 401/403 and retries one affected request.
 - Base: user provides a direct Bearer token or API key header; preflight treats it as ready without attempting auto-login.
@@ -729,6 +732,7 @@ if captcha_required and not captcha.captcha_text:
 - Regression: HTTP 200 application-level login failure is classified before token extraction and does not suggest `token_path`.
 - Regression: true success-looking token-less login responses still ask for `token_path`.
 - Regression: common nested/cased token fields such as `data.Authorization` are extracted without leaking the token.
+- Regression: login body/header credential placeholders are replaced before the login request and no resolved credential/token is returned in preflight JSON.
 - Regression: login inference with `/xcxLogin`, `/smsLogin`, `/emailLogin`, and `/login` chooses `/login` for username/password credentials.
 - Create run: protected OpenAPI without token/header/auto-auth returns `400`.
 - Create run: auto-login success dispatches the worker with resolved `auth_headers`.

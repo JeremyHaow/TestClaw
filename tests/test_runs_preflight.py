@@ -490,6 +490,75 @@ def test_run_preflight_auto_auth_resolves_token_without_returning_secret(monkeyp
     assert "login-secret" not in json.dumps(body)
 
 
+def test_run_preflight_auto_auth_replaces_credential_placeholders(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        headers = {}
+
+        def json(self) -> dict:
+            return {"data": {"token": "login-secret"}}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setattr(api_auth.httpx, "AsyncClient", FakeAsyncClient)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": json.dumps(_auth_required_openapi()),
+                "test_type": "api",
+                "auth_credentials": {
+                    "username": "admin",
+                    "password": "secret",
+                    "csrf": "csrf-secret",
+                },
+                "auth_config": {
+                    "enabled": True,
+                    "login_url": "/auth/login",
+                    "headers": {
+                        "X-CSRF": "${csrf}",
+                        "X-Account": "{{ username }}",
+                    },
+                    "body": {
+                        "username": "{{username}}",
+                        "password": "${password}",
+                    },
+                    "token_path": "data.token",
+                },
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["url"] == "https://api.example.test/auth/login"
+    assert calls[0]["headers"]["X-CSRF"] == "csrf-secret"
+    assert calls[0]["headers"]["X-Account"] == "admin"
+    assert calls[0]["json"] == {"username": "admin", "password": "secret"}
+    assert calls[1]["headers"] == {"Authorization": "Bearer login-secret"}
+    body = response.json()
+    assert body["auth_resolved"] is True
+    serialized = json.dumps(body)
+    assert "login-secret" not in serialized
+    assert "csrf-secret" not in serialized
+
+
 def test_run_preflight_api_dynamic_captcha_fetches_context_without_ocr(monkeypatch) -> None:
     calls: list[tuple[str, str]] = []
 
