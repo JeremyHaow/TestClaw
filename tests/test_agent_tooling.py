@@ -3879,6 +3879,146 @@ async def test_api_runner_executes_safe_write_agent_action_crud_chain(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_api_runner_accepts_equivalent_safe_write_gate_terms(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+            self.text = json.dumps(payload)
+            self.content = self.text.encode()
+
+        def json(self) -> dict:
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            if method == "POST":
+                assert kwargs["json"]["brandName"].startswith("TestClaw_Brand_")
+                return FakeResponse({"code": 200, "data": {"id": 88, **kwargs["json"]}})
+            if method == "GET" and url.endswith("/itemBrand/list"):
+                return FakeResponse({"code": 200, "rows": [{"id": 88, "brandName": "TestClaw_Brand_88"}]})
+            if method == "GET" and url.endswith("/itemBrand/88"):
+                return FakeResponse({"code": 200, "data": {"id": 88, "brandName": "TestClaw_Brand_88"}})
+            if method == "PUT":
+                assert kwargs["json"]["brandId"] == "88"
+                return FakeResponse({"code": 200, "data": kwargs["json"]})
+            if method == "DELETE" and url.endswith("/itemBrand/88"):
+                return FakeResponse({"code": 200, "data": None})
+            return FakeResponse({"code": 404})
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "api_execution_policy": "write_allowed",
+            "parsed_api_schema": [
+                {"method": "POST", "path": "/itemBrand", "response_status": "200"},
+                {"method": "GET", "path": "/itemBrand/list", "response_status": "200"},
+                {
+                    "method": "GET",
+                    "path": "/itemBrand/{id}",
+                    "path_params": [{"name": "id", "schema": {"type": "integer"}}],
+                    "response_status": "200",
+                },
+                {"method": "PUT", "path": "/itemBrand", "response_status": "200"},
+                {
+                    "method": "DELETE",
+                    "path": "/itemBrand/{id}",
+                    "path_params": [{"name": "id", "schema": {"type": "integer"}}],
+                    "response_status": "200",
+                },
+            ],
+            "agent_strategy_decision": {
+                "source": "llm",
+                "intent": "api_focused_endpoints",
+                "coverage_scope": "focused_documented_endpoints",
+                "method_policy": {"allowed_methods": ["GET", "POST", "PUT", "DELETE"], "write_allowed": True},
+                "endpoint_selection": {"source": "model_focus", "include": []},
+                "tool_plan": [
+                    {
+                        "tool_name": "api.safe_write_gate",
+                        "inputs": {
+                            "endpoint": "/itemBrand",
+                            "method": "POST",
+                            "data_prefix": "TestClaw_",
+                        },
+                        "safety_constraints": ["data_isolation", "cleanup_required"],
+                    },
+                    {
+                        "tool_name": "api.http_request",
+                        "inputs": {
+                            "method": "POST",
+                            "path": "/itemBrand",
+                            "body": {"brandName": "TestClaw_Brand_88"},
+                        },
+                        "safety_constraints": ["use_unique_prefix"],
+                    },
+                    {
+                        "tool_name": "api.http_request",
+                        "inputs": {
+                            "method": "GET",
+                            "path": "/itemBrand/list",
+                            "params": {"brandName": "TestClaw_Brand_88"},
+                        },
+                        "safety_constraints": ["read_only"],
+                    },
+                    {
+                        "tool_name": "api.http_request",
+                        "inputs": {"method": "GET", "path": "/itemBrand/{id}", "path_params": {"id": "<id_from_post>"}},
+                        "safety_constraints": ["read_only"],
+                    },
+                    {
+                        "tool_name": "api.http_request",
+                        "inputs": {
+                            "method": "PUT",
+                            "path": "/itemBrand",
+                            "body": {"brandId": "<id_from_post>", "brandName": "TestClaw_Brand_88_updated"},
+                        },
+                        "safety_constraints": ["use_unique_prefix"],
+                    },
+                    {
+                        "tool_name": "api.http_request",
+                        "inputs": {
+                            "method": "DELETE",
+                            "path": "/itemBrand/{id}",
+                            "path_params": {"id": "<id_from_post>"},
+                        },
+                        "safety_constraints": ["cleanup_test_data"],
+                    },
+                ],
+            },
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+
+    assert [call["method"] for call in calls] == ["POST", "GET", "GET", "PUT", "DELETE"]
+    assert api_result["request_selection"]["source"] == api_runner.AGENT_ACTION_HTTP_REQUEST_SOURCE
+    assert api_result["executed"] == 5
+    assert api_result["passed"] == 5
+    assert api_result["failed"] == 0
+    assert api_result["skipped"] == 0
+
+
+@pytest.mark.asyncio
 async def test_api_runner_synthesizes_safe_crud_actions_when_model_falls_back_to_read_only(monkeypatch) -> None:
     calls = []
 

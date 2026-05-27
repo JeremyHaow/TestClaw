@@ -64,6 +64,30 @@ SAFE_WRITE_BLOCK_REASON = (
 AGENT_ACTION_HTTP_REQUEST_SOURCE = "agent_action_http_requests"
 CRUD_SKILL_BLOCK_SKIP_TYPE = "crud_skill_blocked"
 BLOCKING_API_SKIP_TYPES = {SAFE_WRITE_BLOCK_SKIP_TYPE, CRUD_SKILL_BLOCK_SKIP_TYPE}
+SAFE_WRITE_GATE_CONFIRM_MARKERS = (
+    "confirm",
+    "test_env",
+    "test_environment",
+    "pre_call_check",
+    "unique_prefix",
+    "data_prefix",
+    "testclaw",
+    "data_isolation",
+    "cleanup_required",
+    "require_cleanup",
+)
+SAFE_WRITE_ACTION_ISOLATION_MARKERS = (
+    "unique_prefix",
+    "use_unique_prefix",
+    "data_prefix",
+    "testclaw",
+    "test_data",
+    "disposable",
+    "data_isolation",
+    "cleanup",
+    "cleanup_required",
+    "require_cleanup",
+)
 _NON_MUTATING_WRITE_MARKERS = (
     "login",
     "signin",
@@ -374,6 +398,31 @@ def _is_high_risk_write_descriptor(text: str) -> bool:
     return any(marker.lower() in text for marker in _HIGH_RISK_WRITE_MARKERS)
 
 
+def _safe_write_context_text(*values) -> str:
+    parts: list[str] = []
+    for value in values:
+        if isinstance(value, dict):
+            parts.extend(str(item) for item in value.get("safety_constraints") or [])
+            for key in (
+                "inputs",
+                "body",
+                "params",
+                "path_params",
+                "expected_observation",
+                "reason",
+                "title",
+                "policy",
+                "source",
+            ):
+                if key in value:
+                    parts.append(json.dumps(value.get(key), ensure_ascii=False, default=str))
+        elif isinstance(value, (list, tuple, set)):
+            parts.extend(str(item) for item in value)
+        elif value is not None:
+            parts.append(str(value))
+    return " ".join(parts).lower()
+
+
 def _safe_write_skip_reason(
     *,
     method: str,
@@ -419,22 +468,29 @@ def _safe_write_skip_reason(
 def _safe_write_case_approved(case: dict | None, *, method: str) -> bool:
     if not isinstance(case, dict) or not case.get("safe_write_approved"):
         return False
-    constraints = " ".join(str(item).lower() for item in (case.get("safety_constraints") or []))
-    if "write_allowed" not in constraints:
+    safety_text = _safe_write_context_text(case)
+    policy = str(case.get("policy") or "").lower()
+    if policy != "write_allowed" and "write_allowed" not in safety_text:
         return False
     has_guardrail = any(
-        marker in constraints
+        marker in safety_text
         for marker in (
             "confirm_test_env",
             "confirm_test_environment",
             "safe_write_gate",
             "unique_prefix",
+            "use_unique_prefix",
+            "data_prefix",
+            "testclaw",
+            "data_isolation",
+            "cleanup",
             "require_cleanup",
+            "cleanup_required",
         )
     )
     if not has_guardrail:
         return False
-    if method == "DELETE" and "cleanup" not in constraints:
+    if method == "DELETE" and "cleanup" not in safety_text:
         return False
     return True
 
@@ -867,13 +923,8 @@ def _has_confirmed_safe_write_gate(actions: list[dict] | None) -> bool:
             continue
         if not action.get("allowed") or str(action.get("policy") or "") != "write_allowed":
             continue
-        text = " ".join(
-            [
-                *(_action_constraints(action)),
-                json.dumps(action.get("inputs") or {}, ensure_ascii=False, default=str),
-            ]
-        ).lower()
-        if "confirm" in text or "test_env" in text or "unique_prefix" in text:
+        text = _safe_write_context_text(action)
+        if any(marker in text for marker in SAFE_WRITE_GATE_CONFIRM_MARKERS):
             return True
     return False
 
@@ -919,16 +970,18 @@ def _action_safe_write_approved(
         return False
     if not action.get("allowed") or str(action.get("policy") or "") != "write_allowed":
         return False
-    constraints = set(_action_constraints(action))
-    if "write_allowed" not in {item.lower() for item in constraints}:
+    safety_text = _safe_write_context_text(action)
+    if "write_allowed" not in safety_text:
         return False
-    if not safe_write_gate_confirmed and not any("confirm" in item.lower() for item in constraints):
+    if not safe_write_gate_confirmed and not any(
+        marker in safety_text for marker in SAFE_WRITE_GATE_CONFIRM_MARKERS
+    ):
         return False
-    if method == "DELETE" and not any("cleanup" in item.lower() for item in constraints):
+    if method == "DELETE" and "cleanup" not in safety_text:
         return False
     return any(
-        marker in " ".join(item.lower() for item in constraints)
-        for marker in ("unique_prefix", "cleanup", "test_env")
+        marker in safety_text
+        for marker in SAFE_WRITE_ACTION_ISOLATION_MARKERS
     )
 
 
@@ -1406,6 +1459,9 @@ def _build_agent_action_test_requests(
         case_context = {
             "safe_write_approved": safe_write_approved,
             "safety_constraints": constraints,
+            "policy": action.get("policy"),
+            "inputs": inputs,
+            "expected_observation": action.get("expected_observation"),
             "title": action.get("reason") or action.get("expected_observation"),
         }
         if method in WRITE_API_METHODS:
