@@ -30,6 +30,12 @@ SUPPORTED_PLAYWRIGHT_COMMANDS = {
 
 _WAIT_COMMANDS = {"wait", "sleep", "pause", "timeout"}
 _ASSERT_COMMANDS = {"assert", "expect"}
+_ASSERT_VISIBLE_COMMANDS = {
+    "assert_visible",
+    "assert-visible",
+    "assertvisible",
+    "ui.assert_visible",
+}
 _SNAPSHOT_REF_TOKEN = re.compile(r"(?P<quote>['\"]?)\[ref=(?P<ref>[A-Za-z0-9_-]+)\](?P=quote)")
 _VIEWPORT_ALIASES = {
     "set_viewport_size",
@@ -67,6 +73,19 @@ def _extract_snapshot_assertion(command: str) -> str | None:
     if not match:
         return None
     return _strip_wrapping_quotes(match.group(1))
+
+
+def _extract_visible_assertion(command: str) -> str | None:
+    parts = command.split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+    target = _strip_wrapping_quotes(parts[1]).strip()
+    if target.lower().startswith("text="):
+        target = target.split("=", 1)[1].strip()
+        target = _strip_wrapping_quotes(target)
+    if len(target) >= 2 and target[0] == "/" and target[-1] == "/":
+        target = target[1:-1]
+    return target or None
 
 
 def _normalize_snapshot_ref_tokens(command: str) -> str:
@@ -181,6 +200,18 @@ def normalize_playwright_command(command: str, include_unsupported: bool = False
                 "kind": "assert_snapshot_contains",
                 "expected": expected,
                 "normalization": "Converted unsupported assertion command to snapshot evaluation.",
+            }
+        ]
+
+    if name in _ASSERT_VISIBLE_COMMANDS:
+        expected = _extract_visible_assertion(normalized)
+        return [
+            {
+                "command": "snapshot",
+                "source_command": raw,
+                "kind": "assert_snapshot_contains",
+                "expected": expected,
+                "normalization": "Converted assert_visible pseudo-command to snapshot visibility assertion.",
             }
         ]
 

@@ -51,6 +51,8 @@ def test_playwright_command_normalizer_repairs_pseudo_commands_and_screenshot() 
             "pause",
             'assert snapshot contains "Dashboard"',
             'expect snapshot contains "Ready"',
+            'assert_visible "text=/Example Domain/"',
+            'ui.assert_visible "Learn more"',
             "screenshot shared.png",
             'run-code "await page.waitForTimeout(1000)"',
         ],
@@ -58,6 +60,8 @@ def test_playwright_command_normalizer_repairs_pseudo_commands_and_screenshot() 
     )
 
     assert [spec["command"] for spec in specs] == [
+        "snapshot",
+        "snapshot",
         "snapshot",
         "snapshot",
         "snapshot",
@@ -73,8 +77,12 @@ def test_playwright_command_normalizer_repairs_pseudo_commands_and_screenshot() 
     assert specs[3]["expected"] == "Dashboard"
     assert specs[4]["kind"] == "assert_snapshot_contains"
     assert specs[4]["expected"] == "Ready"
-    assert specs[5]["kind"] == "screenshot"
-    assert specs[6]["kind"] == "command"
+    assert specs[5]["kind"] == "assert_snapshot_contains"
+    assert specs[5]["expected"] == "Example Domain"
+    assert specs[6]["kind"] == "assert_snapshot_contains"
+    assert specs[6]["expected"] == "Learn more"
+    assert specs[7]["kind"] == "screenshot"
+    assert specs[8]["kind"] == "command"
 
 
 def test_playwright_command_normalizer_converts_snapshot_refs_for_cli_targets() -> None:
