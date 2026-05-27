@@ -1,3 +1,4 @@
+import json
 import re
 
 
@@ -37,6 +38,10 @@ _ASSERT_VISIBLE_COMMANDS = {
     "ui.assert_visible",
 }
 _SNAPSHOT_REF_TOKEN = re.compile(r"(?P<quote>['\"]?)\[ref=(?P<ref>[A-Za-z0-9_-]+)\](?P=quote)")
+_RUN_CODE_REF_LOCATOR = re.compile(
+    r"page\.locator\(\s*['\"]\[ref=[A-Za-z0-9_-]+\]['\"]\s*\)",
+    re.I,
+)
 _VIEWPORT_ALIASES = {
     "set_viewport_size",
     "set-viewport-size",
@@ -154,16 +159,52 @@ def _normalize_viewport_command(raw: str, normalized: str, name: str) -> dict | 
     return None
 
 
-def _normalize_run_code_signature(command: str) -> str:
+def _run_code_body(command: str) -> str | None:
     if command_name(command) != "run-code":
-        return command
-    return re.sub(
+        return None
+    parts = strip_playwright_cli_prefix(command).split(maxsplit=1)
+    if len(parts) < 2:
+        return ""
+    return _strip_wrapping_quotes(parts[1])
+
+
+def _quote_run_code_body(body: str) -> str:
+    return json.dumps(body, ensure_ascii=False)
+
+
+def _run_code_is_diagnostic(body: str) -> bool:
+    lowered = body.lower()
+    return "console.log" in lowered and not any(
+        token in lowered
+        for token in (
+            "throw ",
+            "throw new ",
+            "expect(",
+            "assert(",
+            "page.click",
+            ".click(",
+            ".fill(",
+            "page.goto",
+        )
+    )
+
+
+def _normalize_run_code_signature(command: str) -> tuple[str, bool]:
+    body = _run_code_body(command)
+    if body is None:
+        return command, False
+
+    body = re.sub(
         r"async\s*\(\s*\{\s*page\s*\}\s*\)\s*=>",
         "async page =>",
-        command,
+        body,
         count=1,
         flags=re.I,
     )
+    advisory = _run_code_is_diagnostic(body)
+    if "=>" not in body and not body.lstrip().startswith("function"):
+        body = f"async page => {{ {body} }}"
+    return f"run-code {_quote_run_code_body(body)}", advisory
 
 
 def normalize_playwright_command(command: str, include_unsupported: bool = False) -> list[dict]:
@@ -239,6 +280,22 @@ def normalize_playwright_command(command: str, include_unsupported: bool = False
             }
         ]
 
+    if name == "run-code":
+        body = _run_code_body(normalized) or ""
+        if _RUN_CODE_REF_LOCATOR.search(body) and _run_code_is_diagnostic(body):
+            return [
+                {
+                    "command": "snapshot",
+                    "source_command": raw,
+                    "kind": "normalized",
+                    "advisory": True,
+                    "normalization": (
+                        "Converted diagnostic run-code using transient snapshot refs "
+                        "to snapshot evidence."
+                    ),
+                }
+            ]
+
     if name == "screenshot":
         return [
             {
@@ -249,14 +306,22 @@ def normalize_playwright_command(command: str, include_unsupported: bool = False
             }
         ]
 
-    executable = _normalize_snapshot_ref_tokens(normalized)
-    executable = _normalize_run_code_signature(executable)
+    if name == "run-code":
+        executable, advisory = _normalize_run_code_signature(normalized)
+    else:
+        executable = _normalize_snapshot_ref_tokens(normalized)
+        advisory = False
     spec = {"command": executable, "source_command": raw, "kind": "command"}
+    if advisory:
+        spec["advisory"] = True
     if executable != normalized:
         normalizations = []
-        if executable != _normalize_snapshot_ref_tokens(normalized):
+        ref_normalized = _normalize_snapshot_ref_tokens(normalized)
+        if name == "run-code":
+            normalizations.append("Converted run-code JavaScript snippet to playwright-cli page function.")
+        elif executable != ref_normalized:
             normalizations.append("Converted run-code ({ page }) signature to playwright-cli page argument.")
-        if _normalize_snapshot_ref_tokens(normalized) != normalized:
+        if name != "run-code" and ref_normalized != normalized:
             normalizations.append("Converted snapshot [ref=...] token to playwright-cli element ref.")
         spec["normalization"] = " ".join(normalizations)
     return [spec]

@@ -68,7 +68,7 @@ def test_playwright_command_normalizer_repairs_pseudo_commands_and_screenshot() 
         "snapshot",
         "snapshot",
         "screenshot",
-        'run-code "await page.waitForTimeout(1000)"',
+        'run-code "async page => { await page.waitForTimeout(1000) }"',
     ]
     assert specs[0]["kind"] == "normalized"
     assert specs[1]["kind"] == "normalized"
@@ -83,6 +83,7 @@ def test_playwright_command_normalizer_repairs_pseudo_commands_and_screenshot() 
     assert specs[6]["expected"] == "Learn more"
     assert specs[7]["kind"] == "screenshot"
     assert specs[8]["kind"] == "command"
+    assert "page function" in specs[8]["normalization"]
 
 
 def test_playwright_command_normalizer_converts_snapshot_refs_for_cli_targets() -> None:
@@ -133,7 +134,29 @@ def test_playwright_command_normalizer_repairs_run_code_page_signature() -> None
     assert specs[0]["command"] == (
         "run-code \"async page => { await page.waitForLoadState('domcontentloaded'); }\""
     )
-    assert "page argument" in specs[0]["normalization"]
+    assert "page function" in specs[0]["normalization"]
+
+
+def test_playwright_command_normalizer_downgrades_transient_ref_diagnostics() -> None:
+    specs = normalize_playwright_commands(
+        [
+            (
+                "run-code \"const link = await page.locator('[ref=e6]'); "
+                "console.log('Cursor:', await link.evaluate(el => getComputedStyle(el).cursor));\""
+            ),
+            "run-code \"console.log('Console error count from snapshot matches:', 1);\"",
+        ],
+        include_unsupported=True,
+    )
+
+    assert specs[0]["command"] == "snapshot"
+    assert specs[0]["kind"] == "normalized"
+    assert specs[0]["advisory"] is True
+    assert "transient snapshot refs" in specs[0]["normalization"]
+    assert specs[1]["command"] == (
+        "run-code \"async page => { console.log('Console error count from snapshot matches:', 1); }\""
+    )
+    assert specs[1]["advisory"] is True
 
 
 def test_run_creation_uses_explicit_setup_instructions_without_objective_inference() -> None:
