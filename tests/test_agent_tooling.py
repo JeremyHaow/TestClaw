@@ -20,6 +20,8 @@ from app.agent.nodes import (
 )
 from app.agent.nodes.ui_runner import _build_ui_case_batches
 from app.agent.action_runtime import (
+    append_api_result_observations,
+    append_ui_result_observations,
     validate_agent_action_plan,
     validate_and_record_agent_action_plan,
 )
@@ -39,6 +41,7 @@ from app.services.knowledge_service import KnowledgeService
 from app.services.agent_planning import normalize_planner_run_payload
 from app.services.vector_store import DatabaseKnowledgeVectorStore, MilvusKnowledgeVectorStore
 from app.tools.mock_data import generate_mock_json_body
+from app.tools.playwright_skill import compile_playwright_ui_action, compile_playwright_ui_actions
 
 
 def test_tool_registry_selects_api_ui_and_reporting_skills() -> None:
@@ -518,6 +521,124 @@ def test_agent_action_runtime_blocks_invalid_tool_method_and_path() -> None:
     )
 
 
+def test_agent_execution_protocol_maps_api_results_without_secret_leak() -> None:
+    state: dict = {}
+
+    observations = append_api_result_observations(
+        state,
+        {
+            "results": [
+                {
+                    "label": "GET /me",
+                    "method": "GET",
+                    "url": "https://api.example.test/me",
+                    "status_code": 200,
+                    "elapsed_ms": 12.3,
+                    "body": {"name": "Ada", "access_token": "secret-token"},
+                    "request_headers": {"Authorization": REDACTED_VALUE},
+                    "request_body": None,
+                    "passed": True,
+                    "category": "SMOKE",
+                    "assertion_results": [{"type": "status_code", "passed": True}],
+                    "http_executed": True,
+                },
+                {
+                    "label": "GET /admin",
+                    "method": "GET",
+                    "url": "https://api.example.test/admin",
+                    "status_code": 403,
+                    "elapsed_ms": 8,
+                    "body": {"message": "Forbidden"},
+                    "passed": False,
+                    "category": "SMOKE",
+                    "failure_type": "auth_failure",
+                    "failure_reason": "Token lacks scope.",
+                    "assertion_results": [{"type": "status_code", "passed": False}],
+                    "http_executed": True,
+                },
+            ]
+        },
+        stage="api_runner",
+    )
+
+    assert len(observations) == 2
+    assert observations[0]["status"] == "success"
+    assert observations[1]["failure_type"] == "auth_failure"
+    assert observations[1]["outcome"] == "failed"
+    assert state["agent_protocol_summary"]["observation_total"] == 2
+    assert state["agent_protocol_summary"]["by_failure_type"]["auth_failure"] == 1
+    assert {item["kind"] for item in state["agent_evidence"]} == {
+        "api_response",
+        "api_assertion",
+    }
+    assert "secret-token" not in json.dumps(state, ensure_ascii=False)
+
+
+def test_agent_execution_protocol_maps_ui_results_and_evidence() -> None:
+    state: dict = {}
+
+    observations = append_ui_result_observations(
+        state,
+        {
+            "commands": [
+                {
+                    "case_index": 0,
+                    "case_title": "Open dashboard",
+                    "command": "snapshot",
+                    "normalized_command": "snapshot",
+                    "status": "executed",
+                    "status_code": 0,
+                    "stdout": "- button \"Continue\" [ref=e5]",
+                    "stderr": "",
+                    "passed": True,
+                },
+                {
+                    "case_index": 0,
+                    "case_title": "Open dashboard",
+                    "command": "click \"Missing\"",
+                    "normalized_command": "click \"Missing\"",
+                    "status": "executed",
+                    "status_code": 1,
+                    "stdout": "",
+                    "stderr": "locator not found",
+                    "passed": False,
+                    "screenshot": "/tmp/failure.png",
+                    "screenshot_evidence": {"label": "failure screenshot"},
+                },
+            ]
+        },
+        stage="ui_runner",
+    )
+
+    assert len(observations) == 2
+    assert observations[0]["status"] == "success"
+    assert observations[1]["failure_type"] == "ui_locator_missing"
+    assert observations[1]["tool_call_ids"]
+    assert state["agent_protocol_summary"]["by_layer"]["ui"] == 2
+    assert {item["kind"] for item in state["agent_evidence"]} == {
+        "ui_snapshot",
+        "ui_screenshot",
+    }
+
+
+def test_execution_log_payload_preserves_agent_protocol_records() -> None:
+    state = {
+        "agent_observations": [{"observation_id": "obs-1", "stage": "api_runner"}],
+        "agent_tool_calls": [{"tool_call_id": "tool-1", "tool_name": "api.http_request"}],
+        "agent_evidence": [{"evidence_id": "evidence-1", "kind": "api_response"}],
+        "agent_protocol_evaluations": [{"evaluation_id": "eval-1", "next_action": "report"}],
+        "agent_protocol_summary": {"observation_total": 1},
+    }
+
+    payload = build_execution_log_payload(state)
+
+    assert payload["agent_observations"][0]["observation_id"] == "obs-1"
+    assert payload["agent_tool_calls"][0]["tool_call_id"] == "tool-1"
+    assert payload["agent_evidence"][0]["evidence_id"] == "evidence-1"
+    assert payload["agent_protocol_evaluations"][0]["evaluation_id"] == "eval-1"
+    assert payload["agent_protocol_summary"]["observation_total"] == 1
+
+
 @pytest.mark.asyncio
 async def test_mission_planner_decomposes_complex_objective_and_persists_trace() -> None:
     state = await mission_planner.run(
@@ -711,48 +832,54 @@ async def test_execution_evaluator_does_not_continue_to_ui_after_api_replan_limi
 async def test_execution_evaluator_replans_ui_after_single_shallow_failure(monkeypatch) -> None:
     monkeypatch.setattr(execution_evaluator.settings, "AGENT_MAX_REPLAN_ATTEMPTS", 2)
 
-    state = await execution_evaluator.run(
-        {
-            "agent_execution_stage": "ui",
-            "test_type": "ui",
-            "input_type": "url",
-            "objective": "UI smoke",
-            "target_url": "https://app.example.test",
-            "ui_cases": [
-                {"title": "Click missing action", "playwright_commands": ["click \"Missing\""]}
+    initial_state = {
+        "agent_execution_stage": "ui",
+        "test_type": "ui",
+        "input_type": "url",
+        "objective": "UI smoke",
+        "target_url": "https://app.example.test",
+        "ui_cases": [
+            {"title": "Click missing action", "playwright_commands": ["click \"Missing\""]}
+        ],
+        "ui_execution_result": {
+            "total": 1,
+            "completed": 1,
+            "passed": 0,
+            "failed": 1,
+            "command_total": 1,
+            "command_completed": 1,
+            "command_failed": 1,
+            "screenshots": [],
+            "snapshot_texts": ["- button \"Real action\" [ref=e2]"],
+            "all_passed": False,
+            "complete": True,
+            "commands": [
+                {
+                    "case_index": 0,
+                    "case_title": "Click missing action",
+                    "command": "click \"Missing\"",
+                    "status_code": 1,
+                    "stderr": "locator not found",
+                    "passed": False,
+                }
             ],
-            "ui_execution_result": {
-                "total": 1,
-                "completed": 1,
-                "passed": 0,
-                "failed": 1,
-                "command_total": 1,
-                "command_completed": 1,
-                "command_failed": 1,
-                "screenshots": [],
-                "snapshot_texts": ["- button \"Real action\" [ref=e2]"],
-                "all_passed": False,
-                "complete": True,
-                "commands": [
-                    {
-                        "case_index": 0,
-                        "case_title": "Click missing action",
-                        "command": "click \"Missing\"",
-                        "status_code": 1,
-                        "stderr": "locator not found",
-                        "passed": False,
-                    }
-                ],
-            },
-            "workflow_steps": [],
-        }
-    )
+        },
+        "workflow_steps": [],
+    }
+    append_ui_result_observations(initial_state, initial_state["ui_execution_result"], stage="ui_runner")
+
+    state = await execution_evaluator.run(initial_state)
 
     assert state["agent_next_node"] == "ui_test_planner"
     assert state["evidence_evaluation"]["next_action"] == "replan_ui"
     assert state["agent_replan_counts"]["ui"] == 1
     assert state["ui_cases"] == []
     assert state["agent_attempt_history"][0]["stage"] == "ui"
+    assert state["agent_protocol_evaluations"][0]["next_action"] == "replan_ui"
+    assert state["agent_protocol_evaluations"][0]["failure_type"] == "ui_locator_missing"
+    assert state["evidence_evaluation"]["summary"]["agent_protocol_stage"]["failure_types"] == {
+        "ui_locator_missing": 1
+    }
 
 
 @pytest.mark.asyncio
@@ -1709,6 +1836,134 @@ def test_ui_runner_adds_smart_waits_after_actions() -> None:
     )
 
 
+def test_playwright_skill_compiles_structured_actions_and_blocks_run_code() -> None:
+    specs = compile_playwright_ui_actions(
+        [
+            {"type": "open", "url": "https://web.test"},
+            {"type": "click_ref", "ref": "e5", "reason": "Open menu"},
+            {"type": "fill_ref", "ref": "e6", "value": "admin"},
+            {"type": "assert_visible", "text": "Dashboard"},
+            {"type": "screenshot"},
+            {"type": "run_code", "code": "async page => await page.click('button')"},
+        ],
+        target_url="https://fallback.test",
+    )
+
+    assert [spec["agent_action_type"] for spec in specs] == [
+        "open",
+        "click_ref",
+        "fill_ref",
+        "assert_visible",
+        "screenshot",
+        "run_code",
+    ]
+    assert [spec["command"] for spec in specs[:5]] == [
+        "open https://web.test",
+        "click e5",
+        "fill e6 admin",
+        "snapshot",
+        "screenshot",
+    ]
+    assert specs[3]["kind"] == "assert_snapshot_contains"
+    assert specs[3]["expected"] == "Dashboard"
+    assert specs[4]["kind"] == "screenshot"
+    assert specs[5]["skip"] is True
+    assert specs[5]["blocked"] is True
+    assert specs[5]["risk"] == "high_risk"
+    assert "Blocked arbitrary code execution" in specs[5]["normalization"]
+
+
+def test_ui_runner_builds_structured_playwright_skill_batches() -> None:
+    batches = _build_ui_case_batches(
+        [
+            {
+                "title": "structured checkout",
+                "ui_actions": [
+                    {"type": "open"},
+                    {"type": "click_ref", "ref": "e2", "reason": "Open checkout"},
+                    {"type": "assert_visible", "text": "Checkout"},
+                    {"type": "run_code", "code": "async page => await page.click('button')"},
+                ],
+            }
+        ],
+        "https://web.test/checkout",
+    )
+
+    specs = batches[0]["commands"]
+    executable = [spec for spec in specs if not spec.get("skip")]
+    blocked = [spec for spec in specs if spec.get("blocked")]
+
+    assert executable[0]["command"] == "open https://web.test/checkout"
+    assert executable[0]["agent_action_type"] == "open"
+    assert executable[0]["transport"] == "playwright-cli"
+    assert any(
+        spec["command"] == "click e2"
+        and spec["agent_action_type"] == "click_ref"
+        and spec["agent_action"]["reason"] == "Open checkout"
+        for spec in executable
+    )
+    assert any(
+        spec["kind"] == "assert_snapshot_contains"
+        and spec["agent_action_type"] == "assert_visible"
+        and spec["expected"] == "Checkout"
+        for spec in executable
+    )
+    assert blocked[0]["agent_action_type"] == "run_code"
+    assert blocked[0]["risk"] == "high_risk"
+    assert any(spec.get("kind") == "screenshot" for spec in specs)
+
+
+def test_agent_execution_protocol_preserves_structured_ui_action_metadata() -> None:
+    state: dict = {}
+
+    observations = append_ui_result_observations(
+        state,
+        {
+            "commands": [
+                {
+                    "case_index": 0,
+                    "case_title": "structured checkout",
+                    "command": "structured click_ref: Open checkout",
+                    "normalized_command": "click e2",
+                    "status": "executed",
+                    "status_code": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "passed": True,
+                    "agent_action": {"type": "click_ref", "ref": "e2", "reason": "Open checkout"},
+                    "agent_action_type": "click_ref",
+                    "transport": "playwright-cli",
+                    "risk": "safe_ui_action",
+                },
+                {
+                    "case_index": 0,
+                    "case_title": "structured checkout",
+                    "command": "structured run_code",
+                    "normalized_command": None,
+                    "status": "blocked",
+                    "status_code": 1,
+                    "stdout": "",
+                    "stderr": "Blocked arbitrary code execution in structured Playwright action.",
+                    "passed": False,
+                    "agent_action": {"type": "run_code"},
+                    "agent_action_type": "run_code",
+                    "transport": "playwright-cli",
+                    "risk": "high_risk",
+                },
+            ]
+        },
+        stage="ui_runner",
+    )
+
+    assert observations[0]["status"] == "success"
+    assert observations[0]["inputs"]["agent_action_type"] == "click_ref"
+    assert observations[0]["metadata"]["agent_action"]["reason"] == "Open checkout"
+    assert observations[1]["status"] == "blocked"
+    assert observations[1]["failure_type"] == "ui_high_risk_action_blocked"
+    assert observations[1]["outcome"] == "blocked"
+    assert state["agent_protocol_summary"]["by_failure_type"]["ui_high_risk_action_blocked"] == 1
+
+
 def test_ui_runner_restores_authenticated_context_for_legacy_business_cases() -> None:
     batches = _build_ui_case_batches(
         [
@@ -1831,6 +2086,11 @@ async def test_api_runner_redacts_secret_response_values_from_legacy_execution_r
     assert "response-password-secret" not in dumped
     assert legacy_result["api_results"][0]["body"]["access_token"] == REDACTED_VALUE
     assert legacy_result["api_results"][0]["body"]["profile"]["password"] == REDACTED_VALUE
+    assert result["agent_observations"][0]["tool_name"] == "api.http_request"
+    assert result["agent_observations"][0]["status"] == "success"
+    assert result["agent_observations"][0]["evidence_ids"]
+    assert result["agent_protocol_summary"]["by_layer"]["api"] == 1
+    assert "response-token-secret" not in json.dumps(result["agent_evidence"], ensure_ascii=False)
 
 
 @pytest.mark.asyncio
@@ -1910,6 +2170,11 @@ async def test_api_runner_extracts_and_injects_dependencies_with_tool_calls(monk
     assert api_result["failed"] == 0
     assert calls[1]["headers"]["Authorization"] == "Bearer chain-token"
     assert {"api.http_request", "api.extract_value", "api.inject_dependency", "api.schema_assert"} <= tool_names
+    assert result["agent_protocol_summary"]["by_layer"]["api"] == 2
+    assert {observation["status"] for observation in result["agent_observations"]} == {"success"}
+    assert {
+        evidence["kind"] for evidence in result["agent_evidence"]
+    } >= {"api_response", "api_assertion"}
 
 
 @pytest.mark.asyncio

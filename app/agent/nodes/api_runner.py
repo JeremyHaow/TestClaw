@@ -16,6 +16,7 @@ from app.agent.api_scope import (
     validate_generated_api_cases,
 )
 from app.agent.action_runtime import (
+    append_api_result_observations,
     find_agent_action,
     record_agent_action_observation,
     validate_agent_action_plan,
@@ -3890,6 +3891,7 @@ async def run(state: AgentState) -> AgentState:
         http_executed_count=http_executed_count,
         execution_budget=execution_budget,
     )
+    append_api_result_observations(state, state.get("api_execution_result"), stage="api_runner")
     state["tool_summary"] = summarize_tool_calls(state.get("tool_calls"))
     artifacts = state.get("artifacts") or {}
     execution_config = artifacts.get("execution_config")

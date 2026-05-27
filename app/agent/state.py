@@ -56,6 +56,11 @@ class AgentState(TypedDict, total=False):
     agent_actions: list[dict] | None  # validated model-selected AgentAction records
     agent_action_observations: list[dict] | None  # validator/runtime observations for actions
     agent_action_diagnostics: list[dict] | None  # guardrail diagnostics from action validation
+    agent_tool_calls: list[dict] | None  # protocol-level tool calls
+    agent_observations: list[dict] | None  # protocol-level runtime observations
+    agent_evidence: list[dict] | None  # protocol-level evidence records
+    agent_protocol_evaluations: list[dict] | None  # protocol-level evaluator decisions
+    agent_protocol_summary: dict | None  # protocol aggregate counts
     evidence_evaluation: dict | None  # latest agent quality gate decision
     agent_evaluations: list[dict] | None  # bounded evaluation/replan history
     agent_attempt_history: list[dict] | None  # compact summaries of replaced attempts

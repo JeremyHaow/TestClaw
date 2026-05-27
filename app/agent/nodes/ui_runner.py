@@ -9,6 +9,7 @@ from urllib.parse import urljoin
 
 from langchain_core.messages import HumanMessage
 
+from app.agent.action_runtime import append_ui_result_observations
 from app.agent.progress import persist_progress
 from app.agent.prompts import UI_EXECUTION_CONTEXT_PROMPT
 from app.agent.state import AgentState
@@ -20,6 +21,7 @@ from app.tools.playwright_commands import (
     normalize_playwright_commands,
     strip_playwright_cli_prefix,
 )
+from app.tools.playwright_skill import compile_playwright_ui_actions
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +258,7 @@ def _command_payload_for_analysis(case: dict) -> dict:
         "expected": case.get("expected"),
         "playwright_commands": case.get("playwright_commands"),
         "raw_playwright_commands": case.get("raw_playwright_commands"),
+        "ui_actions": case.get("ui_actions"),
     }
 
 
@@ -760,21 +763,34 @@ def _build_ui_case_batches(
         has_authenticated_context = bool(authenticated_setup_commands)
         command_source = case.get("raw_playwright_commands") or case.get("playwright_commands") or []
         source_commands = [command for command in command_source if isinstance(command, str)]
+        structured_actions = case.get("ui_actions")
+        has_structured_actions = isinstance(structured_actions, list) and bool(structured_actions)
         authenticated_context_available = _case_should_use_authenticated_context(
             case,
             source_commands,
             has_authenticated_context,
         )
-        raw_commands = _case_raw_commands(case, target_url, authenticated_context_available)
-        if authenticated_context_available and authenticated_setup_commands:
-            if case.get("_testclaw_strip_preparation_steps") is False:
-                raw_commands = _strip_leading_navigation(raw_commands)
-            else:
-                raw_commands = _strip_redundant_login_setup_commands(raw_commands, target_url)
-            raw_commands = [*authenticated_setup_commands, *raw_commands]
-        normalized = normalize_playwright_commands(raw_commands, include_unsupported=True)
+        if has_structured_actions:
+            normalized = compile_playwright_ui_actions(structured_actions, target_url=target_url)
+            raw_commands = [str(spec.get("source_command") or spec.get("command") or "") for spec in normalized]
+            if authenticated_context_available and authenticated_setup_commands:
+                setup_specs = normalize_playwright_commands(
+                    authenticated_setup_commands,
+                    include_unsupported=True,
+                )
+                normalized = [*setup_specs, *normalized]
+                raw_commands = [*authenticated_setup_commands, *raw_commands]
+        else:
+            raw_commands = _case_raw_commands(case, target_url, authenticated_context_available)
+            if authenticated_context_available and authenticated_setup_commands:
+                if case.get("_testclaw_strip_preparation_steps") is False:
+                    raw_commands = _strip_leading_navigation(raw_commands)
+                else:
+                    raw_commands = _strip_redundant_login_setup_commands(raw_commands, target_url)
+                raw_commands = [*authenticated_setup_commands, *raw_commands]
+            normalized = normalize_playwright_commands(raw_commands, include_unsupported=True)
         normalized = _with_action_evidence_screenshots(normalized)
-        if not any(not spec.get("skip") for spec in normalized):
+        if not has_structured_actions and not any(not spec.get("skip") for spec in normalized):
             normalized = normalize_playwright_commands(
                 [f"open {target_url}", "snapshot", "screenshot"],
                 include_unsupported=True,
@@ -913,13 +929,23 @@ async def _execute_ui_case_batches(
                 )
 
             if spec.get("skip"):
+                blocked = bool(spec.get("blocked"))
+                entry_status = "blocked" if blocked else "skipped"
+                entry_status_code = 1 if blocked else 0
                 record_tool_call(
                     state,
                     tool_name="ui.playwright_cli",
                     layer="ui",
-                    status="skipped",
-                    input_summary={"command": source_command},
-                    output_summary={"reason": spec.get("normalization")},
+                    status=entry_status,
+                    input_summary={
+                        "command": source_command,
+                        "agent_action_type": spec.get("agent_action_type"),
+                        "transport": spec.get("transport"),
+                    },
+                    output_summary={
+                        "reason": spec.get("normalization"),
+                        "risk": spec.get("risk"),
+                    },
                     case_index=case_index,
                     case_title=case_title,
                 )
@@ -928,15 +954,21 @@ async def _execute_ui_case_batches(
                     "case_title": case_title,
                     "command": source_command,
                     "normalized_command": None,
-                    "status": "skipped",
-                    "status_code": 0,
+                    "status": entry_status,
+                    "status_code": entry_status_code,
                     "stdout": "",
-                    "stderr": "",
-                    "passed": True,
+                    "stderr": spec.get("normalization") if blocked else "",
+                    "passed": not blocked,
                     "normalization": spec.get("normalization"),
+                    "agent_action": spec.get("agent_action"),
+                    "agent_action_type": spec.get("agent_action_type"),
+                    "transport": spec.get("transport"),
+                    "risk": spec.get("risk"),
                 }
                 command_results.append(entry)
                 case_command_results.append(entry)
+                if blocked:
+                    case_passed = False
                 continue
 
             normalized_command = spec["command"]
@@ -1012,6 +1044,10 @@ async def _execute_ui_case_batches(
                 "stdout": stdout,
                 "stderr": stderr,
                 "passed": passed,
+                "agent_action": spec.get("agent_action"),
+                "agent_action_type": spec.get("agent_action_type"),
+                "transport": spec.get("transport"),
+                "risk": spec.get("risk"),
             }
             if spec.get("normalization"):
                 entry["normalization"] = spec["normalization"]
@@ -1030,6 +1066,8 @@ async def _execute_ui_case_batches(
                 input_summary={
                     "command": normalized_command,
                     "source_command": source_command,
+                    "agent_action_type": spec.get("agent_action_type"),
+                    "transport": spec.get("transport"),
                 },
                 output_summary={
                     "status_code": status_code,
@@ -1277,6 +1315,7 @@ async def run(state: AgentState) -> AgentState:
             "skip_reason": detail,
         }
         state["ui_execution_result"] = exec_result
+        append_ui_result_observations(state, exec_result, stage="ui_runner")
         artifacts = state.get("artifacts") or {}
         artifacts["ui_screenshots"] = []
         artifacts["ui_screenshot_evidence"] = []
@@ -1322,6 +1361,7 @@ async def run(state: AgentState) -> AgentState:
     exec_result = await _execute_ui_case_batches(batches, task_id, screenshot_dir, state)
 
     state["ui_execution_result"] = exec_result
+    append_ui_result_observations(state, exec_result, stage="ui_runner")
 
     artifacts = state.get("artifacts") or {}
     artifacts["ui_screenshots"] = exec_result["screenshots"]
@@ -1353,6 +1393,10 @@ async def run(state: AgentState) -> AgentState:
             "evidence_label": result.get("evidence_label"),
             "evidence_detail": result.get("evidence_detail"),
             "normalization": result.get("normalization"),
+            "agent_action": result.get("agent_action"),
+            "agent_action_type": result.get("agent_action_type"),
+            "transport": result.get("transport"),
+            "risk": result.get("risk"),
         }
         for result in exec_result["commands"]
     ]

@@ -12,6 +12,7 @@ from app.agent.api_scope import (
     ALL_SAFE_GET_COVERAGE_SOURCE,
     documented_api_scope_text,
 )
+from app.agent.action_runtime import append_evaluation_protocol
 from app.agent.json_utils import parse_llm_json_object
 from app.agent.progress import persist_progress
 from app.agent.prompts import EVIDENCE_EVALUATOR_PROMPT
@@ -200,6 +201,42 @@ def _tool_call_summary(state: AgentState) -> list[dict[str, Any]]:
     ]
 
 
+def _protocol_observation_summary(state: AgentState, stage: str) -> dict[str, Any]:
+    stage_names = {stage, f"{stage}_runner"}
+    observations = [
+        item
+        for item in _safe_list(state.get("agent_observations"))
+        if isinstance(item, dict) and item.get("stage") in stage_names
+    ]
+    failure_types: dict[str, int] = {}
+    statuses: dict[str, int] = {}
+    latest = []
+    for observation in observations:
+        status = str(observation.get("status") or "unknown")
+        statuses[status] = statuses.get(status, 0) + 1
+        failure_type = observation.get("failure_type")
+        if failure_type:
+            key = str(failure_type)
+            failure_types[key] = failure_types.get(key, 0) + 1
+    for observation in observations[-6:]:
+        latest.append(
+            {
+                "tool_name": observation.get("tool_name"),
+                "status": observation.get("status"),
+                "outcome": observation.get("outcome"),
+                "failure_type": observation.get("failure_type"),
+                "summary": _compact_text(observation.get("summary"), 240),
+                "evidence_count": len(_safe_list(observation.get("evidence_ids"))),
+            }
+        )
+    return {
+        "observation_count": len(observations),
+        "statuses": statuses,
+        "failure_types": failure_types,
+        "latest": latest,
+    }
+
+
 def _evidence_summary(state: AgentState, stage: str) -> dict[str, Any]:
     return redact_sensitive_data(
         {
@@ -215,6 +252,9 @@ def _evidence_summary(state: AgentState, stage: str) -> dict[str, Any]:
                 "ui_cases": len(_safe_list(state.get("ui_cases"))),
             },
             "agent_strategy": strategy_summary(state.get("agent_strategy_decision")),
+            "agent_protocol": state.get("agent_protocol_summary") or {},
+            "agent_protocol_stage": _protocol_observation_summary(state, stage),
+            "agent_observation_count": len(_safe_list(state.get("agent_observations"))),
             "replan_counts": state.get("agent_replan_counts") or {},
             "last_error": _compact_text(state.get("last_error"), 300),
         }
@@ -689,6 +729,7 @@ async def run(state: AgentState) -> AgentState:
         "summary": summary,
     }
     _append_evaluation(state, evaluation)
+    append_evaluation_protocol(state, evaluation, stage=stage)
 
     record_tool_call(
         state,

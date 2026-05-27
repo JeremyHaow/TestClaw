@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -17,7 +20,9 @@ from app.agent.tool_registry import record_tool_call, tool_capabilities_by_name
 from app.core.redaction import redact_sensitive_data
 
 AGENT_ACTION_SCHEMA_VERSION = "2026-05-25"
+AGENT_EXECUTION_PROTOCOL_VERSION = "2026-05-27"
 AGENT_ACTION_CONTRACT_SOURCE = "agent_action_contract"
+AGENT_PROTOCOL_MAX_RECORDS = 1000
 API_ACTION_SCOPES = {
     "all_documented_safe_methods",
     "focused_documented_endpoints",
@@ -89,6 +94,78 @@ class AgentActionObservation(BaseModel):
     timestamp: str
 
 
+class AgentToolCall(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    schema_version: str = AGENT_EXECUTION_PROTOCOL_VERSION
+    tool_call_id: str
+    tool_name: str
+    layer: str
+    status: str
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    outputs: dict[str, Any] = Field(default_factory=dict)
+    elapsed_ms: float | None = None
+    action_id: str | None = None
+    case_index: int | None = None
+    case_title: str | None = None
+    timestamp: str
+
+
+class AgentEvidence(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    schema_version: str = AGENT_EXECUTION_PROTOCOL_VERSION
+    evidence_id: str
+    kind: str
+    stage: str
+    layer: str
+    title: str
+    status: str
+    summary: str = ""
+    uri: str | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
+    timestamp: str
+
+
+class AgentObservation(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    schema_version: str = AGENT_EXECUTION_PROTOCOL_VERSION
+    observation_id: str
+    stage: str
+    layer: str
+    tool_name: str
+    status: str
+    outcome: str
+    summary: str
+    action_id: str | None = None
+    failure_type: str | None = None
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    outputs: dict[str, Any] = Field(default_factory=dict)
+    evidence_ids: list[str] = Field(default_factory=list)
+    tool_call_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    timestamp: str
+
+
+class AgentEvaluation(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    schema_version: str = AGENT_EXECUTION_PROTOCOL_VERSION
+    evaluation_id: str
+    stage: str
+    sufficient_evidence: bool
+    outcome: str
+    next_action: str
+    confidence: str = "unknown"
+    reason: str = ""
+    failure_type: str | None = None
+    missing_evidence: list[str] = Field(default_factory=list)
+    replan_hint: str = ""
+    observation_ids: list[str] = Field(default_factory=list)
+    timestamp: str
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -99,6 +176,76 @@ def _text(value: Any, *, limit: int = 500) -> str:
 
 def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _compact_jsonable(value: Any, *, limit: int = 1200) -> Any:
+    value = redact_sensitive_data(value)
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, str):
+        return _text(value, limit=limit)
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        text = str(value)
+    return _text(text, limit=limit)
+
+
+def _protocol_id(prefix: str, *parts: Any) -> str:
+    raw = json.dumps(redact_sensitive_data(parts), ensure_ascii=False, sort_keys=True, default=str)
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+    return f"{prefix}-{digest}"
+
+
+def _append_protocol_record(
+    state: dict[str, Any],
+    key: str,
+    payload: dict[str, Any],
+    *,
+    limit: int = AGENT_PROTOCOL_MAX_RECORDS,
+) -> dict[str, Any]:
+    safe_payload = redact_sensitive_data(payload)
+    records = state.setdefault(key, [])
+    records.append(safe_payload)
+    if len(records) > limit:
+        del records[:-limit]
+    return safe_payload
+
+
+def _protocol_summary(state: dict[str, Any]) -> dict[str, Any]:
+    observations = [item for item in state.get("agent_observations") or [] if isinstance(item, dict)]
+    evidence = [item for item in state.get("agent_evidence") or [] if isinstance(item, dict)]
+    by_layer: dict[str, int] = {}
+    by_status: dict[str, int] = {}
+    by_failure_type: dict[str, int] = {}
+    by_evidence_kind: dict[str, int] = {}
+    for observation in observations:
+        layer = str(observation.get("layer") or "unknown")
+        status = str(observation.get("status") or "unknown")
+        by_layer[layer] = by_layer.get(layer, 0) + 1
+        by_status[status] = by_status.get(status, 0) + 1
+        failure_type = observation.get("failure_type")
+        if failure_type:
+            key = str(failure_type)
+            by_failure_type[key] = by_failure_type.get(key, 0) + 1
+    for item in evidence:
+        kind = str(item.get("kind") or "unknown")
+        by_evidence_kind[kind] = by_evidence_kind.get(kind, 0) + 1
+
+    summary = {
+        "schema_version": AGENT_EXECUTION_PROTOCOL_VERSION,
+        "observation_total": len(observations),
+        "evidence_total": len(evidence),
+        "by_layer": by_layer,
+        "by_status": by_status,
+        "by_failure_type": by_failure_type,
+        "by_evidence_kind": by_evidence_kind,
+    }
+    # This summary only contains aggregate counts. Do not pass it through the
+    # generic redactor, because taxonomy keys like "auth_failure" would make
+    # their numeric counts look secret-bearing.
+    state["agent_protocol_summary"] = summary
+    return state["agent_protocol_summary"]
 
 
 def _diagnostic(
@@ -717,6 +864,538 @@ def record_agent_action_observation(
             else "surface_guardrail_diagnostic",
         },
     )
+    return payload
+
+
+def _api_failure_type(result: dict[str, Any]) -> str | None:
+    failure_type = result.get("failure_type") or result.get("skip_type")
+    if failure_type:
+        return str(failure_type)
+    if result.get("error"):
+        text = str(result.get("error") or "").lower()
+        if "timeout" in text or "timed out" in text:
+            return "timeout"
+        if any(marker in text for marker in ("connect", "network", "dns", "name resolution")):
+            return "network_error"
+        return "api_request_error"
+    assertions = [item for item in result.get("assertion_results") or [] if isinstance(item, dict)]
+    if any(item.get("passed") is False for item in assertions):
+        return "assertion_failure"
+    if result.get("passed") is False:
+        status = result.get("status_code")
+        try:
+            status_int = int(status)
+        except Exception:
+            status_int = 0
+        if status_int in {401, 403}:
+            return "auth_failure"
+        if status_int >= 500:
+            return "backend_error"
+        return "api_assertion"
+    return None
+
+
+def _ui_failure_type(result: dict[str, Any]) -> str | None:
+    if result.get("failure_type"):
+        return str(result.get("failure_type"))
+    if result.get("status") == "blocked":
+        if result.get("risk") == "high_risk":
+            return "ui_high_risk_action_blocked"
+        return "ui_action_blocked"
+    if result.get("status") == "skipped":
+        return "ui_command_skipped"
+    if result.get("passed") is not False and int(result.get("status_code") or 0) == 0:
+        return None
+    stderr = str(result.get("stderr") or "").lower()
+    if "timeout" in stderr or "timed out" in stderr:
+        return "timeout"
+    if any(marker in stderr for marker in ("not found", "locator", "strict mode violation")):
+        return "ui_locator_missing"
+    if "navigation" in stderr:
+        return "navigation_blocked"
+    if "snapshot did not contain" in stderr:
+        return "ui_assertion_failure"
+    if "screenshot file was not created" in stderr:
+        return "artifact_missing"
+    return "ui_command_failed"
+
+
+def _outcome_from_status(status: str, failure_type: str | None = None) -> str:
+    if status in {"success", "passed", "done"}:
+        return "passed"
+    if status == "blocked":
+        return "blocked"
+    if status == "skipped":
+        return "blocked" if failure_type else "skipped"
+    if status in {"failed", "error"}:
+        return "failed"
+    return status or "unknown"
+
+
+def _append_tool_call_protocol(
+    state: dict[str, Any],
+    *,
+    tool_name: str,
+    layer: str,
+    status: str,
+    inputs: dict[str, Any] | None = None,
+    outputs: dict[str, Any] | None = None,
+    elapsed_ms: float | None = None,
+    action_id: str | None = None,
+    case_index: int | None = None,
+    case_title: str | None = None,
+) -> str:
+    timestamp = _utc_now_iso()
+    tool_call = AgentToolCall(
+        tool_call_id=_protocol_id(
+            "tool-call",
+            tool_name,
+            layer,
+            status,
+            inputs,
+            outputs,
+            case_index,
+            case_title,
+            timestamp,
+        ),
+        tool_name=tool_name,
+        layer=layer,
+        status=status,
+        inputs=redact_sensitive_data(inputs or {}),
+        outputs=redact_sensitive_data(outputs or {}),
+        elapsed_ms=elapsed_ms,
+        action_id=action_id,
+        case_index=case_index,
+        case_title=case_title,
+        timestamp=timestamp,
+    )
+    payload = _append_protocol_record(
+        state,
+        "agent_tool_calls",
+        tool_call.model_dump(mode="json", exclude_none=True),
+    )
+    return str(payload["tool_call_id"])
+
+
+def _append_evidence_protocol(
+    state: dict[str, Any],
+    *,
+    kind: str,
+    stage: str,
+    layer: str,
+    title: str,
+    status: str,
+    summary: str = "",
+    uri: str | None = None,
+    data: dict[str, Any] | None = None,
+) -> str:
+    timestamp = _utc_now_iso()
+    evidence = AgentEvidence(
+        evidence_id=_protocol_id("evidence", kind, stage, layer, title, status, uri, data),
+        kind=kind,
+        stage=stage,
+        layer=layer,
+        title=_text(title, limit=180),
+        status=status,
+        summary=_text(summary, limit=600),
+        uri=uri,
+        data=redact_sensitive_data(data or {}),
+        timestamp=timestamp,
+    )
+    payload = _append_protocol_record(
+        state,
+        "agent_evidence",
+        evidence.model_dump(mode="json", exclude_none=True),
+    )
+    return str(payload["evidence_id"])
+
+
+def append_agent_observation(
+    state: dict[str, Any],
+    *,
+    stage: str,
+    layer: str,
+    tool_name: str,
+    status: str,
+    summary: str,
+    outcome: str | None = None,
+    action_id: str | None = None,
+    failure_type: str | None = None,
+    inputs: dict[str, Any] | None = None,
+    outputs: dict[str, Any] | None = None,
+    evidence_ids: list[str] | None = None,
+    tool_call_ids: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    timestamp = _utc_now_iso()
+    observation = AgentObservation(
+        observation_id=_protocol_id(
+            "observation",
+            stage,
+            layer,
+            tool_name,
+            status,
+            summary,
+            failure_type,
+            inputs,
+            outputs,
+            timestamp,
+        ),
+        stage=stage,
+        layer=layer,
+        tool_name=tool_name,
+        status=status,
+        outcome=outcome or _outcome_from_status(status, failure_type),
+        summary=_text(summary, limit=600),
+        action_id=action_id,
+        failure_type=failure_type,
+        inputs=redact_sensitive_data(inputs or {}),
+        outputs=redact_sensitive_data(outputs or {}),
+        evidence_ids=evidence_ids or [],
+        tool_call_ids=tool_call_ids or [],
+        metadata=redact_sensitive_data(metadata or {}),
+        timestamp=timestamp,
+    )
+    payload = _append_protocol_record(
+        state,
+        "agent_observations",
+        observation.model_dump(mode="json", exclude_none=True),
+    )
+    _protocol_summary(state)
+    return payload
+
+
+def append_api_result_observations(
+    state: dict[str, Any],
+    api_result: dict[str, Any] | None = None,
+    *,
+    stage: str = "api_runner",
+) -> list[dict[str, Any]]:
+    result = api_result or state.get("api_execution_result") or {}
+    observations: list[dict[str, Any]] = []
+    for index, item in enumerate(result.get("results") or []):
+        if not isinstance(item, dict):
+            continue
+        skipped = bool(item.get("skipped"))
+        passed = item.get("passed")
+        failure_type = _api_failure_type(item)
+        if skipped:
+            status = "skipped"
+        elif passed is True:
+            status = "success"
+        elif passed is None and not failure_type:
+            status = "skipped"
+        else:
+            status = "failed"
+
+        method = str(item.get("method") or "GET").upper()
+        url = str(item.get("url") or "")
+        path = urlsplit(url).path or url
+        label = str(item.get("label") or f"{method} {path}")
+        tool_call_id = _append_tool_call_protocol(
+            state,
+            tool_name="api.http_request" if item.get("http_executed") else "api.execution_gate",
+            layer="api",
+            status=status,
+            inputs={
+                "method": method,
+                "url": url,
+                "path": path,
+                "category": item.get("category"),
+                "request_headers": item.get("request_headers"),
+                "request_body": item.get("request_body"),
+            },
+            outputs={
+                "status_code": item.get("status_code"),
+                "envelope_status_code": item.get("envelope_status_code"),
+                "passed": item.get("passed"),
+                "skipped": skipped,
+                "skip_reason": item.get("skip_reason"),
+                "failure_type": failure_type,
+            },
+            elapsed_ms=float(item.get("elapsed_ms") or 0),
+        )
+        response_evidence_id = _append_evidence_protocol(
+            state,
+            kind="api_response",
+            stage=stage,
+            layer="api",
+            title=label,
+            status=status,
+            summary=(
+                f"{method} {path} -> {item.get('status_code')}"
+                if item.get("status_code") is not None
+                else str(item.get("skip_reason") or label)
+            ),
+            data={
+                "method": method,
+                "url": url,
+                "status_code": item.get("status_code"),
+                "elapsed_ms": item.get("elapsed_ms"),
+                "body": _compact_jsonable(item.get("body")),
+                "assertion_results": item.get("assertion_results") or [],
+                "failure_reason": item.get("failure_reason") or item.get("error"),
+                "skip_type": item.get("skip_type"),
+                "skip_reason": item.get("skip_reason"),
+            },
+        )
+        evidence_ids = [response_evidence_id]
+        for assertion_index, assertion in enumerate(item.get("assertion_results") or []):
+            if not isinstance(assertion, dict):
+                continue
+            assertion_status = (
+                "skipped"
+                if assertion.get("skipped")
+                else "success"
+                if assertion.get("passed") in {True, None}
+                else "failed"
+            )
+            evidence_ids.append(
+                _append_evidence_protocol(
+                    state,
+                    kind="api_assertion",
+                    stage=stage,
+                    layer="api",
+                    title=f"{label} assertion {assertion_index + 1}",
+                    status=assertion_status,
+                    summary=str(assertion.get("error") or assertion.get("type") or "assertion"),
+                    data=assertion,
+                )
+            )
+
+        observations.append(
+            append_agent_observation(
+                state,
+                stage=stage,
+                layer="api",
+                tool_name="api.http_request",
+                status=status,
+                outcome=_outcome_from_status(status, failure_type),
+                summary=(
+                    f"{label}: {status}"
+                    + (f" ({failure_type})" if failure_type else "")
+                ),
+                failure_type=failure_type,
+                inputs={
+                    "method": method,
+                    "url": url,
+                    "path": path,
+                    "category": item.get("category"),
+                    "request_body_source": item.get("request_body_source"),
+                },
+                outputs={
+                    "status_code": item.get("status_code"),
+                    "envelope_status_code": item.get("envelope_status_code"),
+                    "passed": item.get("passed"),
+                    "skipped": skipped,
+                    "skip_reason": item.get("skip_reason"),
+                    "assertion_count": len(item.get("assertion_results") or []),
+                    "failure_reason": item.get("failure_reason") or item.get("error"),
+                },
+                evidence_ids=evidence_ids,
+                tool_call_ids=[tool_call_id],
+                metadata={"source": "api_execution_result", "result_index": index},
+            )
+        )
+    return observations
+
+
+def append_ui_result_observations(
+    state: dict[str, Any],
+    ui_result: dict[str, Any] | None = None,
+    *,
+    stage: str = "ui_runner",
+) -> list[dict[str, Any]]:
+    result = ui_result or state.get("ui_execution_result") or {}
+    observations: list[dict[str, Any]] = []
+    for index, item in enumerate(result.get("commands") or []):
+        if not isinstance(item, dict):
+            continue
+        failure_type = _ui_failure_type(item)
+        if item.get("status") == "blocked":
+            status = "blocked"
+        elif item.get("status") == "skipped":
+            status = "skipped"
+        elif item.get("passed") is True and int(item.get("status_code") or 0) == 0:
+            status = "success"
+        else:
+            status = "failed"
+        command = str(item.get("normalized_command") or item.get("command") or "")
+        source_command = str(item.get("command") or command)
+        tool_call_id = _append_tool_call_protocol(
+            state,
+            tool_name="ui.playwright_cli",
+            layer="ui",
+            status=status,
+            inputs={
+                "command": command,
+                "source_command": source_command,
+                "case_index": item.get("case_index"),
+                "case_title": item.get("case_title"),
+                "agent_action_type": item.get("agent_action_type"),
+                "transport": item.get("transport"),
+                "risk": item.get("risk"),
+            },
+            outputs={
+                "status_code": item.get("status_code"),
+                "passed": item.get("passed"),
+                "stderr": _text(item.get("stderr"), limit=300),
+                "stdout_chars": len(str(item.get("stdout") or "")),
+                "failure_type": failure_type,
+            },
+            case_index=item.get("case_index"),
+            case_title=item.get("case_title"),
+        )
+        evidence_ids: list[str] = []
+        if item.get("screenshot"):
+            evidence_ids.append(
+                _append_evidence_protocol(
+                    state,
+                    kind="ui_screenshot",
+                    stage=stage,
+                    layer="ui",
+                    title=str(item.get("evidence_label") or item.get("case_title") or "UI screenshot"),
+                    status=status,
+                    summary=str(item.get("evidence_detail") or source_command),
+                    uri=str(item.get("screenshot")),
+                    data=item.get("screenshot_evidence") or {},
+                )
+            )
+        if item.get("stdout") and str(item.get("normalized_command") or item.get("command") or "").startswith("snapshot"):
+            evidence_ids.append(
+                _append_evidence_protocol(
+                    state,
+                    kind="ui_snapshot",
+                    stage=stage,
+                    layer="ui",
+                    title=str(item.get("case_title") or "UI snapshot"),
+                    status=status,
+                    summary=_text(item.get("stdout"), limit=500),
+                    data={"snapshot_text": _text(item.get("stdout"), limit=2000)},
+                )
+            )
+        if item.get("assertion"):
+            evidence_ids.append(
+                _append_evidence_protocol(
+                    state,
+                    kind="ui_assertion",
+                    stage=stage,
+                    layer="ui",
+                    title=f"{item.get('case_title') or 'UI case'} assertion",
+                    status=status,
+                    summary=str((item.get("assertion") or {}).get("expected") or "UI assertion"),
+                    data=item.get("assertion") or {},
+                )
+            )
+        observations.append(
+            append_agent_observation(
+                state,
+                stage=stage,
+                layer="ui",
+                tool_name="ui.playwright_cli",
+                status=status,
+                outcome=_outcome_from_status(status, failure_type),
+                summary=(
+                    f"{item.get('case_title') or 'UI command'}: {source_command} -> {status}"
+                    + (f" ({failure_type})" if failure_type else "")
+                ),
+                failure_type=failure_type,
+                inputs={
+                    "command": command,
+                    "source_command": source_command,
+                    "case_index": item.get("case_index"),
+                    "case_title": item.get("case_title"),
+                    "agent_action_type": item.get("agent_action_type"),
+                    "transport": item.get("transport"),
+                    "risk": item.get("risk"),
+                },
+                outputs={
+                    "status_code": item.get("status_code"),
+                    "passed": item.get("passed"),
+                    "stderr": _text(item.get("stderr"), limit=500),
+                    "normalization": item.get("normalization"),
+                    "agent_action_type": item.get("agent_action_type"),
+                    "transport": item.get("transport"),
+                    "risk": item.get("risk"),
+                },
+                evidence_ids=evidence_ids,
+                tool_call_ids=[tool_call_id],
+                metadata={
+                    "source": "ui_execution_result",
+                    "result_index": index,
+                    "agent_action": item.get("agent_action"),
+                    "agent_action_type": item.get("agent_action_type"),
+                    "transport": item.get("transport"),
+                    "risk": item.get("risk"),
+                },
+            )
+        )
+    return observations
+
+
+def append_evaluation_protocol(
+    state: dict[str, Any],
+    evaluation: dict[str, Any],
+    *,
+    stage: str | None = None,
+) -> dict[str, Any]:
+    resolved_stage = str(stage or evaluation.get("stage") or state.get("agent_execution_stage") or "agent")
+    observations = [
+        item
+        for item in state.get("agent_observations") or []
+        if isinstance(item, dict) and item.get("stage") in {resolved_stage, f"{resolved_stage}_runner"}
+    ]
+    failure_types = [str(item.get("failure_type")) for item in observations if item.get("failure_type")]
+    failure_type = str(evaluation.get("failure_type") or (failure_types[0] if failure_types else "")) or None
+    next_action = str(evaluation.get("next_action") or "report")
+    sufficient = bool(evaluation.get("sufficient_evidence"))
+    outcome = (
+        "needs_replan"
+        if next_action.startswith("replan")
+        else "needs_human"
+        if next_action == "ask_human"
+        else "sufficient"
+        if sufficient
+        else "insufficient"
+    )
+    protocol = AgentEvaluation(
+        evaluation_id=_protocol_id(
+            "evaluation",
+            resolved_stage,
+            next_action,
+            sufficient,
+            evaluation.get("reason"),
+            len(state.get("agent_protocol_evaluations") or []),
+        ),
+        stage=resolved_stage,
+        sufficient_evidence=sufficient,
+        outcome=outcome,
+        next_action=next_action,
+        confidence=str(evaluation.get("confidence") or "unknown"),
+        reason=_text(evaluation.get("reason"), limit=800),
+        failure_type=failure_type,
+        missing_evidence=[
+            _text(item, limit=240)
+            for item in _as_list(evaluation.get("missing_evidence"))
+            if _text(item, limit=240)
+        ],
+        replan_hint=_text(
+            evaluation.get("replan_instructions") or evaluation.get("replan_hint"),
+            limit=800,
+        ),
+        observation_ids=[
+            str(item.get("observation_id"))
+            for item in observations[-40:]
+            if item.get("observation_id")
+        ],
+        timestamp=_utc_now_iso(),
+    )
+    payload = _append_protocol_record(
+        state,
+        "agent_protocol_evaluations",
+        protocol.model_dump(mode="json", exclude_none=True),
+    )
+    _protocol_summary(state)
     return payload
 
 
