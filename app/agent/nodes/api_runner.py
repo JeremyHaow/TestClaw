@@ -239,6 +239,13 @@ _CRUD_TEXT_FIELD_RE = re.compile(
     re.I,
 )
 _CRUD_ID_FIELD_RE = re.compile(r"(^id$|id$|Id$|ID$|Code$|code$)")
+_CRUD_SERVER_MANAGED_FIELD_RE = re.compile(
+    r"(^id$|id$|Id$|ID$|Code$|code$|"
+    r"createBy|createdBy|createTime|createdAt|createDept|"
+    r"updateBy|updatedBy|updateTime|updatedAt|"
+    r"deleted|delFlag|version)$",
+    re.I,
+)
 
 
 def _max_executed_requests() -> int | None:
@@ -1291,20 +1298,83 @@ def _unique_prefix(resource: str) -> str:
     return f"TestClaw_{safe_resource}_{int(time.time() * 1000)}"
 
 
-def _inject_unique_prefix(value, prefix: str):
+def _schema_type_name(schema: dict | None) -> str | None:
+    if not isinstance(schema, dict):
+        return None
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        schema_type = next((item for item in schema_type if item != "null"), None)
+    if schema_type:
+        return str(schema_type).lower()
+    if "properties" in schema:
+        return "object"
+    if "items" in schema:
+        return "array"
+    return None
+
+
+def _schema_child_property(schema: dict | None, key: object) -> dict | None:
+    if not isinstance(schema, dict):
+        return None
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return None
+    prop = properties.get(str(key))
+    return prop if isinstance(prop, dict) else None
+
+
+def _is_schema_string_field(schema: dict | None) -> bool:
+    schema_type = _schema_type_name(schema)
+    if schema_type:
+        return schema_type == "string"
+    return False
+
+
+def _is_schema_id_like_scalar(schema: dict | None) -> bool:
+    schema_type = _schema_type_name(schema)
+    return schema_type in {"integer", "number", "boolean"}
+
+
+def _strip_create_only_server_fields(body: dict, schema: dict | None, *, method: str) -> dict:
+    if str(method or "").upper() != "POST" or not isinstance(schema, dict):
+        return body
+    required = set(_body_required_fields({"request_body_schema": schema}))
+    cleaned = dict(body)
+    for key, value in list(cleaned.items()):
+        prop_schema = _schema_child_property(schema, key)
+        if str(key) in required:
+            continue
+        if not _CRUD_SERVER_MANAGED_FIELD_RE.search(str(key)):
+            continue
+        if isinstance(value, (dict, list)):
+            continue
+        if prop_schema and prop_schema.get("writeOnly") is True:
+            continue
+        cleaned.pop(key, None)
+    return cleaned
+
+
+def _inject_unique_prefix(value, prefix: str, schema: dict | None = None):
     if isinstance(value, str):
         return value
     if isinstance(value, list):
-        return [_inject_unique_prefix(item, prefix) for item in value]
+        item_schema = schema.get("items") if isinstance(schema, dict) and isinstance(schema.get("items"), dict) else None
+        return [_inject_unique_prefix(item, prefix, item_schema) for item in value]
     if isinstance(value, dict):
         updated = {}
         prefix_applied = False
         for key, item in value.items():
-            if _CRUD_TEXT_FIELD_RE.search(str(key)):
+            prop_schema = _schema_child_property(schema, key)
+            can_prefix_field = (
+                _CRUD_TEXT_FIELD_RE.search(str(key))
+                and not _is_schema_id_like_scalar(prop_schema)
+                and (not prop_schema or _is_schema_string_field(prop_schema) or isinstance(item, str))
+            )
+            if can_prefix_field:
                 updated[key] = prefix if not prefix_applied else f"{prefix}_{str(key)}"
                 prefix_applied = True
             else:
-                updated[key] = _inject_unique_prefix(item, prefix)
+                updated[key] = _inject_unique_prefix(item, prefix, prop_schema)
         if not prefix_applied and updated:
             first_key = next(iter(updated))
             if isinstance(updated[first_key], str):
@@ -1323,7 +1393,9 @@ def _body_for_crud_endpoint(endpoint: dict, *, method: str, resource: str, prefi
         content_type=content_type,
     )
     if isinstance(body, dict):
-        body = _inject_unique_prefix(body, prefix)
+        schema = endpoint.get("request_body_schema") if isinstance(endpoint.get("request_body_schema"), dict) else None
+        body = _strip_create_only_server_fields(body, schema, method=method)
+        body = _inject_unique_prefix(body, prefix, schema)
         if method in {"PUT", "PATCH"}:
             for key in list(body.keys()):
                 if _CRUD_ID_FIELD_RE.search(str(key)):

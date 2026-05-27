@@ -4238,6 +4238,40 @@ async def test_api_runner_normalizes_model_action_template_aliases_and_repairs_b
     assert api_result["results"][3]["request_body_source"] == "agent_action_schema_repair"
 
 
+def test_api_runner_crud_body_prefix_keeps_schema_numeric_code_fields() -> None:
+    body, _generation = api_runner._body_for_crud_endpoint(
+        {
+            "method": "POST",
+            "path": "/system/dict/data",
+            "request_body_content_type": "application/json",
+            "request_body_schema": {
+                "type": "object",
+                "properties": {
+                    "dictCode": {"type": "integer", "format": "int64"},
+                    "dictLabel": {"type": "string"},
+                    "dictType": {"type": "string"},
+                    "dictValue": {"type": "string"},
+                    "dictSort": {"type": "integer"},
+                    "createTime": {"type": "string"},
+                    "params": {
+                        "type": "object",
+                        "properties": {"key": {"type": "string"}},
+                    },
+                },
+            },
+        },
+        method="POST",
+        resource="data",
+        prefix="TestClaw_data_1",
+    )
+
+    assert "dictCode" not in body
+    assert "createTime" not in body
+    assert body["dictLabel"] == "TestClaw_data_1"
+    assert body["dictSort"] == 1
+    assert body["params"]["key"] == "TestClaw_data_1"
+
+
 @pytest.mark.asyncio
 async def test_api_runner_synthesizes_safe_crud_actions_when_model_falls_back_to_read_only(monkeypatch) -> None:
     calls = []
