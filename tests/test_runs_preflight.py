@@ -490,6 +490,57 @@ def test_run_preflight_auto_auth_resolves_token_without_returning_secret(monkeyp
     assert "login-secret" not in json.dumps(body)
 
 
+def test_run_preflight_auto_auth_discovers_nested_token_without_token_path(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        headers = {}
+
+        def json(self) -> dict:
+            return {"code": 200, "msg": "ok", "data": {"token": "login-secret"}}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setattr(api_auth.httpx, "AsyncClient", FakeAsyncClient)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs/preflight",
+            json={
+                "source": json.dumps(_auth_required_openapi()),
+                "test_type": "api",
+                "auth_config": {
+                    "enabled": True,
+                    "login_url": "/auth/login",
+                    "body": {"username": "admin", "password": "secret"},
+                },
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert calls[0]["url"] == "https://api.example.test/auth/login"
+    assert calls[1]["headers"] == {"Authorization": "Bearer login-secret"}
+    assert body["auth_resolved"] is True
+    assert body["auth_missing_inputs"] == []
+    assert "login-secret" not in json.dumps(body)
+
+
 def test_run_preflight_auto_auth_replaces_credential_placeholders(monkeypatch) -> None:
     calls = []
 
