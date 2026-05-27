@@ -326,15 +326,28 @@ def _structured_plan_content(plan: AgentPlan) -> str:
     return "\n".join(lines).strip()
 
 
+def _structured_step_is_handled(plan: AgentPlan, step: str) -> bool:
+    data = _structured_plan_step_data(plan, step)
+    return bool(data and data.get("status") in {"confirmed", "deferred", "skipped"})
+
+
+def _structured_plan_ready_for_generation(plan: AgentPlan) -> bool:
+    for step in STRUCTURED_INTAKE_STEP_IDS:
+        if not _structured_step_is_handled(plan, step):
+            return False
+    for step in STRUCTURED_REQUIRED_STEPS:
+        if _structured_plan_step_data(plan, step).get("status") != "confirmed":
+            return False
+    return True
+
+
 def _structured_plan_current_step(plan: AgentPlan, session: AgentPlanningSession) -> str:
     if session.status == PLAN_SESSION_EXECUTED:
         return "executed"
     if session.status == PLAN_SESSION_READY or session.current_run_payload:
         return "review"
-    handled = {"confirmed", "deferred", "skipped"}
     for step in STRUCTURED_INTAKE_STEP_IDS:
-        data = _structured_plan_step_data(plan, step)
-        if not data or data.get("status") not in handled:
+        if not _structured_step_is_handled(plan, step):
             return STRUCTURED_TO_LEGACY_STEP[step]
 
     content = _structured_plan_content(plan)
@@ -584,6 +597,14 @@ def _update_session_from_structured_plan(
         session.status = PLAN_SESSION_COLLECTING
         session.current_plan = None
         session.current_run_payload = None
+        return
+    if not _structured_plan_ready_for_generation(plan):
+        session.status = PLAN_SESSION_COLLECTING
+        session.current_plan = None
+        session.current_run_payload = None
+        plan.status = PLAN_SESSION_COLLECTING
+        plan.objective = content
+        plan.recommended_run_payload_json = None
         return
     fake_messages = [
         AgentPlanningMessage(session_id=session.id, role="user", content=content)

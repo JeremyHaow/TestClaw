@@ -482,11 +482,14 @@ def test_structured_intake_continue_updates_state_without_chat_message() -> None
 
     assert response.status_code == 200
     body = response.json()
-    assert body["session"]["status"] == "ready"
-    assert body["session"]["current_run_payload"]["source"] == "https://api.example.test/openapi.json"
-    assert body["session"]["current_run_payload"]["auth_mode"] == "none_confirmed"
+    assert body["session"]["status"] == "collecting"
+    assert body["session"]["current_step"] == "scope"
+    assert body["session"]["current_run_payload"] is None
     assert body["session"]["messages"] == []
-    assert body["next_question"] is None
+    assert body["next_question"]["step"] == "scope"
+    assert body["draft"]["scope"]["status"] == "pending"
+    assert body["draft"]["auth"]["status"] == "pending"
+    assert body["draft"]["safety"]["status"] == "pending"
     assert detail.status_code == 200
     assert detail.json()["messages"] == []
 
