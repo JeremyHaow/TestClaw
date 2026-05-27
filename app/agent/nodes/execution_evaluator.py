@@ -26,14 +26,25 @@ from app.core.redaction import redact_sensitive_data
 logger = logging.getLogger(__name__)
 
 _REPORT = "report"
+_CONTINUE = "continue"
 _CONTINUE_TO_UI = "continue_to_ui"
+_RETRY_SAME_ACTION = "retry_same_action"
 _REPLAN_API = "replan_api"
 _REPLAN_UI = "replan_ui"
+_ASK_HUMAN = "ask_human"
 _ACTION_TO_NODE = {
     _REPORT: "reporter",
+    _CONTINUE: "reporter",
     _CONTINUE_TO_UI: "ui_login",
     _REPLAN_API: "tc_generator",
     _REPLAN_UI: "ui_test_planner",
+    _ASK_HUMAN: "reporter",
+}
+_GUARDRAIL_STOP_ACTIONS = {
+    _RETRY_SAME_ACTION,
+    _REPLAN_API,
+    _REPLAN_UI,
+    _ASK_HUMAN,
 }
 _MAX_EVALUATIONS = 12
 
@@ -201,24 +212,91 @@ def _tool_call_summary(state: AgentState) -> list[dict[str, Any]]:
     ]
 
 
-def _protocol_observation_summary(state: AgentState, stage: str) -> dict[str, Any]:
+def _stage_observations(state: AgentState, stage: str) -> list[dict[str, Any]]:
     stage_names = {stage, f"{stage}_runner"}
-    observations = [
+    return [
         item
         for item in _safe_list(state.get("agent_observations"))
-        if isinstance(item, dict) and item.get("stage") in stage_names
+        if isinstance(item, dict)
+        and (item.get("stage") in stage_names or item.get("layer") == stage)
     ]
+
+
+def _stage_evidence_kinds(state: AgentState, observations: list[dict[str, Any]]) -> dict[str, int]:
+    evidence_by_id = {
+        item.get("evidence_id"): item
+        for item in _safe_list(state.get("agent_evidence"))
+        if isinstance(item, dict) and item.get("evidence_id")
+    }
+    kinds: dict[str, int] = {}
+    for observation in observations:
+        for evidence_id in _safe_list(observation.get("evidence_ids")):
+            evidence = evidence_by_id.get(evidence_id)
+            kind = str((evidence or {}).get("kind") or "unknown")
+            kinds[kind] = kinds.get(kind, 0) + 1
+    return kinds
+
+
+def _dominant_failure_type(stage_summary: dict[str, Any]) -> str | None:
+    failure_types = stage_summary.get("failure_types")
+    if not isinstance(failure_types, dict) or not failure_types:
+        return None
+    return max(failure_types.items(), key=lambda item: int(item[1] or 0))[0]
+
+
+def _latest_failure_type(observations: list[dict[str, Any]]) -> str | None:
+    for observation in reversed(observations):
+        failure_type = observation.get("failure_type")
+        if failure_type:
+            return str(failure_type)
+    return None
+
+
+def _stage_failure_type(stage_summary: dict[str, Any]) -> str | None:
+    return (
+        stage_summary.get("latest_failure_type")
+        or stage_summary.get("dominant_failure_type")
+        or _dominant_failure_type(stage_summary)
+    )
+
+
+def _observation_output(observation: dict[str, Any]) -> dict[str, Any]:
+    output = observation.get("outputs")
+    return output if isinstance(output, dict) else {}
+
+
+def _observation_input(observation: dict[str, Any]) -> dict[str, Any]:
+    inputs = observation.get("inputs")
+    return inputs if isinstance(inputs, dict) else {}
+
+
+def _protocol_observation_summary(state: AgentState, stage: str) -> dict[str, Any]:
+    observations = _stage_observations(state, stage)
     failure_types: dict[str, int] = {}
     statuses: dict[str, int] = {}
+    outcomes: dict[str, int] = {}
     latest = []
+    failed = 0
+    blocked = 0
+    executed = 0
     for observation in observations:
         status = str(observation.get("status") or "unknown")
         statuses[status] = statuses.get(status, 0) + 1
+        outcome = str(observation.get("outcome") or "unknown")
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        if outcome in {"failed", "blocked"} or status in {"failed", "blocked"}:
+            failed += 1
+        if outcome == "blocked" or status == "blocked":
+            blocked += 1
+        if status not in {"skipped", "blocked", "unknown"}:
+            executed += 1
         failure_type = observation.get("failure_type")
         if failure_type:
             key = str(failure_type)
             failure_types[key] = failure_types.get(key, 0) + 1
     for observation in observations[-6:]:
+        inputs = _observation_input(observation)
+        outputs = _observation_output(observation)
         latest.append(
             {
                 "tool_name": observation.get("tool_name"),
@@ -227,18 +305,33 @@ def _protocol_observation_summary(state: AgentState, stage: str) -> dict[str, An
                 "failure_type": observation.get("failure_type"),
                 "summary": _compact_text(observation.get("summary"), 240),
                 "evidence_count": len(_safe_list(observation.get("evidence_ids"))),
+                "method": inputs.get("method"),
+                "path": inputs.get("path"),
+                "command": inputs.get("command"),
+                "status_code": outputs.get("status_code"),
+                "error_type": outputs.get("error_type"),
+                "safety_decision": outputs.get("safety_decision"),
             }
         )
     return {
         "observation_count": len(observations),
+        "executed_count": executed,
+        "failed_count": failed,
+        "blocked_count": blocked,
         "statuses": statuses,
+        "outcomes": outcomes,
         "failure_types": failure_types,
+        "dominant_failure_type": _dominant_failure_type({"failure_types": failure_types}),
+        "latest_failure_type": _latest_failure_type(observations),
+        "evidence_kinds": _stage_evidence_kinds(state, observations),
         "latest": latest,
     }
 
 
 def _evidence_summary(state: AgentState, stage: str) -> dict[str, Any]:
-    return redact_sensitive_data(
+    protocol = state.get("agent_protocol_summary") or {}
+    protocol_stage = _protocol_observation_summary(state, stage)
+    summary = redact_sensitive_data(
         {
             "stage": stage,
             "test_type": state.get("test_type"),
@@ -252,22 +345,30 @@ def _evidence_summary(state: AgentState, stage: str) -> dict[str, Any]:
                 "ui_cases": len(_safe_list(state.get("ui_cases"))),
             },
             "agent_strategy": strategy_summary(state.get("agent_strategy_decision")),
-            "agent_protocol": state.get("agent_protocol_summary") or {},
-            "agent_protocol_stage": _protocol_observation_summary(state, stage),
+            "agent_protocol": protocol,
+            "agent_protocol_stage": protocol_stage,
             "agent_observation_count": len(_safe_list(state.get("agent_observations"))),
             "replan_counts": state.get("agent_replan_counts") or {},
+            "retry_counts": state.get("agent_retry_counts") or {},
             "last_error": _compact_text(state.get("last_error"), 300),
         }
     )
+    if isinstance(summary.get("agent_protocol"), dict) and isinstance(protocol, dict):
+        if isinstance(protocol.get("by_failure_type"), dict):
+            summary["agent_protocol"]["by_failure_type"] = protocol.get("by_failure_type")
+    if isinstance(summary.get("agent_protocol_stage"), dict):
+        for key in ("failure_types", "dominant_failure_type", "latest_failure_type"):
+            summary["agent_protocol_stage"][key] = protocol_stage.get(key)
+    return summary
 
 
 def _allowed_actions(state: AgentState, stage: str) -> list[str]:
     if stage == "api":
-        actions = [_REPORT, _REPLAN_API]
+        actions = [_REPORT, _CONTINUE, _RETRY_SAME_ACTION, _REPLAN_API, _ASK_HUMAN]
         if _has_ui_target(state):
-            actions.insert(1, _CONTINUE_TO_UI)
+            actions.insert(2, _CONTINUE_TO_UI)
         return actions
-    return [_REPORT, _REPLAN_UI]
+    return [_REPORT, _CONTINUE, _RETRY_SAME_ACTION, _REPLAN_UI, _ASK_HUMAN]
 
 
 def _replan_count(state: AgentState, stage: str) -> int:
@@ -281,12 +382,72 @@ def _can_replan(state: AgentState, stage: str) -> bool:
     return _replan_count(state, stage) < max(0, int(settings.AGENT_MAX_REPLAN_ATTEMPTS))
 
 
+def _retry_count(state: AgentState, stage: str) -> int:
+    counts = state.get("agent_retry_counts")
+    if isinstance(counts, dict):
+        return _safe_int(counts.get(stage))
+    return 0
+
+
+def _can_retry(state: AgentState, stage: str) -> bool:
+    return _retry_count(state, stage) < max(0, int(settings.AGENT_MAX_REPLAN_ATTEMPTS))
+
+
+def _auth_context_available(state: AgentState) -> bool:
+    config = state.get("auth_config")
+    config_enabled = isinstance(config, dict) and bool(config.get("enabled"))
+    return bool(config_enabled or state.get("auth_headers") or state.get("auth_credentials"))
+
+
+def _decision_payload(
+    *,
+    sufficient_evidence: bool,
+    confidence: str,
+    next_action: str,
+    reason: str,
+    diagnostics: list[str] | None = None,
+    missing_evidence: list[str] | None = None,
+    replan_instructions: str = "",
+    failure_type: str | None = None,
+    human_question: str = "",
+    source: str = "guardrail",
+) -> dict[str, Any]:
+    missing = missing_evidence or []
+    return {
+        "sufficient_evidence": sufficient_evidence,
+        "confidence": confidence,
+        "next_action": next_action,
+        "reason": reason,
+        "diagnostics": diagnostics or [],
+        "missing_evidence": missing,
+        "replan_instructions": replan_instructions,
+        "replan_hint": replan_instructions,
+        "failure_type": failure_type,
+        "human_question": human_question,
+        "source": source,
+    }
+
+
 def _api_needs_replan(state: AgentState, summary: dict[str, Any]) -> tuple[bool, str, list[str]]:
     api = summary["api"]
+    protocol = summary.get("agent_protocol_stage") or {}
+    failure_types = protocol.get("failure_types") if isinstance(protocol, dict) else {}
+    dominant_failure = _stage_failure_type(protocol if isinstance(protocol, dict) else {})
     if not api["requested"]:
         return False, "API stage is not requested for this run.", []
     if _api_has_completed_strategy_coverage(state, summary):
         return False, "Validated agent strategy coverage reached a reportable stopping point.", []
+    if api["all_passed"] and api["executed"] > 0:
+        return False, "Current API execution passed; older failed observations do not require replanning.", []
+    if isinstance(failure_types, dict) and failure_types:
+        if dominant_failure == "dependency_missing":
+            return True, "API observations show missing upstream dependency evidence.", [
+                "需要重新生成包含上游列表/搜索/创建步骤的 API 请求链，避免发送合成占位路径参数。"
+            ]
+        if dominant_failure == "safe_write_blocked" and api["executed"] == 0:
+            return True, "API observations were blocked by safe-write guardrails before execution.", [
+                "下一轮必须显式使用安全写入闸门，或改为执行策略允许的只读端点。"
+            ]
     if api["total"] == 0:
         if state.get("parsed_api_schema") or state.get("api_cases") or state.get("base_url_override"):
             return True, "API stage produced no executable request candidates.", [
@@ -307,6 +468,40 @@ def _api_needs_replan(state: AgentState, summary: dict[str, Any]) -> tuple[bool,
             "不要停在单个失败用例；从 OpenAPI schema 重新选择多个安全端点收集对照证据。"
         ]
     return False, "API evidence is sufficient for this bounded pass.", []
+
+
+def _api_needs_retry(state: AgentState, summary: dict[str, Any]) -> tuple[bool, str, list[str], str | None]:
+    api = summary["api"]
+    if api["all_passed"] and api["executed"] > 0:
+        return False, "Current API execution passed; older transient failures do not require retry.", [], None
+    protocol = summary.get("agent_protocol_stage") or {}
+    failure_type = _stage_failure_type(protocol if isinstance(protocol, dict) else {})
+    if failure_type not in {"network_error", "timeout"}:
+        return False, "API observations do not indicate a transient transport failure.", [], None
+    if not _can_retry(state, "api"):
+        return False, "API retry limit reached.", [
+            "已达到 API 同动作重试上限，报告中保留网络/超时诊断。"
+        ], failure_type
+    return True, "API observations indicate a transient transport failure.", [
+        "重试同一批 API 请求以确认网络错误或超时是否可复现。"
+    ], failure_type
+
+
+def _api_needs_human(state: AgentState, summary: dict[str, Any]) -> tuple[bool, str, list[str], str | None]:
+    api = summary["api"]
+    if api["all_passed"] and api["executed"] > 0:
+        return False, "Current API execution passed; older failures do not require human intervention.", [], None
+    protocol = summary.get("agent_protocol_stage") or {}
+    failure_type = _stage_failure_type(protocol if isinstance(protocol, dict) else {})
+    if failure_type == "auth_failure" and not _auth_context_available(state):
+        return True, "API observations failed at authentication and no usable auth context is configured.", [
+            "需要用户提供有效 token、cookie、登录配置，或明确确认该接口应在未登录状态下返回 401/403。"
+        ], failure_type
+    if failure_type == "environment_blocked":
+        return True, "API observations indicate the target environment blocked execution.", [
+            "需要用户确认测试环境、base URL、网络访问或接口方法是否可在当前环境执行。"
+        ], failure_type
+    return False, "No API human intervention requirement was detected.", [], failure_type
 
 
 def _api_has_schema_driven_all_safe_coverage(state: AgentState, summary: dict[str, Any]) -> bool:
@@ -349,8 +544,12 @@ def _api_has_reportable_schema_evidence(state: AgentState, summary: dict[str, An
 
 def _ui_needs_replan(state: AgentState, summary: dict[str, Any]) -> tuple[bool, str, list[str]]:
     ui = summary["ui"]
+    protocol = summary.get("agent_protocol_stage") or {}
+    dominant_failure = _stage_failure_type(protocol if isinstance(protocol, dict) else {})
     if not ui["requested"]:
         return False, "UI stage is not requested for this run.", []
+    if ui["all_passed"] and ui["completed"] > 0:
+        return False, "Current UI execution passed; older failed observations do not require replanning.", []
     if ui["setup_failed"]:
         return False, "UI setup failed and requires user intervention before more automation.", []
     if str(state.get("source_input") or "").strip().lower() == "suite":
@@ -358,6 +557,10 @@ def _ui_needs_replan(state: AgentState, summary: dict[str, Any]) -> tuple[bool, 
     if ui["total"] == 0:
         return True, "UI stage produced no executable UI cases.", [
             "基于当前页面快照重新生成可执行 UI 用例。"
+        ]
+    if dominant_failure in {"ui_locator_missing", "ui_assertion_failure"} and ui["has_snapshot_context"]:
+        return True, "UI observations show a locator/assertion failure while snapshot context is available.", [
+            "基于最新 snapshot/ref 重新生成 UI 动作，避免重复失败选择器。"
         ]
     selector_failure = any(
         "not found" in str(command.get("stderr") or "").lower()
@@ -379,6 +582,40 @@ def _ui_needs_replan(state: AgentState, summary: dict[str, Any]) -> tuple[bool, 
     return False, "UI evidence is sufficient for this bounded pass.", []
 
 
+def _ui_needs_retry(state: AgentState, summary: dict[str, Any]) -> tuple[bool, str, list[str], str | None]:
+    ui = summary["ui"]
+    if ui["all_passed"] and ui["completed"] > 0:
+        return False, "Current UI execution passed; older transient failures do not require retry.", [], None
+    protocol = summary.get("agent_protocol_stage") or {}
+    failure_type = _stage_failure_type(protocol if isinstance(protocol, dict) else {})
+    if failure_type not in {"timeout", "navigation_blocked"}:
+        return False, "UI observations do not indicate a transient browser failure.", [], None
+    if not _can_retry(state, "ui"):
+        return False, "UI retry limit reached.", [
+            "已达到 UI 同动作重试上限，报告中保留超时/导航阻塞诊断。"
+        ], failure_type
+    return True, "UI observations indicate a transient browser failure.", [
+        "重试同一批 UI 命令以确认超时或导航阻塞是否可复现。"
+    ], failure_type
+
+
+def _ui_needs_human(state: AgentState, summary: dict[str, Any]) -> tuple[bool, str, list[str], str | None]:
+    ui = summary["ui"]
+    if ui["all_passed"] and ui["completed"] > 0:
+        return False, "Current UI execution passed; older failures do not require human intervention.", [], None
+    protocol = summary.get("agent_protocol_stage") or {}
+    failure_type = _stage_failure_type(protocol if isinstance(protocol, dict) else {})
+    if ui["setup_failed"]:
+        return True, "UI setup/login failed and requires user intervention before more automation.", [
+            "需要用户补充登录步骤、验证码/MFA 处理方式，或确认无需登录即可继续。"
+        ], failure_type or "ui_setup_failed"
+    if failure_type == "ui_high_risk_action_blocked":
+        return True, "UI observations include a blocked high-risk browser action.", [
+            "需要用户确认是否允许该高风险浏览器动作，或提供安全的替代测试路径。"
+        ], failure_type
+    return False, "No UI human intervention requirement was detected.", [], failure_type
+
+
 def _guardrail_decision(
     state: AgentState,
     stage: str,
@@ -386,84 +623,144 @@ def _guardrail_decision(
     allowed_actions: list[str],
 ) -> dict[str, Any]:
     if stage == "api":
+        needs_human, human_reason, human_missing, human_failure = _api_needs_human(state, summary)
+        if needs_human and _ASK_HUMAN in allowed_actions:
+            return _decision_payload(
+                sufficient_evidence=False,
+                confidence="high",
+                next_action=_ASK_HUMAN,
+                reason=human_reason,
+                diagnostics=human_missing,
+                missing_evidence=human_missing,
+                failure_type=human_failure,
+                human_question=human_missing[0] if human_missing else human_reason,
+            )
+
+        needs_retry, retry_reason, retry_missing, retry_failure = _api_needs_retry(state, summary)
+        if needs_retry and _RETRY_SAME_ACTION in allowed_actions:
+            return _decision_payload(
+                sufficient_evidence=False,
+                confidence="medium",
+                next_action=_RETRY_SAME_ACTION,
+                reason=retry_reason,
+                diagnostics=retry_missing,
+                missing_evidence=retry_missing,
+                replan_instructions="Retry the same API request batch once before changing the plan.",
+                failure_type=retry_failure,
+            )
+        if retry_failure in {"network_error", "timeout"} and retry_missing:
+            return _decision_payload(
+                sufficient_evidence=False,
+                confidence="medium",
+                next_action=_REPORT,
+                reason=f"{retry_reason} Retry limit reached.",
+                diagnostics=retry_missing,
+                missing_evidence=retry_missing,
+                failure_type=retry_failure,
+            )
+
         needs_replan, reason, missing = _api_needs_replan(state, summary)
+        failure_type = _stage_failure_type(summary.get("agent_protocol_stage") or {})
         if needs_replan and _REPLAN_API in allowed_actions and _can_replan(state, "api"):
-            return {
-                "sufficient_evidence": False,
-                "confidence": "medium",
-                "next_action": _REPLAN_API,
-                "reason": reason,
-                "diagnostics": missing,
-                "missing_evidence": missing,
-                "replan_instructions": "Regenerate API cases from available schema/base URL and favor safe executable probes before reporting.",
-                "source": "guardrail",
-            }
+            return _decision_payload(
+                sufficient_evidence=False,
+                confidence="medium",
+                next_action=_REPLAN_API,
+                reason=reason,
+                diagnostics=missing,
+                missing_evidence=missing,
+                replan_instructions="Regenerate API cases from available schema/base URL and favor safe executable probes before reporting.",
+                failure_type=failure_type,
+            )
         if needs_replan and not _can_replan(state, "api"):
-            return {
-                "sufficient_evidence": False,
-                "confidence": "medium",
-                "next_action": _REPORT,
-                "reason": f"{reason} Replan limit reached.",
-                "diagnostics": [*missing, "已达到 API 重规划上限，报告中保留阻塞诊断。"],
-                "missing_evidence": missing,
-                "replan_instructions": "",
-                "source": "guardrail",
-            }
+            return _decision_payload(
+                sufficient_evidence=False,
+                confidence="medium",
+                next_action=_REPORT,
+                reason=f"{reason} Replan limit reached.",
+                diagnostics=[*missing, "已达到 API 重规划上限，报告中保留阻塞诊断。"],
+                missing_evidence=missing,
+                failure_type=failure_type,
+            )
         if _CONTINUE_TO_UI in allowed_actions:
-            return {
-                "sufficient_evidence": True,
-                "confidence": "medium",
-                "next_action": _CONTINUE_TO_UI,
-                "reason": "API stage is complete enough; continuing to requested UI coverage.",
-                "diagnostics": [],
-                "missing_evidence": [],
-                "replan_instructions": "",
-                "source": "guardrail",
-            }
-        return {
-            "sufficient_evidence": True,
-            "confidence": "medium",
-            "next_action": _REPORT,
-            "reason": "API stage reached a reportable stopping point.",
-            "diagnostics": [],
-            "missing_evidence": [],
-            "replan_instructions": "",
-            "source": "guardrail",
-        }
+            return _decision_payload(
+                sufficient_evidence=True,
+                confidence="medium",
+                next_action=_CONTINUE_TO_UI,
+                reason="API stage is complete enough; continuing to requested UI coverage.",
+            )
+        return _decision_payload(
+            sufficient_evidence=True,
+            confidence="medium",
+            next_action=_REPORT,
+            reason="API stage reached a reportable stopping point.",
+        )
+
+    needs_human, human_reason, human_missing, human_failure = _ui_needs_human(state, summary)
+    if needs_human and _ASK_HUMAN in allowed_actions:
+        return _decision_payload(
+            sufficient_evidence=False,
+            confidence="high",
+            next_action=_ASK_HUMAN,
+            reason=human_reason,
+            diagnostics=human_missing,
+            missing_evidence=human_missing,
+            failure_type=human_failure,
+            human_question=human_missing[0] if human_missing else human_reason,
+        )
+
+    needs_retry, retry_reason, retry_missing, retry_failure = _ui_needs_retry(state, summary)
+    if needs_retry and _RETRY_SAME_ACTION in allowed_actions:
+        return _decision_payload(
+            sufficient_evidence=False,
+            confidence="medium",
+            next_action=_RETRY_SAME_ACTION,
+            reason=retry_reason,
+            diagnostics=retry_missing,
+            missing_evidence=retry_missing,
+            replan_instructions="Retry the same UI command batch once before changing the plan.",
+            failure_type=retry_failure,
+        )
+    if retry_failure in {"timeout", "navigation_blocked"} and retry_missing:
+        return _decision_payload(
+            sufficient_evidence=False,
+            confidence="medium",
+            next_action=_REPORT,
+            reason=f"{retry_reason} Retry limit reached.",
+            diagnostics=retry_missing,
+            missing_evidence=retry_missing,
+            failure_type=retry_failure,
+        )
 
     needs_replan, reason, missing = _ui_needs_replan(state, summary)
+    failure_type = _stage_failure_type(summary.get("agent_protocol_stage") or {})
     if needs_replan and _REPLAN_UI in allowed_actions and _can_replan(state, "ui"):
-        return {
-            "sufficient_evidence": False,
-            "confidence": "medium",
-            "next_action": _REPLAN_UI,
-            "reason": reason,
-            "diagnostics": missing,
-            "missing_evidence": missing,
-            "replan_instructions": "Regenerate UI cases from the latest snapshot evidence and avoid repeating failed selectors.",
-            "source": "guardrail",
-        }
+        return _decision_payload(
+            sufficient_evidence=False,
+            confidence="medium",
+            next_action=_REPLAN_UI,
+            reason=reason,
+            diagnostics=missing,
+            missing_evidence=missing,
+            replan_instructions="Regenerate UI cases from the latest snapshot evidence and avoid repeating failed selectors.",
+            failure_type=failure_type,
+        )
     if needs_replan and not _can_replan(state, "ui"):
-        return {
-            "sufficient_evidence": False,
-            "confidence": "medium",
-            "next_action": _REPORT,
-            "reason": f"{reason} Replan limit reached.",
-            "diagnostics": [*missing, "已达到 UI 重规划上限，报告中保留阻塞诊断。"],
-            "missing_evidence": missing,
-            "replan_instructions": "",
-            "source": "guardrail",
-        }
-    return {
-        "sufficient_evidence": True,
-        "confidence": "medium",
-        "next_action": _REPORT,
-        "reason": "UI stage reached a reportable stopping point.",
-        "diagnostics": [],
-        "missing_evidence": [],
-        "replan_instructions": "",
-        "source": "guardrail",
-    }
+        return _decision_payload(
+            sufficient_evidence=False,
+            confidence="medium",
+            next_action=_REPORT,
+            reason=f"{reason} Replan limit reached.",
+            diagnostics=[*missing, "已达到 UI 重规划上限，报告中保留阻塞诊断。"],
+            missing_evidence=missing,
+            failure_type=failure_type,
+        )
+    return _decision_payload(
+        sufficient_evidence=True,
+        confidence="medium",
+        next_action=_REPORT,
+        reason="UI stage reached a reportable stopping point.",
+    )
 
 
 async def _model_decision(
@@ -522,6 +819,8 @@ def _normalize_model_decision(
     if not isinstance(model_decision, dict):
         return None
     action = str(model_decision.get("next_action") or "").strip().lower()
+    if action == _CONTINUE and _CONTINUE_TO_UI in allowed_actions:
+        action = _CONTINUE_TO_UI
     if action not in allowed_actions:
         return None
     diagnostics = [
@@ -542,6 +841,12 @@ def _normalize_model_decision(
         "diagnostics": diagnostics,
         "missing_evidence": missing,
         "replan_instructions": _compact_text(model_decision.get("replan_instructions"), 800),
+        "replan_hint": _compact_text(
+            model_decision.get("replan_hint") or model_decision.get("replan_instructions"),
+            800,
+        ),
+        "failure_type": _compact_text(model_decision.get("failure_type"), 160) or None,
+        "human_question": _compact_text(model_decision.get("human_question"), 500),
         "source": "llm",
     }
 
@@ -599,17 +904,23 @@ def _merge_decisions(
     state: AgentState,
     stage: str,
 ) -> dict[str, Any]:
-    if guardrail["next_action"] in {_REPLAN_API, _REPLAN_UI}:
+    if guardrail["next_action"] in _GUARDRAIL_STOP_ACTIONS:
         decision = dict(guardrail)
         if model_decision:
             decision["source"] = "llm+guardrail"
             if model_decision.get("replan_instructions"):
                 decision["replan_instructions"] = model_decision["replan_instructions"]
+            if model_decision.get("replan_hint"):
+                decision["replan_hint"] = model_decision["replan_hint"]
             if model_decision.get("diagnostics"):
                 decision["diagnostics"] = list(dict.fromkeys([
                     *decision.get("diagnostics", []),
                     *model_decision["diagnostics"],
                 ]))
+            if not decision.get("failure_type") and model_decision.get("failure_type"):
+                decision["failure_type"] = model_decision["failure_type"]
+            if not decision.get("human_question") and model_decision.get("human_question"):
+                decision["human_question"] = model_decision["human_question"]
         return _sanitize_replan_instructions(state, stage, decision)
 
     if guardrail.get("sufficient_evidence") is False:
@@ -636,8 +947,21 @@ def _merge_decisions(
         if target_stage == stage and _can_replan(state, stage):
             return _sanitize_replan_instructions(state, stage, model_decision)
 
+    if model_decision and model_decision["next_action"] == _RETRY_SAME_ACTION and _can_retry(state, stage):
+        return model_decision
+
+    if model_decision and model_decision["next_action"] == _ASK_HUMAN:
+        return model_decision
+
     if model_decision and model_decision["next_action"] == _CONTINUE_TO_UI and stage == "api":
         return model_decision
+
+    if model_decision and model_decision["next_action"] == _CONTINUE and guardrail.get("sufficient_evidence"):
+        return {
+            **model_decision,
+            "next_action": guardrail.get("next_action", _REPORT),
+            "source": model_decision.get("source") or "llm",
+        }
 
     if model_decision and model_decision["next_action"] == _REPORT and guardrail["next_action"] == _REPORT:
         return model_decision
@@ -653,14 +977,24 @@ def _append_evaluation(state: AgentState, evaluation: dict[str, Any]) -> None:
     state["evidence_evaluation"] = evaluations[-1]
 
 
-def _append_attempt_history(state: AgentState, stage: str, summary: dict[str, Any]) -> None:
+def _append_attempt_history(
+    state: AgentState,
+    stage: str,
+    summary: dict[str, Any],
+    *,
+    attempt_kind: str = "replan",
+) -> None:
     attempts = state.setdefault("agent_attempt_history", [])
     attempts.append(
         redact_sensitive_data(
             {
                 "stage": stage,
+                "attempt_kind": attempt_kind,
                 "summary": summary.get(stage) or {},
-                "replan_count": _replan_count(state, stage) + 1,
+                "replan_count": _replan_count(state, stage)
+                + (1 if attempt_kind == "replan" else 0),
+                "retry_count": _retry_count(state, stage)
+                + (1 if attempt_kind == "retry" else 0),
             }
         )
     )
@@ -674,24 +1008,57 @@ def _increment_replan_count(state: AgentState, stage: str) -> None:
     state["agent_replan_counts"] = counts
 
 
+def _increment_retry_count(state: AgentState, stage: str) -> None:
+    counts = dict(state.get("agent_retry_counts") or {})
+    counts[stage] = _safe_int(counts.get(stage)) + 1
+    state["agent_retry_counts"] = counts
+
+
 def _apply_decision(state: AgentState, stage: str, decision: dict[str, Any], summary: dict[str, Any]) -> str:
     action = str(decision.get("next_action") or _REPORT)
     if action == _REPLAN_API:
-        _append_attempt_history(state, "api", summary)
+        _append_attempt_history(state, "api", summary, attempt_kind="replan")
         _increment_replan_count(state, "api")
         state["api_cases"] = []
         state["test_cases"] = list(_safe_list(state.get("ui_cases")))
         state["agent_replan_feedback"] = decision.get("replan_instructions") or decision.get("reason")
+        state["agent_retry_feedback"] = None
+        state["agent_human_question"] = None
     elif action == _REPLAN_UI:
-        _append_attempt_history(state, "ui", summary)
+        _append_attempt_history(state, "ui", summary, attempt_kind="replan")
         _increment_replan_count(state, "ui")
         state["ui_cases"] = []
         state["test_cases"] = list(_safe_list(state.get("api_cases")))
         state["agent_replan_feedback"] = decision.get("replan_instructions") or decision.get("reason")
-    elif action in {_CONTINUE_TO_UI, _REPORT}:
+        state["agent_retry_feedback"] = None
+        state["agent_human_question"] = None
+    elif action == _RETRY_SAME_ACTION:
+        _append_attempt_history(state, stage, summary, attempt_kind="retry")
+        _increment_retry_count(state, stage)
         state["agent_replan_feedback"] = None
+        state["agent_retry_feedback"] = (
+            decision.get("replan_instructions")
+            or decision.get("replan_hint")
+            or decision.get("reason")
+        )
+        state["agent_human_question"] = None
+    elif action == _ASK_HUMAN:
+        state["agent_replan_feedback"] = None
+        state["agent_retry_feedback"] = None
+        state["agent_human_question"] = (
+            decision.get("human_question")
+            or (decision.get("missing_evidence") or [None])[0]
+            or decision.get("reason")
+        )
+    elif action in {_CONTINUE_TO_UI, _CONTINUE, _REPORT}:
+        state["agent_replan_feedback"] = None
+        state["agent_retry_feedback"] = None
+        state["agent_human_question"] = None
 
-    next_node = _ACTION_TO_NODE.get(action, "reporter")
+    if action == _RETRY_SAME_ACTION:
+        next_node = "api_runner" if stage == "api" else "ui_runner"
+    else:
+        next_node = _ACTION_TO_NODE.get(action, "reporter")
     state["agent_next_node"] = next_node
     return next_node
 
@@ -724,6 +1091,9 @@ async def run(state: AgentState) -> AgentState:
         "diagnostics": decision.get("diagnostics") or [],
         "missing_evidence": decision.get("missing_evidence") or [],
         "replan_instructions": decision.get("replan_instructions") or "",
+        "replan_hint": decision.get("replan_hint") or decision.get("replan_instructions") or "",
+        "failure_type": decision.get("failure_type"),
+        "human_question": decision.get("human_question") or state.get("agent_human_question"),
         "source": decision.get("source") or "guardrail",
         "model_error": model_error,
         "summary": summary,
@@ -746,6 +1116,7 @@ async def run(state: AgentState) -> AgentState:
             "next_action": evaluation["next_action"],
             "next_node": next_node,
             "sufficient_evidence": evaluation["sufficient_evidence"],
+            "failure_type": evaluation["failure_type"],
             "source": evaluation["source"],
             "model_error": model_error,
         },
@@ -769,4 +1140,11 @@ async def run(state: AgentState) -> AgentState:
 
 def route_after_evaluation(state: AgentState) -> str:
     next_node = str(state.get("agent_next_node") or "reporter")
-    return next_node if next_node in {"tc_generator", "ui_test_planner", "ui_login", "reporter"} else "reporter"
+    return next_node if next_node in {
+        "api_runner",
+        "tc_generator",
+        "ui_runner",
+        "ui_test_planner",
+        "ui_login",
+        "reporter",
+    } else "reporter"

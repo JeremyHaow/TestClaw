@@ -764,6 +764,9 @@ def test_execution_log_payload_preserves_agent_protocol_records() -> None:
         "agent_evidence": [{"evidence_id": "evidence-1", "kind": "api_response"}],
         "agent_protocol_evaluations": [{"evaluation_id": "eval-1", "next_action": "report"}],
         "agent_protocol_summary": {"observation_total": 1},
+        "agent_retry_counts": {"api": 1},
+        "agent_retry_feedback": "Retry same request batch.",
+        "agent_human_question": "Please provide valid login details.",
     }
 
     payload = build_execution_log_payload(state)
@@ -773,6 +776,9 @@ def test_execution_log_payload_preserves_agent_protocol_records() -> None:
     assert payload["agent_evidence"][0]["evidence_id"] == "evidence-1"
     assert payload["agent_protocol_evaluations"][0]["evaluation_id"] == "eval-1"
     assert payload["agent_protocol_summary"]["observation_total"] == 1
+    assert payload["agent_retry_counts"] == {"api": 1}
+    assert payload["agent_retry_feedback"] == "Retry same request batch."
+    assert payload["agent_human_question"] == "Please provide valid login details."
 
 
 @pytest.mark.asyncio
@@ -962,6 +968,220 @@ async def test_execution_evaluator_does_not_continue_to_ui_after_api_replan_limi
     assert state["evidence_evaluation"]["next_action"] == "report"
     assert state["evidence_evaluation"]["sufficient_evidence"] is False
     assert "Replan limit reached" in state["evidence_evaluation"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_execution_evaluator_retries_api_after_transient_observation(monkeypatch) -> None:
+    monkeypatch.setattr(execution_evaluator.settings, "AGENT_MAX_REPLAN_ATTEMPTS", 2)
+    initial_state = {
+        "agent_execution_stage": "api",
+        "test_type": "api",
+        "input_type": "swagger_json",
+        "objective": "API smoke",
+        "target_url": "https://api.example.test",
+        "api_execution_result": {
+            "total": 1,
+            "executed": 1,
+            "passed": 0,
+            "failed": 1,
+            "skipped": 0,
+            "http_executed": 1,
+            "all_passed": False,
+            "complete": True,
+            "results": [
+                {
+                    "label": "GET /health",
+                    "method": "GET",
+                    "url": "https://api.example.test/health",
+                    "status_code": 0,
+                    "elapsed_ms": 0,
+                    "passed": False,
+                    "error": "ConnectError: DNS name resolution failed",
+                    "http_executed": True,
+                    "assertion_results": [],
+                }
+            ],
+        },
+        "workflow_steps": [],
+    }
+    append_api_result_observations(
+        initial_state,
+        initial_state["api_execution_result"],
+        stage="api_runner",
+    )
+
+    state = await execution_evaluator.run(initial_state)
+
+    assert state["agent_next_node"] == "api_runner"
+    assert state["evidence_evaluation"]["next_action"] == "retry_same_action"
+    assert state["evidence_evaluation"]["failure_type"] == "network_error"
+    assert state["evidence_evaluation"]["replan_hint"]
+    assert state["agent_retry_counts"]["api"] == 1
+    assert state["agent_retry_feedback"]
+    assert state["agent_attempt_history"][0]["attempt_kind"] == "retry"
+    assert state["agent_protocol_evaluations"][0]["outcome"] == "needs_retry"
+    assert state["agent_protocol_evaluations"][0]["failure_type"] == "network_error"
+
+
+@pytest.mark.asyncio
+async def test_execution_evaluator_retries_ui_after_timeout_observation(monkeypatch) -> None:
+    monkeypatch.setattr(execution_evaluator.settings, "AGENT_MAX_REPLAN_ATTEMPTS", 2)
+    initial_state = {
+        "agent_execution_stage": "ui",
+        "test_type": "ui",
+        "input_type": "url",
+        "objective": "UI smoke",
+        "target_url": "https://app.example.test",
+        "ui_execution_result": {
+            "total": 1,
+            "completed": 1,
+            "passed": 0,
+            "failed": 1,
+            "command_total": 1,
+            "command_completed": 1,
+            "command_failed": 1,
+            "screenshots": [],
+            "snapshot_texts": [],
+            "all_passed": False,
+            "complete": True,
+            "commands": [
+                {
+                    "case_index": 0,
+                    "case_title": "Open app",
+                    "command": "goto https://app.example.test",
+                    "normalized_command": "goto https://app.example.test",
+                    "status": "executed",
+                    "status_code": 1,
+                    "stderr": "Timeout 30000ms exceeded",
+                    "passed": False,
+                }
+            ],
+        },
+        "workflow_steps": [],
+    }
+    append_ui_result_observations(
+        initial_state,
+        initial_state["ui_execution_result"],
+        stage="ui_runner",
+    )
+
+    state = await execution_evaluator.run(initial_state)
+
+    assert state["agent_next_node"] == "ui_runner"
+    assert state["evidence_evaluation"]["next_action"] == "retry_same_action"
+    assert state["evidence_evaluation"]["failure_type"] == "timeout"
+    assert state["agent_retry_counts"]["ui"] == 1
+    assert state["agent_attempt_history"][0]["attempt_kind"] == "retry"
+    assert state["agent_protocol_evaluations"][0]["outcome"] == "needs_retry"
+
+
+@pytest.mark.asyncio
+async def test_execution_evaluator_asks_human_for_api_auth_observation() -> None:
+    initial_state = {
+        "agent_execution_stage": "api",
+        "test_type": "api",
+        "input_type": "swagger_json",
+        "objective": "API smoke",
+        "target_url": "https://api.example.test",
+        "api_execution_result": {
+            "total": 1,
+            "executed": 1,
+            "passed": 0,
+            "failed": 1,
+            "skipped": 0,
+            "http_executed": 1,
+            "all_passed": False,
+            "complete": True,
+            "results": [
+                {
+                    "label": "GET /me",
+                    "method": "GET",
+                    "url": "https://api.example.test/me",
+                    "status_code": 401,
+                    "elapsed_ms": 12,
+                    "passed": False,
+                    "failure_type": "auth_failure",
+                    "failure_reason": "Missing Authorization header.",
+                    "http_executed": True,
+                    "assertion_results": [{"type": "status_code", "passed": False}],
+                }
+            ],
+        },
+        "workflow_steps": [],
+    }
+    append_api_result_observations(
+        initial_state,
+        initial_state["api_execution_result"],
+        stage="api_runner",
+    )
+
+    state = await execution_evaluator.run(initial_state)
+
+    assert state["agent_next_node"] == "reporter"
+    assert state["evidence_evaluation"]["next_action"] == "ask_human"
+    assert state["evidence_evaluation"]["failure_type"] == "auth_failure"
+    assert state["evidence_evaluation"]["human_question"]
+    assert state["agent_human_question"] == state["evidence_evaluation"]["human_question"]
+    assert state["agent_protocol_evaluations"][0]["outcome"] == "needs_human"
+    assert state["agent_protocol_evaluations"][0]["failure_type"] == "auth_failure"
+
+
+@pytest.mark.asyncio
+async def test_execution_evaluator_replans_api_from_dependency_observation(monkeypatch) -> None:
+    monkeypatch.setattr(execution_evaluator.settings, "AGENT_MAX_REPLAN_ATTEMPTS", 2)
+    initial_state = {
+        "agent_execution_stage": "api",
+        "test_type": "api",
+        "input_type": "swagger_json",
+        "objective": "Fetch order detail after listing orders",
+        "target_url": "https://api.example.test",
+        "parsed_api_schema": [
+            {"method": "GET", "path": "/orders"},
+            {"method": "GET", "path": "/orders/{id}"},
+        ],
+        "api_cases": [{"title": "order detail"}],
+        "api_execution_result": {
+            "total": 1,
+            "executed": 0,
+            "passed": 0,
+            "failed": 1,
+            "skipped": 1,
+            "http_executed": 0,
+            "all_passed": False,
+            "complete": True,
+            "results": [
+                {
+                    "label": "GET /orders/{id}",
+                    "method": "GET",
+                    "url": "https://api.example.test/orders/{id}",
+                    "status_code": None,
+                    "elapsed_ms": 0,
+                    "passed": None,
+                    "skipped": True,
+                    "skip_type": api_runner.PATH_PARAM_UNRESOLVED_SKIP_TYPE,
+                    "skip_reason": "缺少可用于路径参数 id 的上游列表响应值。",
+                    "http_executed": False,
+                    "assertion_results": [],
+                }
+            ],
+        },
+        "workflow_steps": [],
+    }
+    append_api_result_observations(
+        initial_state,
+        initial_state["api_execution_result"],
+        stage="api_runner",
+    )
+
+    state = await execution_evaluator.run(initial_state)
+
+    assert state["agent_next_node"] == "tc_generator"
+    assert state["evidence_evaluation"]["next_action"] == "replan_api"
+    assert state["evidence_evaluation"]["failure_type"] == "dependency_missing"
+    assert state["evidence_evaluation"]["missing_evidence"]
+    assert state["agent_replan_counts"]["api"] == 1
+    assert state["agent_attempt_history"][0]["attempt_kind"] == "replan"
+    assert state["agent_protocol_evaluations"][0]["failure_type"] == "dependency_missing"
 
 
 @pytest.mark.asyncio

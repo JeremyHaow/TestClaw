@@ -158,7 +158,9 @@ def build_graph():
         "execution_evaluator",
         _after_execution_evaluator,
         {
+            "api_runner": "api_runner",
             "tc_generator": "tc_generator",
+            "ui_runner": "ui_runner",
             "ui_test_planner": "ui_test_planner",
             "ui_login": "ui_login",
             "reporter": "reporter",

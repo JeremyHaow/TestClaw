@@ -337,11 +337,14 @@ EVIDENCE_EVALUATOR_PROMPT = """你是 TestClaw 的测试执行质量评估智能
 {{
   "sufficient_evidence": false,
   "confidence": "low|medium|high",
-  "next_action": "report|continue_to_ui|replan_api|replan_ui",
+  "next_action": "report|continue|continue_to_ui|retry_same_action|replan_api|replan_ui|ask_human",
   "reason": "简短说明为什么继续或停止",
+  "failure_type": "auth_failure|network_error|timeout|assertion_failure|schema_contract|backend_error|safe_write_blocked|dependency_missing|environment_blocked|ui_locator_missing|ui_assertion_failure|navigation_blocked|ui_high_risk_action_blocked|null",
   "diagnostics": ["可执行诊断1", "可执行诊断2"],
   "missing_evidence": ["缺少的证据或动作"],
-  "replan_instructions": "如果需要重规划，说明下一轮应该如何改变计划、用例或工具使用"
+  "replan_instructions": "如果需要重规划或同动作重试，说明下一轮应该如何改变计划、用例或工具使用",
+  "replan_hint": "可展示给后续 planner/runner 的简短下一步提示",
+  "human_question": "如果 next_action=ask_human，给用户的一句话问题；否则留空"
 }}
 
 规则：
@@ -349,11 +352,13 @@ EVIDENCE_EVALUATOR_PROMPT = """你是 TestClaw 的测试执行质量评估智能
 2. 如果 API 阶段证据充分且本次还有 UI 目标，next_action 应为 continue_to_ui。
 3. 如果 UI 命令因为元素未找到、页面状态不匹配、快照证据不足而失败，并且仍有可用快照/页面上下文，应建议 replan_ui。
 4. 如果 API 用例没有产生可执行请求，但存在 schema、base URL 或可读端点线索，应建议 replan_api。
-5. 不要假设固定网站、固定接口、固定截图或固定业务菜单；只依据证据摘要和工具调用。
-6. API 重规划只能在已加载 OpenAPI schema 和执行策略范围内加深已记录 endpoint 的证据；不要建议不存在路径、schema 外路径、鉴权绕过测试或安全策略禁止的方法。
-7. UI 重规划只能使用这些 playwright-cli 命令：open、goto、snapshot、click、fill、type、screenshot、resize、go-back、reload、run-code、dialog-dismiss；响应式视窗验证必须使用 resize <width> <height>，不要建议 set_viewport_size、setViewportSize、evaluate 或 wait/sleep/assert/expect。
-8. 不要输出隐藏推理过程；reason 使用一句可观察的判断依据。
-9. 输出纯 JSON，不要包含 Markdown。
+5. 如果 failure_type 是 network_error、timeout 或 navigation_blocked，且缺少复现证据，可以建议 retry_same_action；不要直接重写计划。
+6. 如果 failure_type 是 auth_failure、environment_blocked、ui_high_risk_action_blocked 或登录/setup 阻塞，并且缺少用户可提供的信息，应建议 ask_human。
+7. 不要假设固定网站、固定接口、固定截图或固定业务菜单；只依据证据摘要和工具调用。
+8. API 重规划只能在已加载 OpenAPI schema 和执行策略范围内加深已记录 endpoint 的证据；不要建议不存在路径、schema 外路径、鉴权绕过测试或安全策略禁止的方法。
+9. UI 重规划只能使用这些 playwright-cli 命令：open、goto、snapshot、click、fill、type、screenshot、resize、go-back、reload、run-code、dialog-dismiss；响应式视窗验证必须使用 resize <width> <height>，不要建议 set_viewport_size、setViewportSize、evaluate 或 wait/sleep/assert/expect。
+10. 不要输出隐藏推理过程；reason 使用一句可观察的判断依据。
+11. 输出纯 JSON，不要包含 Markdown。
 """
 
 LOGIN_DETAILS_PROMPT = """你是测试前置说明理解器。用户提供的信息不一定是登录信息，也可能是测试范围、账号、环境说明、禁止操作、验证码、租户选择、语言选择或其他准备事项。

@@ -68,6 +68,9 @@ class AgentState(TypedDict, total=False):
     agent_next_node: str | None
     agent_replan_counts: dict[str, int] | None
     agent_replan_feedback: str | None
+    agent_retry_counts: dict[str, int] | None
+    agent_retry_feedback: str | None
+    agent_human_question: str | None
     agent_strategy_decision: dict | None
     agent_tool_plan: list[dict] | None
     agent_strategy_diagnostics: list[dict] | None

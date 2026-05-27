@@ -83,7 +83,9 @@ def test_after_api_runner_routes_back_to_ui_for_auto_and_full_runs() -> None:
 
 
 def test_after_execution_evaluator_uses_bounded_next_node() -> None:
+    assert _after_execution_evaluator({"agent_next_node": "api_runner"}) == "api_runner"
     assert _after_execution_evaluator({"agent_next_node": "tc_generator"}) == "tc_generator"
+    assert _after_execution_evaluator({"agent_next_node": "ui_runner"}) == "ui_runner"
     assert _after_execution_evaluator({"agent_next_node": "ui_test_planner"}) == "ui_test_planner"
     assert _after_execution_evaluator({"agent_next_node": "ui_login"}) == "ui_login"
     assert _after_execution_evaluator({"agent_next_node": "unknown"}) == "reporter"

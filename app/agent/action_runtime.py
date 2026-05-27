@@ -1564,6 +1564,8 @@ def append_evaluation_protocol(
     outcome = (
         "needs_replan"
         if next_action.startswith("replan")
+        else "needs_retry"
+        if next_action == "retry_same_action"
         else "needs_human"
         if next_action == "ask_human"
         else "sufficient"
