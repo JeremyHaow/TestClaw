@@ -240,9 +240,9 @@ run_agent_evaluations
 
 ## 5. Target Frontend Architecture
 
-### 5.0 Visual Design Reference
+### 5.0 Color Palette Reference
 
-下一轮 Codex 做 Runtime Workbench 和前端 UI 时，必须先阅读仓库根目录的：
+下一轮 Codex 做 Runtime Workbench 和前端 UI 时，只需要参考仓库根目录这份文件里的颜色规范：
 
 ```text
 TestClaw_Codex_Fullstack_Refactor_Guide.md
@@ -250,25 +250,11 @@ TestClaw_Codex_Fullstack_Refactor_Guide.md
 
 参考范围：
 
-- `3. 视觉设计系统`
-- `4. 前端目录规划`
-- `6. 页面 UI 与交互设计`
-- `Phase 1：设计系统与布局壳`
-- `Phase 4：Agent Cockpit`
+- 只参考 `3.2 颜色规范`
 
-这份 guide 作为视觉方向和产品交互参考，不作为组件实现方式的最终约束。
+不要参考这份 guide 的前端目录规划、页面布局、交互原型、阶段任务或 `Tc*` 组件方案。它在下一轮任务里的唯一用途是提供颜色 token。
 
-必须采用的视觉方向：
-
-- Light SaaS
-- Agent Workspace
-- Calm spacing
-- Soft shadows
-- Blue accent
-- Structured AI planning
-- Run Detail 像 Agent Cockpit，而不是静态报告页
-
-必须参考的视觉 token：
+必须参考的颜色 token：
 
 ```text
 Page background:     #F5F7FB / #F7F9FC
@@ -286,7 +272,7 @@ Text secondary:      #475569
 Text muted:          #94A3B8
 ```
 
-必须参考的状态语义：
+可参考的状态颜色语义：
 
 ```text
 Draft       gray
@@ -304,12 +290,11 @@ Cancelled   gray
 
 关键约束：
 
-- 不要照搬 guide 里旧的 `TcButton.vue`、`TcCard.vue`、`TcBadge.vue` 自建 UI 组件路线。
+- 这份 guide 只能提供颜色，不提供组件实现方式。
 - 新 UI 基础组件必须来自 shadcn-vue 生成的 shadcn/ui 风格 Vue 组件。
 - 如果需要业务封装，只能在 `frontend/src/components/runtime/` 或 `frontend/src/components/agent/` 中组合 shadcn-vue 组件，不要在 `frontend/src/components/ui` 写业务逻辑。
 - `frontend/src/components/ui` 只保存 shadcn-vue 生成或同风格的基础设计系统组件。
-- guide 中的 `Tc*` 组件命名只能作为旧文档背景，不是下一轮实现目标。
-- 如果 guide 的“不要引入新的 UI 框架”和当前要求冲突，以当前文档为准：允许并要求引入 `shadcn-vue`。
+- 如果 guide 的其他 UI/UX 建议和当前文档冲突，以当前文档为准。
 
 ### 5.1 Run Detail 改成 Agent Runtime Workbench
 
@@ -490,7 +475,7 @@ args = ["shadcn-vue@latest", "mcp"]
 
 - 新增 Runtime Workbench 组件优先使用 `src/components/ui` 下的 shadcn-vue 组件。
 - `Button`、`Badge`、`Card`、`Tabs`、`Sheet`、`Dialog`、`Tooltip`、`Table`、`ScrollArea` 等基础交互必须来自 shadcn-vue。
-- Runtime Workbench 视觉风格参考 `TestClaw_Codex_Fullstack_Refactor_Guide.md` 第 3 章，但实现必须使用 shadcn-vue shadcn/ui 组件。
+- Runtime Workbench 只参考 `TestClaw_Codex_Fullstack_Refactor_Guide.md` 的颜色规范；组件实现必须使用 shadcn-vue shadcn/ui 组件。
 - 业务组件放 `frontend/src/components/runtime/`，不要把业务逻辑塞进 `components/ui`。
 - `components/ui` 只保存可复用设计系统组件。
 - 不要混用另一个大型 UI 框架。
@@ -665,12 +650,12 @@ args = ["shadcn-vue@latest", "mcp"]
 - 请先阅读 docs/AGENT_GAP_ANALYSIS.md
 - 请先阅读 docs/AGENT_GAP_ANALYSIS_PROGRESS.md
 - 请先阅读 docs/AGENT_RUNTIME_V1_ONE_STEP_PLAN.md
-- 请先阅读 TestClaw_Codex_Fullstack_Refactor_Guide.md，重点看第 3 章视觉设计系统、第 4 章前端目录规划、第 6 章页面交互设计、Phase 4 Agent Cockpit。
+- 请先阅读 TestClaw_Codex_Fullstack_Refactor_Guide.md，但只参考其中 `3.2 颜色规范`，不要参考其页面布局、目录规划、交互原型或旧组件方案。
 - 这次允许修改 UI。
 - 这次允许新增数据库模型和 Alembic migration。
 - 但必须保持旧字段兼容，不能删除 legacy API/UI result。
 - 前端必须标准化到 shadcn-vue。当前项目是 Vue3，不要使用 React 版 shadcn/ui。
-- 视觉方向参考 TestClaw_Codex_Fullstack_Refactor_Guide.md，但基础组件必须使用 shadcn-vue 生成的 shadcn/ui 风格 Vue 组件。
+- 前端颜色 token 参考 TestClaw_Codex_Fullstack_Refactor_Guide.md 的 `3.2 颜色规范`；基础组件必须使用 shadcn-vue 生成的 shadcn/ui 风格 Vue 组件。
 - 当前 frontend 有 package-lock.json，项目依赖命令优先使用 npm/npx，不要无故切换包管理器。
 - shadcn-vue Skill 和 MCP 是 Codex 环境增强；能安装就安装，不能安装要继续完成项目代码并在最终回复说明。
 
@@ -719,8 +704,8 @@ args = ["shadcn-vue@latest", "mcp"]
 14. Evaluator 基于 runtime observations/evidence 输出 retry/replan/ask_human/report。
 15. Run Detail 改为 Runtime Workbench，主视图展示 current action、timeline、observation、evidence、evaluation、human handoff。raw API/UI 结果降级为详情。
 16. Runtime Workbench 新增 UI 必须优先使用 `frontend/src/components/ui` 的 shadcn-vue 组件；业务组件放 `frontend/src/components/runtime/`。
-17. Runtime Workbench 视觉风格必须参考 `TestClaw_Codex_Fullstack_Refactor_Guide.md` 的 Light SaaS / Agent Workspace / Blue accent / Calm spacing / Agent Cockpit 方向，但不要实现 guide 中旧的 `TcButton/TcCard/TcBadge` 自建基础组件。
-18. guide 中的 `Tc*` 基础组件需求要映射到 shadcn-vue 组件：button -> `Button`，card -> `Card`，badge -> `Badge`，tabs -> `Tabs`，drawer -> `Sheet`，modal -> `Dialog`，tooltip -> `Tooltip`，table -> `Table`，skeleton -> `Skeleton`。
+17. Runtime Workbench 只从 `TestClaw_Codex_Fullstack_Refactor_Guide.md` 读取颜色规范，不要从该 guide 继承布局、组件命名或页面交互。
+18. 常用基础 UI 必须使用 shadcn-vue 组件：button -> `Button`，card -> `Card`，badge -> `Badge`，tabs -> `Tabs`，drawer -> `Sheet`，modal -> `Dialog`，tooltip -> `Tooltip`，table -> `Table`，skeleton -> `Skeleton`。
 19. Memory candidate 必须引用 evaluation/observation/evidence ids，并只把高置信度、目标相关事实喂给 planner。
 20. SSE 或 run detail 查询必须能读取 runtime events；Task.execution_log 继续保留兼容快照。
 21. 添加或更新 Golden Tasks failure matrix，覆盖 API、UI、HITL、Memory 的主要失败类型。
@@ -734,7 +719,7 @@ args = ["shadcn-vue@latest", "mcp"]
 - 不要只修一个 golden case。
 - 不要提交未通过测试的中间状态。
 - 不要把 React 版 shadcn/ui 组件复制进 Vue 项目。
-- 不要按 `TestClaw_Codex_Fullstack_Refactor_Guide.md` 旧方案新增 `TcButton/TcCard/TcBadge` 作为新的基础 UI 系统。
+- 不要按 `TestClaw_Codex_Fullstack_Refactor_Guide.md` 的布局、目录规划、页面交互或旧组件方案实现 UI；只参考它的颜色规范。
 - 不要把业务组件写进 `frontend/src/components/ui`。
 - 不要引入另一个大型 UI 框架来和 shadcn-vue 混用。
 
@@ -745,7 +730,7 @@ args = ["shadcn-vue@latest", "mcp"]
 - Golden Tasks 能证明 runtime v1 的 Action -> ToolCall -> Observation -> Evaluation 闭环。
 - Run Detail 页面源码测试证明 UI 使用 runtime events。
 - Run Detail 页面源码测试证明 Runtime Workbench 使用 shadcn-vue `components/ui` 基础组件。
-- Run Detail 页面源码测试证明没有把旧 guide 的 `TcButton/TcCard/TcBadge` 作为新基础组件路线。
+- Run Detail 页面源码测试证明只使用根目录 guide 的颜色 token，不依赖其旧组件方案。
 - frontend/components.json 存在，并且基础组件已生成到 frontend/src/components/ui。
 - 最终提交一次或多次 commit，并在最终回复中列出 commit hash、迁移文件、主要修改文件、测试结果和当前 git status。
 ```
