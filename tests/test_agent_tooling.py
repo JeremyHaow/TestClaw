@@ -563,8 +563,28 @@ def test_agent_execution_protocol_maps_api_results_without_secret_leak() -> None
 
     assert len(observations) == 2
     assert observations[0]["status"] == "success"
+    assert observations[0]["inputs"]["method"] == "GET"
+    assert observations[0]["inputs"]["path"] == "/me"
+    assert observations[0]["inputs"]["url"] == "https://api.example.test/me"
+    assert observations[0]["outputs"]["duration_ms"] == 12.3
+    assert observations[0]["outputs"]["assertions"] == [
+        {
+            "type": "status_code",
+            "passed": True,
+            "skipped": False,
+            "blocking": True,
+        }
+    ]
+    assert observations[0]["outputs"]["error_type"] is None
+    assert observations[0]["outputs"]["failure_type"] is None
+    assert observations[0]["outputs"]["safety_decision"] == "safe_read_executed"
+    assert observations[0]["outputs"]["evidence_refs"] == observations[0]["evidence_ids"]
     assert observations[1]["failure_type"] == "auth_failure"
     assert observations[1]["outcome"] == "failed"
+    assert observations[1]["outputs"]["error_type"] == "auth_failure"
+    assert observations[1]["outputs"]["failure_type"] == "auth_failure"
+    assert observations[1]["outputs"]["raw_failure_type"] == "auth_failure"
+    assert observations[1]["outputs"]["safety_decision"] == "safe_read_executed"
     assert state["agent_protocol_summary"]["observation_total"] == 2
     assert state["agent_protocol_summary"]["by_failure_type"]["auth_failure"] == 1
     assert {item["kind"] for item in state["agent_evidence"]} == {
@@ -572,6 +592,122 @@ def test_agent_execution_protocol_maps_api_results_without_secret_leak() -> None
         "api_assertion",
     }
     assert "secret-token" not in json.dumps(state, ensure_ascii=False)
+
+
+def test_agent_execution_protocol_normalizes_api_failure_taxonomy() -> None:
+    state: dict = {"api_execution_policy": "write_allowed"}
+
+    observations = append_api_result_observations(
+        state,
+        {
+            "results": [
+                {
+                    "label": "POST /items",
+                    "method": "POST",
+                    "url": "https://api.example.test/items",
+                    "status_code": None,
+                    "elapsed_ms": 0,
+                    "passed": None,
+                    "skipped": True,
+                    "skip_type": api_runner.SAFE_WRITE_BLOCK_SKIP_TYPE,
+                    "failure_type": api_runner.SAFE_WRITE_BLOCK_SKIP_TYPE,
+                    "skip_reason": "write_allowed still requires the safe-write gate",
+                    "http_executed": False,
+                    "assertion_results": [],
+                },
+                {
+                    "label": "GET /items/{id}",
+                    "method": "GET",
+                    "url": "https://api.example.test/items/{id}",
+                    "status_code": None,
+                    "elapsed_ms": 0,
+                    "passed": None,
+                    "skipped": True,
+                    "skip_type": api_runner.PATH_PARAM_UNRESOLVED_SKIP_TYPE,
+                    "skip_reason": "missing path dependency id",
+                    "http_executed": False,
+                    "assertion_results": [],
+                },
+                {
+                    "label": "GET /slow",
+                    "method": "GET",
+                    "url": "https://api.example.test/slow",
+                    "status_code": 0,
+                    "elapsed_ms": 0,
+                    "passed": False,
+                    "error": "Request timed out after 30s",
+                    "http_executed": True,
+                    "assertion_results": [],
+                },
+                {
+                    "label": "GET /dns",
+                    "method": "GET",
+                    "url": "https://missing.example.test/dns",
+                    "status_code": 0,
+                    "elapsed_ms": 0,
+                    "passed": False,
+                    "error": "ConnectError: DNS name resolution failed",
+                    "http_executed": True,
+                    "assertion_results": [],
+                },
+                {
+                    "label": "GET /shape",
+                    "method": "GET",
+                    "url": "https://api.example.test/shape",
+                    "status_code": 200,
+                    "elapsed_ms": 4,
+                    "passed": False,
+                    "http_executed": True,
+                    "assertion_results": [
+                        {
+                            "type": "schema",
+                            "passed": False,
+                            "blocking": True,
+                            "error": "required property missing",
+                        }
+                    ],
+                },
+                {
+                    "label": "GET /field",
+                    "method": "GET",
+                    "url": "https://api.example.test/field",
+                    "status_code": 200,
+                    "elapsed_ms": 5,
+                    "passed": False,
+                    "http_executed": True,
+                    "assertion_results": [
+                        {
+                            "type": "json_path",
+                            "path": "$.ok",
+                            "expected": True,
+                            "actual": False,
+                            "passed": False,
+                        }
+                    ],
+                },
+            ]
+        },
+        stage="api_runner",
+    )
+
+    assert [item["failure_type"] for item in observations] == [
+        "safe_write_blocked",
+        "dependency_missing",
+        "timeout",
+        "network_error",
+        "schema_contract",
+        "assertion_failure",
+    ]
+    assert observations[0]["outputs"]["raw_failure_type"] == api_runner.SAFE_WRITE_BLOCK_SKIP_TYPE
+    assert observations[0]["outputs"]["safety_decision"] == "blocked_by_safe_write_gate"
+    assert observations[1]["outputs"]["skip_type"] == api_runner.PATH_PARAM_UNRESOLVED_SKIP_TYPE
+    assert observations[1]["outputs"]["safety_decision"] == "blocked_by_missing_dependency"
+    assert observations[2]["outputs"]["error_type"] == "timeout"
+    assert observations[3]["outputs"]["error_type"] == "network_error"
+    assert observations[4]["outputs"]["assertions"][0]["error"] == "required property missing"
+    assert observations[5]["outputs"]["assertions"][0]["path"] == "$.ok"
+    assert state["agent_protocol_summary"]["by_failure_type"]["safe_write_blocked"] == 1
+    assert state["agent_protocol_summary"]["by_failure_type"]["dependency_missing"] == 1
 
 
 def test_agent_execution_protocol_maps_ui_results_and_evidence() -> None:
@@ -2086,9 +2222,19 @@ async def test_api_runner_redacts_secret_response_values_from_legacy_execution_r
     assert "response-password-secret" not in dumped
     assert legacy_result["api_results"][0]["body"]["access_token"] == REDACTED_VALUE
     assert legacy_result["api_results"][0]["body"]["profile"]["password"] == REDACTED_VALUE
-    assert result["agent_observations"][0]["tool_name"] == "api.http_request"
-    assert result["agent_observations"][0]["status"] == "success"
-    assert result["agent_observations"][0]["evidence_ids"]
+    observation = result["agent_observations"][0]
+    assert observation["tool_name"] == "api.http_request"
+    assert observation["status"] == "success"
+    assert observation["inputs"]["method"] == "GET"
+    assert observation["inputs"]["path"] == "/token"
+    assert observation["outputs"]["status_code"] == 200
+    assert observation["outputs"]["duration_ms"] is not None
+    assert observation["outputs"]["assertions"][0]["type"] == "status_code"
+    assert observation["outputs"]["error_type"] is None
+    assert observation["outputs"]["failure_type"] is None
+    assert observation["outputs"]["safety_decision"] == "safe_read_executed"
+    assert observation["outputs"]["evidence_refs"] == observation["evidence_ids"]
+    assert observation["evidence_ids"]
     assert result["agent_protocol_summary"]["by_layer"]["api"] == 1
     assert "response-token-secret" not in json.dumps(result["agent_evidence"], ensure_ascii=False)
 
@@ -2172,6 +2318,15 @@ async def test_api_runner_extracts_and_injects_dependencies_with_tool_calls(monk
     assert {"api.http_request", "api.extract_value", "api.inject_dependency", "api.schema_assert"} <= tool_names
     assert result["agent_protocol_summary"]["by_layer"]["api"] == 2
     assert {observation["status"] for observation in result["agent_observations"]} == {"success"}
+    profile_observation = result["agent_observations"][1]
+    assert profile_observation["inputs"]["method"] == "GET"
+    assert profile_observation["inputs"]["path"] == "/me"
+    assert profile_observation["outputs"]["assertion_count"] >= 3
+    assert {
+        assertion["type"] for assertion in profile_observation["outputs"]["assertions"]
+    } >= {"status_code", "json_path", "schema"}
+    assert profile_observation["outputs"]["safety_decision"] == "safe_read_executed"
+    assert profile_observation["outputs"]["evidence_refs"] == profile_observation["evidence_ids"]
     assert {
         evidence["kind"] for evidence in result["agent_evidence"]
     } >= {"api_response", "api_assertion"}
@@ -2340,6 +2495,12 @@ async def test_api_runner_write_allowed_blocks_mutating_curated_case(monkeypatch
     assert api_result["executed"] == 0
     assert api_result["skipped"] == 1
     assert api_result["results"][0]["skip_type"] == api_runner.SAFE_WRITE_BLOCK_SKIP_TYPE
+    observation = result["agent_observations"][0]
+    assert observation["failure_type"] == "safe_write_blocked"
+    assert observation["outputs"]["skip_type"] == api_runner.SAFE_WRITE_BLOCK_SKIP_TYPE
+    assert observation["outputs"]["raw_failure_type"] == api_runner.SAFE_WRITE_BLOCK_SKIP_TYPE
+    assert observation["outputs"]["safety_decision"] == "blocked_by_safe_write_gate"
+    assert observation["outputs"]["evidence_refs"] == observation["evidence_ids"]
 
 
 @pytest.mark.asyncio
@@ -3631,6 +3792,13 @@ async def test_api_runner_write_allowed_blocks_mutating_schema_requests(monkeypa
     assert {item.get("skip_type") for item in api_result["results"]} == {
         api_runner.SAFE_WRITE_BLOCK_SKIP_TYPE
     }
+    assert {observation["failure_type"] for observation in result["agent_observations"]} == {
+        "safe_write_blocked"
+    }
+    assert {
+        observation["outputs"]["safety_decision"]
+        for observation in result["agent_observations"]
+    } == {"blocked_by_safe_write_gate"}
     assert "api.safe_write_gate" in {call["tool"] for call in result["tool_calls"]}
 
 
@@ -5004,6 +5172,10 @@ async def test_api_runner_blocks_unsafe_write_agent_action_without_gate(monkeypa
     assert api_result["blocking_skipped"] == 1
     assert api_result["all_passed"] is False
     assert api_result["results"][0]["skip_type"] == api_runner.SAFE_WRITE_BLOCK_SKIP_TYPE
+    observation = result["agent_observations"][0]
+    assert observation["failure_type"] == "safe_write_blocked"
+    assert observation["outputs"]["error_type"] == "safe_write_blocked"
+    assert observation["outputs"]["safety_decision"] == "blocked_by_safe_write_gate"
 
 
 @pytest.mark.asyncio

@@ -867,32 +867,197 @@ def record_agent_action_observation(
     return payload
 
 
+API_RAW_FAILURE_TYPE_MAP = {
+    "api_assertion": "assertion_failure",
+    "validation_contract": "assertion_failure",
+    "backend_validation_contract": "assertion_failure",
+    "schema_contract": "schema_contract",
+    "backend_error": "backend_error",
+    "auth_failure": "auth_failure",
+    "safe_write_gate_blocked": "safe_write_blocked",
+    "crud_skill_blocked": "safe_write_blocked",
+    "path_param_unresolved": "dependency_missing",
+    "missing_dependency": "dependency_missing",
+    "environment_not_executable": "environment_blocked",
+    "execution_budget_exhausted": "environment_blocked",
+}
+
+API_NON_BLOCKING_SKIP_TYPES = {
+    "auth_advisory",
+}
+
+
+def _api_result_path(result: dict[str, Any], url: str) -> str:
+    raw_path = result.get("path") or result.get("endpoint")
+    if raw_path:
+        return str(raw_path)
+    return urlsplit(url).path or url
+
+
+def _api_duration_ms(result: dict[str, Any]) -> float | None:
+    value = result.get("elapsed_ms", result.get("duration_ms"))
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _api_result_status_code(result: dict[str, Any]) -> int | None:
+    status = result.get("status_code")
+    if status is None:
+        return None
+    try:
+        return int(status)
+    except Exception:
+        return None
+
+
+def _api_raw_failure_type(result: dict[str, Any]) -> str | None:
+    raw = result.get("failure_type") or result.get("skip_type")
+    return str(raw) if raw else None
+
+
 def _api_failure_type(result: dict[str, Any]) -> str | None:
-    failure_type = result.get("failure_type") or result.get("skip_type")
-    if failure_type:
-        return str(failure_type)
+    raw_failure_type = _api_raw_failure_type(result)
+    if raw_failure_type:
+        if raw_failure_type in API_NON_BLOCKING_SKIP_TYPES:
+            return None
+        return API_RAW_FAILURE_TYPE_MAP.get(raw_failure_type, raw_failure_type)
+
+    skip_reason = str(result.get("skip_reason") or "").lower()
+    if result.get("skipped") and any(
+        marker in skip_reason
+        for marker in (
+            "missing dependency",
+            "missing upstream",
+            "depends_on",
+            "缺少上游",
+            "缺少可用于路径参数",
+        )
+    ):
+        return "dependency_missing"
+
+    method = _normalize_method(result.get("method"))
+    if bool(result.get("skipped")) and method in WRITE_API_METHODS:
+        return "safe_write_blocked"
+
+    if result.get("skipped") and any(
+        marker in skip_reason
+        for marker in ("safe read", "read-only", "安全只读", "安全写入", "write gate")
+    ):
+        return "safe_write_blocked"
+
     if result.get("error"):
         text = str(result.get("error") or "").lower()
         if "timeout" in text or "timed out" in text:
             return "timeout"
-        if any(marker in text for marker in ("connect", "network", "dns", "name resolution")):
+        if any(
+            marker in text
+            for marker in (
+                "connect",
+                "connection",
+                "network",
+                "dns",
+                "name resolution",
+                "unreachable",
+            )
+        ):
             return "network_error"
-        return "api_request_error"
+        return "network_error"
     assertions = [item for item in result.get("assertion_results") or [] if isinstance(item, dict)]
+    if any(
+        item.get("type") == "schema"
+        and item.get("blocking", True)
+        and item.get("passed") is False
+        for item in assertions
+    ):
+        return "schema_contract"
     if any(item.get("passed") is False for item in assertions):
         return "assertion_failure"
     if result.get("passed") is False:
-        status = result.get("status_code")
-        try:
-            status_int = int(status)
-        except Exception:
-            status_int = 0
+        status_int = _api_result_status_code(result) or 0
         if status_int in {401, 403}:
             return "auth_failure"
         if status_int >= 500:
             return "backend_error"
-        return "api_assertion"
+        return "assertion_failure"
     return None
+
+
+def _api_error_type(result: dict[str, Any], failure_type: str | None) -> str | None:
+    if not failure_type:
+        return None
+    error = str(result.get("error") or "").lower()
+    if error:
+        if "timeout" in error or "timed out" in error:
+            return "timeout"
+        if any(
+            marker in error
+            for marker in (
+                "connect",
+                "connection",
+                "network",
+                "dns",
+                "name resolution",
+                "unreachable",
+            )
+        ):
+            return "network_error"
+    return failure_type
+
+
+def _api_assertion_summary(assertions: Any) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+    for assertion in assertions or []:
+        if not isinstance(assertion, dict):
+            continue
+        item = {
+            "type": assertion.get("type"),
+            "path": assertion.get("path"),
+            "expected": assertion.get("expected"),
+            "actual": assertion.get("actual"),
+            "passed": assertion.get("passed"),
+            "skipped": assertion.get("skipped", False),
+            "blocking": assertion.get("blocking", True),
+        }
+        if assertion.get("error"):
+            item["error"] = assertion.get("error")
+        if assertion.get("reason"):
+            item["reason"] = assertion.get("reason")
+        summary.append(redact_sensitive_data({k: v for k, v in item.items() if v is not None}))
+    return summary
+
+
+def _api_safety_decision(
+    result: dict[str, Any],
+    *,
+    method: str,
+    failure_type: str | None,
+    execution_policy: str,
+) -> str:
+    skipped = bool(result.get("skipped"))
+    http_executed = bool(result.get("http_executed"))
+    if failure_type == "safe_write_blocked":
+        if execution_policy == "write_allowed":
+            return "blocked_by_safe_write_gate"
+        return "blocked_by_read_only_policy"
+    if failure_type == "dependency_missing":
+        return "blocked_by_missing_dependency"
+    if failure_type == "environment_blocked":
+        return "blocked_by_environment"
+    if skipped:
+        return "skipped"
+    if method in WRITE_API_METHODS:
+        if result.get("safe_write_approved"):
+            return "approved_by_safe_write_gate"
+        if execution_policy == "write_allowed" and http_executed:
+            return "write_executed_under_policy"
+        return "write_not_executed"
+    if http_executed:
+        return "safe_read_executed"
+    return "not_executed"
 
 
 def _ui_failure_type(result: dict[str, Any]) -> str | None:
@@ -1072,6 +1237,13 @@ def append_api_result_observations(
     stage: str = "api_runner",
 ) -> list[dict[str, Any]]:
     result = api_result or state.get("api_execution_result") or {}
+    request_selection = result.get("request_selection") if isinstance(result.get("request_selection"), dict) else {}
+    execution_policy = str(
+        result.get("api_execution_policy")
+        or state.get("api_execution_policy")
+        or request_selection.get("execution_policy")
+        or "safe_read_only"
+    )
     observations: list[dict[str, Any]] = []
     for index, item in enumerate(result.get("results") or []):
         if not isinstance(item, dict):
@@ -1079,6 +1251,7 @@ def append_api_result_observations(
         skipped = bool(item.get("skipped"))
         passed = item.get("passed")
         failure_type = _api_failure_type(item)
+        error_type = _api_error_type(item, failure_type)
         if skipped:
             status = "skipped"
         elif passed is True:
@@ -1090,8 +1263,17 @@ def append_api_result_observations(
 
         method = str(item.get("method") or "GET").upper()
         url = str(item.get("url") or "")
-        path = urlsplit(url).path or url
+        path = _api_result_path(item, url)
         label = str(item.get("label") or f"{method} {path}")
+        duration_ms = _api_duration_ms(item)
+        assertions = _api_assertion_summary(item.get("assertion_results") or [])
+        raw_failure_type = _api_raw_failure_type(item)
+        safety_decision = _api_safety_decision(
+            item,
+            method=method,
+            failure_type=failure_type,
+            execution_policy=execution_policy,
+        )
         tool_call_id = _append_tool_call_protocol(
             state,
             tool_name="api.http_request" if item.get("http_executed") else "api.execution_gate",
@@ -1104,16 +1286,24 @@ def append_api_result_observations(
                 "category": item.get("category"),
                 "request_headers": item.get("request_headers"),
                 "request_body": item.get("request_body"),
+                "request_body_source": item.get("request_body_source"),
+                "execution_policy": execution_policy,
             },
             outputs={
                 "status_code": item.get("status_code"),
                 "envelope_status_code": item.get("envelope_status_code"),
+                "duration_ms": duration_ms,
                 "passed": item.get("passed"),
                 "skipped": skipped,
+                "skip_type": item.get("skip_type"),
                 "skip_reason": item.get("skip_reason"),
                 "failure_type": failure_type,
+                "raw_failure_type": raw_failure_type,
+                "error_type": error_type,
+                "safety_decision": safety_decision,
+                "assertions": assertions,
             },
-            elapsed_ms=float(item.get("elapsed_ms") or 0),
+            elapsed_ms=duration_ms,
         )
         response_evidence_id = _append_evidence_protocol(
             state,
@@ -1130,13 +1320,21 @@ def append_api_result_observations(
             data={
                 "method": method,
                 "url": url,
+                "path": path,
                 "status_code": item.get("status_code"),
+                "duration_ms": duration_ms,
                 "elapsed_ms": item.get("elapsed_ms"),
                 "body": _compact_jsonable(item.get("body")),
                 "assertion_results": item.get("assertion_results") or [],
+                "assertions": assertions,
                 "failure_reason": item.get("failure_reason") or item.get("error"),
+                "failure_type": failure_type,
+                "raw_failure_type": raw_failure_type,
+                "error_type": error_type,
                 "skip_type": item.get("skip_type"),
                 "skip_reason": item.get("skip_reason"),
+                "safety_decision": safety_decision,
+                "request_body_source": item.get("request_body_source"),
             },
         )
         evidence_ids = [response_evidence_id]
@@ -1182,19 +1380,33 @@ def append_api_result_observations(
                     "path": path,
                     "category": item.get("category"),
                     "request_body_source": item.get("request_body_source"),
+                    "execution_policy": execution_policy,
                 },
                 outputs={
                     "status_code": item.get("status_code"),
                     "envelope_status_code": item.get("envelope_status_code"),
+                    "duration_ms": duration_ms,
+                    "elapsed_ms": item.get("elapsed_ms"),
                     "passed": item.get("passed"),
                     "skipped": skipped,
+                    "skip_type": item.get("skip_type"),
                     "skip_reason": item.get("skip_reason"),
-                    "assertion_count": len(item.get("assertion_results") or []),
+                    "assertion_count": len(assertions),
+                    "assertions": assertions,
                     "failure_reason": item.get("failure_reason") or item.get("error"),
+                    "error_type": error_type,
+                    "failure_type": failure_type,
+                    "raw_failure_type": raw_failure_type,
+                    "safety_decision": safety_decision,
+                    "evidence_refs": evidence_ids,
                 },
                 evidence_ids=evidence_ids,
                 tool_call_ids=[tool_call_id],
-                metadata={"source": "api_execution_result", "result_index": index},
+                metadata={
+                    "source": "api_execution_result",
+                    "result_index": index,
+                    "request_selection_source": request_selection.get("source"),
+                },
             )
         )
     return observations
