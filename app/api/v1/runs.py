@@ -3704,6 +3704,11 @@ async def get_run_detail(run_id: str, db: DbSession, _: CurrentUser):
     except Exception:
         parsed = {}
     parsed = redact_sensitive_data(parsed)
+    from app.agent.runtime.event_store import load_runtime_detail
+
+    runtime_detail = await load_runtime_detail(db, run_id)
+    if runtime_detail:
+        parsed = {**parsed, **{key: value for key, value in runtime_detail.items() if value}}
     if log_str:
         detail["execution_log"] = redact_json_text(log_str)
 
@@ -3731,6 +3736,7 @@ async def get_run_detail(run_id: str, db: DbSession, _: CurrentUser):
     detail["agent_evidence"] = parsed.get("agent_evidence")
     detail["agent_protocol_evaluations"] = parsed.get("agent_protocol_evaluations")
     detail["agent_protocol_summary"] = parsed.get("agent_protocol_summary")
+    detail["runtime_events"] = parsed.get("runtime_events", [])
     detail["evidence_evaluation"] = parsed.get("evidence_evaluation")
     detail["agent_evaluations"] = parsed.get("agent_evaluations")
     detail["agent_attempt_history"] = parsed.get("agent_attempt_history")

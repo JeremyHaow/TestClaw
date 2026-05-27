@@ -1,6 +1,7 @@
 import logging
 
 from app.agent.progress import persist_progress
+from app.agent.runtime.failure_taxonomy import report_category_for_failure
 from app.agent.state import AgentState
 from app.agent.tool_registry import record_tool_call, summarize_tool_calls
 from app.agent.api_scope import ALL_SAFE_GET_COVERAGE_SOURCE
@@ -248,6 +249,7 @@ def _build_bug_findings(failure_details: list[dict]) -> list[dict]:
                     "severity": severity,
                     "description": description,
                     "source": "api",
+                    "category": report_category_for_failure(failure_type),
                 }
             )
         elif source == "ui_case":
@@ -267,6 +269,7 @@ def _build_bug_findings(failure_details: list[dict]) -> list[dict]:
                         f"{_ui_error_text(primary_command)}"
                     ),
                     "source": "ui",
+                    "category": report_category_for_failure((primary_command or {}).get("failure_type") or "ui_command_failed"),
                     "screenshots": failure.get("screenshots", []),
                 }
             )

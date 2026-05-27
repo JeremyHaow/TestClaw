@@ -125,6 +125,18 @@ def _observation_refs(observations: list[dict[str, Any]]) -> list[dict[str, Any]
     return redact_sensitive_data(refs)
 
 
+def _evidence_refs_from_observations(observations: list[dict[str, Any]]) -> list[str]:
+    refs: list[str] = []
+    seen: set[str] = set()
+    for observation in observations:
+        for evidence_id in _safe_list(observation.get("evidence_ids")):
+            key = str(evidence_id)
+            if key and key not in seen:
+                seen.add(key)
+                refs.append(key)
+    return refs[:12]
+
+
 def _memory_confidence(
     evaluation: dict[str, Any],
     *,
@@ -271,7 +283,9 @@ def _build_memory_candidate(
         "planner_hint": hint,
         "human_question": human_question or None,
         "facts": [fact],
+        "evaluation_ref": evaluation.get("evaluation_id"),
         "observation_refs": _observation_refs(observations),
+        "evidence_refs": _evidence_refs_from_observations(observations),
         "protocol_summary": state.get("agent_protocol_summary") if isinstance(state.get("agent_protocol_summary"), dict) else {},
         "final_verdict": final_report.get("overall_verdict"),
     }

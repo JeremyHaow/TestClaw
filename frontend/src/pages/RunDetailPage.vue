@@ -11,6 +11,10 @@ import AgentEvidenceCard from '../components/agent/AgentEvidenceCard.vue'
 import AgentInterventionDrawer from '../components/agent/AgentInterventionDrawer.vue'
 import AgentRunSummary from '../components/agent/AgentRunSummary.vue'
 import AgentTimeline from '../components/agent/AgentTimeline.vue'
+import RuntimeCurrentStep from '../components/runtime/RuntimeCurrentStep.vue'
+import RuntimeEvidenceDrawer from '../components/runtime/RuntimeEvidenceDrawer.vue'
+import RuntimeHumanHandoff from '../components/runtime/RuntimeHumanHandoff.vue'
+import RuntimeTimeline from '../components/runtime/RuntimeTimeline.vue'
 import { useToast } from '../composables/useToast'
 import { Activity, AlertTriangle, ArrowLeft, BookOpen, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCopy, Download, FileText, Loader2, Monitor, RotateCcw, Save, Terminal, XCircle, XCircleIcon, Zap } from 'lucide-vue-next'
 
@@ -106,6 +110,7 @@ const snapshotKeys = [
   'agent_evidence',
   'agent_protocol_evaluations',
   'agent_protocol_summary',
+  'runtime_events',
   'evidence_evaluation',
   'agent_evaluations',
   'agent_attempt_history',
@@ -728,12 +733,15 @@ const toolCalls = computed(() => ensureList(run.value?.tool_calls || run.value?.
 const recentToolCalls = computed(() => toolCalls.value.slice().reverse())
 const pagedToolCalls = computed(() => indexedPage(recentToolCalls.value, toolCallPage.value, toolCallPageSize))
 const skillPlan = computed(() => ensureList(run.value?.skill_plan || run.value?.final_report?.skill_plan))
+const agentActions = computed(() => ensureList(run.value?.agent_actions))
 const agentActionObservations = computed(() => ensureList(run.value?.agent_action_observations))
 const agentToolCalls = computed(() => ensureList(run.value?.agent_tool_calls))
 const agentProtocolObservations = computed(() => ensureList(run.value?.agent_observations))
 const agentProtocolEvidence = computed(() => ensureList(run.value?.agent_evidence))
 const agentProtocolEvaluations = computed(() => ensureList(run.value?.agent_protocol_evaluations))
 const agentProtocolSummary = computed(() => run.value?.agent_protocol_summary || null)
+const runtimeEvents = computed(() => ensureList(run.value?.runtime_events))
+const latestRuntimeAction = computed(() => lastItem(agentActions.value) || lastItem(agentActionObservations.value))
 const latestProtocolObservation = computed(() => lastItem(agentProtocolObservations.value))
 const latestProtocolEvaluation = computed(() => lastItem(agentProtocolEvaluations.value))
 const recentProtocolObservations = computed(() => agentProtocolObservations.value.slice().reverse().slice(0, 6))
@@ -1036,6 +1044,15 @@ const progressPercent = computed(() => {
   return run.value.status === 'running' ? 12 : 0
 })
 const protocolTimelineItems = computed(() => {
+  const runtimeRows = runtimeEvents.value.map((item: any) => ({
+    ...(item.payload || item),
+    record_type: item.event_type || 'runtime_event',
+    source: 'runtime_event',
+    node: item.title || item.event_type,
+    status: item.payload?.status || item.status || item.payload?.outcome || 'recorded',
+    detail: item.summary || item.payload?.summary || item.payload?.reason || '',
+    timestamp: item.timestamp || item.payload?.timestamp || '',
+  }))
   const actions = agentActionObservations.value.map((item: any) => ({
     ...item,
     record_type: 'action',
@@ -1063,7 +1080,7 @@ const protocolTimelineItems = computed(() => {
     detail: protocolRecordDetail(item),
     timestamp: item.timestamp || '',
   }))
-  return [...actions, ...observations, ...evaluations]
+  return [...runtimeRows, ...actions, ...observations, ...evaluations]
     .sort((a: any, b: any) => protocolTimestampValue(a.timestamp) - protocolTimestampValue(b.timestamp))
 })
 const activityFeed = computed(() => {
@@ -1246,6 +1263,48 @@ watch(
         <span class="rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-[10px] font-bold text-gray-500">报告</span>
       </template>
     </AgentRunSummary>
+
+    <!-- Agent Runtime Workbench -->
+    <section
+      v-if="hasProtocolSurface || runtimeEvents.length || isActiveRun"
+      class="rounded-lg border border-[#E5EAF3] bg-[#F5F7FB] p-4 shadow-sm"
+    >
+      <div class="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div class="min-w-0">
+          <div class="text-xs font-bold uppercase text-[#2563EB]">Agent Runtime Workbench</div>
+          <h3 class="mt-1 truncate text-lg font-semibold text-[#0F172A]">{{ run.objective }}</h3>
+          <p class="mt-1 text-sm text-[#475569]">
+            {{ latestProtocolEvaluation?.next_action ? `Next action: ${agentActionLabel(latestProtocolEvaluation.next_action)}` : 'Next action: waiting' }}
+            <span v-if="run.agent_human_question"> · waiting_for_human</span>
+          </p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <RuntimeEvidenceDrawer :evidence="agentProtocolEvidence" />
+          <span class="rounded-md border border-[#E5EAF3] bg-[#FFFFFF] px-3 py-2 text-xs font-semibold text-[#475569]">
+            {{ protocolObservationCount }} observations
+          </span>
+          <span class="rounded-md border border-[#E5EAF3] bg-[#FFFFFF] px-3 py-2 text-xs font-semibold text-[#475569]">
+            {{ protocolEvidenceCount }} evidence
+          </span>
+        </div>
+      </div>
+      <div class="grid gap-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(360px,0.75fr)]">
+        <RuntimeTimeline :items="protocolTimelineItems" :active="isActiveRun" />
+        <div class="space-y-4">
+          <RuntimeCurrentStep
+            :action="latestRuntimeAction"
+            :observation="latestProtocolObservation"
+            :evaluation="latestProtocolEvaluation || latestAgentEvaluation"
+          />
+          <RuntimeHumanHandoff
+            v-model="interventionText"
+            :question="run.agent_human_question"
+            :submitting="interventionSubmitting"
+            @submit="submitInterventionRerun"
+          />
+        </div>
+      </div>
+    </section>
 
     <!-- Execution Cockpit -->
     <section class="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">

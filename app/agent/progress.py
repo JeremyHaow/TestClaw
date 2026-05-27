@@ -231,6 +231,12 @@ async def persist_task_state(
         task.status = status
 
     await db.commit()
+    try:
+        from app.agent.runtime.event_store import AgentRuntimeEventStore
+
+        await AgentRuntimeEventStore(db).flush_state(state)
+    except Exception as exc:
+        logger.warning("Failed to persist runtime protocol events for task %s: %s", task.id, exc)
     if refresh:
         await db.refresh(task)
     return task

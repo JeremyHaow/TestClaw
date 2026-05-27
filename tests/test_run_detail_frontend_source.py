@@ -4,6 +4,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RUN_DETAIL_PAGE = ROOT / "frontend/src/pages/RunDetailPage.vue"
 AGENT_COMPONENT_DIR = ROOT / "frontend/src/components/agent"
+RUNTIME_COMPONENT_DIR = ROOT / "frontend/src/components/runtime"
+SHADCN_COMPONENTS_JSON = ROOT / "frontend/components.json"
+SHADCN_UI_DIR = ROOT / "frontend/src/components/ui"
 
 
 def _source(path: Path) -> str:
@@ -103,6 +106,7 @@ def test_run_detail_wires_agent_protocol_records_into_cockpit() -> None:
         "agent_evidence",
         "agent_protocol_evaluations",
         "agent_protocol_summary",
+        "runtime_events",
         "agent_retry_counts",
         "agent_retry_feedback",
         "agent_human_question",
@@ -119,6 +123,77 @@ def test_run_detail_wires_agent_protocol_records_into_cockpit() -> None:
         "protocolFailureCount",
     ]:
         assert symbol in source
+
+
+def test_run_detail_uses_runtime_workbench_and_shadcn_vue_components() -> None:
+    source = _source(RUN_DETAIL_PAGE)
+    runtime_sources = "\n".join(_source(path) for path in RUNTIME_COMPONENT_DIR.glob("*.vue"))
+
+    for component in [
+        "RuntimeTimeline",
+        "RuntimeCurrentStep",
+        "RuntimeEvidenceDrawer",
+        "RuntimeEvaluationPanel",
+        "RuntimeHumanHandoff",
+        "RuntimeFailureBadge",
+    ]:
+        assert (RUNTIME_COMPONENT_DIR / f"{component}.vue").exists()
+        assert f"import {component}" in source or component in {"RuntimeEvaluationPanel", "RuntimeFailureBadge"}
+
+    for import_path in [
+        "@/components/ui/button",
+        "@/components/ui/card",
+        "@/components/ui/badge",
+        "@/components/ui/sheet",
+        "@/components/ui/tabs",
+        "@/components/ui/scroll-area",
+        "@/components/ui/textarea",
+        "@/components/ui/alert",
+    ]:
+        assert import_path in runtime_sources
+
+    assert SHADCN_COMPONENTS_JSON.exists()
+    assert (SHADCN_UI_DIR / "button/Button.vue").exists()
+    assert (SHADCN_UI_DIR / "card/Card.vue").exists()
+    assert (SHADCN_UI_DIR / "sheet/Sheet.vue").exists()
+
+    for marker in [
+        "Agent Runtime Workbench",
+        "Runtime Timeline",
+        "Evaluation",
+        "Human Handoff",
+        "Next action",
+    ]:
+        assert marker in source or marker in runtime_sources
+
+
+def test_runtime_workbench_uses_only_runtime_plan_color_tokens() -> None:
+    source = _source(RUN_DETAIL_PAGE) + "\n" + "\n".join(
+        _source(path) for path in RUNTIME_COMPONENT_DIR.glob("*.vue")
+    )
+
+    for color in [
+        "#F5F7FB",
+        "#F7F9FC",
+        "#FFFFFF",
+        "#E5EAF3",
+        "#EEF2F7",
+        "#2563EB",
+        "#1D4ED8",
+        "#EFF6FF",
+        "#10B981",
+        "#F59E0B",
+        "#EF4444",
+        "#0F172A",
+        "#475569",
+        "#94A3B8",
+    ]:
+        assert color in source
+
+    guide_source = _source(ROOT / "TestClaw_Codex_Fullstack_Refactor_Guide.md")
+    assert "### 3.2 颜色规范" in guide_source
+    assert "TcRuntimeWorkbench" not in source
+    assert "TcAgent" not in source
 
 
 def test_agent_timeline_marks_protocol_statuses() -> None:

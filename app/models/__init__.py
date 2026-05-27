@@ -13,6 +13,7 @@ from app.models.run_artifacts import (
     TargetMemory,
 )
 from app.models.run_event import RunEvent
+from app.models.run_runtime import RunAgentAction, RunAgentEvaluation, RunAgentObservation
 from app.models.task import Task, TaskStatus, TestRun, TestType
 from app.models.test_case import Priority, TestCase, TestSuite
 from app.models.test_script import TestScript
@@ -35,6 +36,9 @@ __all__ = [
     "RunEvent",
     "RunFinding",
     "RunIntervention",
+    "RunAgentAction",
+    "RunAgentEvaluation",
+    "RunAgentObservation",
     "RunToolCall",
     "Task",
     "TaskStatus",

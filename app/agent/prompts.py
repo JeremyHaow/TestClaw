@@ -215,6 +215,12 @@ RAG 上下文：{rag_context}
     "priority": "P1",
     "category": "PAGE_LOAD|INTERACTION|FORM|NAVIGATION|ERROR_DISPLAY",
     "case_type": "ui",
+    "ui_actions": [
+      {{"type": "open", "url": "https://example.com", "reason": "打开目标页面"}},
+      {{"type": "snapshot", "reason": "读取页面结构"}},
+      {{"type": "click_ref", "ref": "e12", "reason": "点击当前快照中的按钮"}},
+      {{"type": "screenshot", "reason": "保存证据截图"}}
+    ],
     "playwright_commands": [
       "open https://example.com",
       "snapshot",
@@ -229,7 +235,7 @@ RAG 上下文：{rag_context}
 
 重要：
 1. API 用例必须包含 request_template，可直接用于 httpx 调用
-2. UI 用例必须包含 playwright_commands，每行一个 playwright-cli 命令
+2. UI 用例必须优先包含结构化 ui_actions；playwright_commands 只作为导出脚本和 legacy fallback
 3. 如果输入类型是 swagger_url/swagger_json/swagger_yaml，只生成 API 用例，ui_cases 设为空数组
 4. 如果输入类型是 url，只生成 UI 用例，api_cases 设为空数组
 5. API 用例只能使用 API Schema 中已列出的 method + path；不要发明不存在的路径、路径探测、鉴权绕过或未在 schema 中出现的 endpoint
@@ -356,7 +362,7 @@ EVIDENCE_EVALUATOR_PROMPT = """你是 TestClaw 的测试执行质量评估智能
 6. 如果 failure_type 是 auth_failure、environment_blocked、ui_high_risk_action_blocked 或登录/setup 阻塞，并且缺少用户可提供的信息，应建议 ask_human。
 7. 不要假设固定网站、固定接口、固定截图或固定业务菜单；只依据证据摘要和工具调用。
 8. API 重规划只能在已加载 OpenAPI schema 和执行策略范围内加深已记录 endpoint 的证据；不要建议不存在路径、schema 外路径、鉴权绕过测试或安全策略禁止的方法。
-9. UI 重规划只能使用这些 playwright-cli 命令：open、goto、snapshot、click、fill、type、screenshot、resize、go-back、reload、run-code、dialog-dismiss；响应式视窗验证必须使用 resize <width> <height>，不要建议 set_viewport_size、setViewportSize、evaluate 或 wait/sleep/assert/expect。
+9. UI 重规划优先输出结构化 ui_actions（open、goto、snapshot、click_ref、fill_ref、screenshot、assert_visible、wait_for）；legacy playwright_commands 只能使用 open、goto、snapshot、click、fill、type、screenshot、resize、go-back、reload、dialog-dismiss。不要建议 run-code、evaluate、eval、wait/sleep/assert/expect。
 10. 不要输出隐藏推理过程；reason 使用一句可观察的判断依据。
 11. 输出纯 JSON，不要包含 Markdown。
 """
@@ -474,7 +480,8 @@ UI_TEST_PLANNER_PROMPT = """你是资深 UI 测试自动化专家。你正在测
 - priority: P0|P1|P2
 - steps: 测试步骤数组（字符串数组，每个步骤一行）
 - expected: 预期结果数组
-- playwright_commands: playwright-cli 命令数组
+- ui_actions: 结构化动作数组，优先使用 open、goto、snapshot、click_ref、fill_ref、screenshot、assert_visible、wait_for
+- playwright_commands: playwright-cli 命令数组，仅作为 legacy fallback 和导出脚本
 
 ## playwright-cli 支持的命令（只使用这些！）
 
@@ -486,7 +493,6 @@ UI_TEST_PLANNER_PROMPT = """你是资深 UI 测试自动化专家。你正在测
 - type "<text>" — 输入文本
 - screenshot — 截图
 - resize <width> <height> — 调整浏览器窗口尺寸，例如 resize 375 667
-- run-code "<playwright js>" — 执行短 Playwright JS 片段，例如等待网络稳定或处理弹窗
 - go-back — 返回上一页
 - reload — 刷新页面
 - dialog-dismiss — 取消浏览器确认弹窗

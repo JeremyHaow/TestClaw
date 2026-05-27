@@ -20,9 +20,9 @@ from app.agent.action_runtime import (
     find_agent_action,
     record_agent_action_observation,
     validate_agent_action_plan,
-    validate_and_record_agent_action_plan,
 )
 from app.agent.progress import persist_progress
+from app.agent.runtime.runtime import AgentRuntime
 from app.agent.state import AgentState
 from app.agent.strategy import (
     STRATEGY_SCHEMA_SOURCE,
@@ -3182,6 +3182,7 @@ def _update_api_execution_state(
 
 async def run(state: AgentState) -> AgentState:
     install_tool_context(state)
+    runtime = AgentRuntime(state)
     state["agent_execution_stage"] = "api"
     api_schema = state.get("parsed_api_schema") or []
     api_cases = state.get("api_cases") or []
@@ -3213,8 +3214,7 @@ async def run(state: AgentState) -> AgentState:
     if state.get("agent_actions"):
         agent_actions = state.get("agent_actions") or []
     else:
-        agent_actions = validate_and_record_agent_action_plan(
-            state,
+        agent_actions = runtime.validate_plan(
             stage="api_runner",
             strategy=strategy,
             parsed_api_schema=api_schema,
@@ -3612,12 +3612,20 @@ async def run(state: AgentState) -> AgentState:
             try:
                 start = time.perf_counter()
                 remaining_budget = None if execution_budget is None else execution_budget - http_executed_count
-                resp, attempts, request_error = await _request_with_retry(
-                    client,
-                    req,
-                    retry_count,
-                    remaining_budget,
+                tool_result = await runtime.executor.execute(
+                    "api.http_request",
+                    {"request": req},
+                    context={
+                        "client": client,
+                        "retry_count": retry_count,
+                        "request_budget": remaining_budget,
+                        "execution_policy": execution_policy,
+                    },
                 )
+                raw_result = tool_result.raw or {}
+                resp = raw_result.get("response")
+                attempts = int(raw_result.get("attempts") or 0)
+                request_error = raw_result.get("error")
                 elapsed = round((time.perf_counter() - start) * 1000, 2)
                 http_executed_count += attempts
                 if request_error is not None or resp is None:
@@ -3680,12 +3688,20 @@ async def run(state: AgentState) -> AgentState:
                         auth_refreshed = True
                         start = time.perf_counter()
                         remaining_budget = None if execution_budget is None else execution_budget - http_executed_count
-                        resp, attempts, request_error = await _request_with_retry(
-                            client,
-                            req,
-                            retry_count,
-                            remaining_budget,
+                        tool_result = await runtime.executor.execute(
+                            "api.http_request",
+                            {"request": req},
+                            context={
+                                "client": client,
+                                "retry_count": retry_count,
+                                "request_budget": remaining_budget,
+                                "execution_policy": execution_policy,
+                            },
                         )
+                        raw_result = tool_result.raw or {}
+                        resp = raw_result.get("response")
+                        attempts = int(raw_result.get("attempts") or 0)
+                        request_error = raw_result.get("error")
                         elapsed = round((time.perf_counter() - start) * 1000, 2)
                         http_executed_count += attempts
                         if request_error is not None or resp is None:
@@ -3892,6 +3908,7 @@ async def run(state: AgentState) -> AgentState:
         execution_budget=execution_budget,
     )
     append_api_result_observations(state, state.get("api_execution_result"), stage="api_runner")
+    await runtime.flush_stage_events(stage="api_runner")
     state["tool_summary"] = summarize_tool_calls(state.get("tool_calls"))
     artifacts = state.get("artifacts") or {}
     execution_config = artifacts.get("execution_config")

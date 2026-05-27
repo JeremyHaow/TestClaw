@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_0005 = ROOT / "alembic/versions/0005_agent_planning_sessions.py"
 MIGRATION_0006 = ROOT / "alembic/versions/0006_run_operational_tables.py"
+MIGRATION_0007 = ROOT / "alembic/versions/0007_agent_runtime_v1.py"
 MAIN = ROOT / "app/main.py"
 
 REQUIRED_OPERATIONAL_TABLES = {
@@ -15,6 +16,11 @@ REQUIRED_OPERATIONAL_TABLES = {
     "run_findings",
     "target_memories",
     "artifacts",
+}
+REQUIRED_RUNTIME_TABLES = {
+    "run_agent_actions",
+    "run_agent_observations",
+    "run_agent_evaluations",
 }
 
 
@@ -37,6 +43,7 @@ def test_model_metadata_includes_run_operational_tables() -> None:
 
     table_names = set(Base.metadata.tables)
     assert REQUIRED_OPERATIONAL_TABLES <= table_names
+    assert REQUIRED_RUNTIME_TABLES <= table_names
     assert {"agent_planning_sessions", "agent_planning_messages"} <= table_names
 
     run_event_indexes = {index.name for index in Base.metadata.tables["run_events"].indexes}
@@ -45,6 +52,38 @@ def test_model_metadata_includes_run_operational_tables() -> None:
     }
     assert "idx_run_events_run_seq" in run_event_indexes
     assert target_memory_indexes["ix_target_memories_target_key"].unique is True
+
+    assert "idx_run_agent_actions_run_seq" in {
+        index.name for index in Base.metadata.tables["run_agent_actions"].indexes
+    }
+    observation_indexes = {
+        index.name for index in Base.metadata.tables["run_agent_observations"].indexes
+    }
+    evaluation_indexes = {
+        index.name for index in Base.metadata.tables["run_agent_evaluations"].indexes
+    }
+    assert "idx_run_agent_observations_run_failure" in observation_indexes
+    assert "idx_run_agent_evaluations_run_failure" in evaluation_indexes
+
+
+def test_agent_runtime_v1_migration_covers_action_observation_evaluation_tables() -> None:
+    assert MIGRATION_0007.exists()
+    source = MIGRATION_0007.read_text()
+
+    assert 'revision: str = "0007_agent_runtime_v1"' in source
+    assert 'down_revision: str | None = "0006_run_operational_tables"' in source
+    assert "def _has_table" in source
+    assert "if_not_exists=True" in source
+    for table_name in REQUIRED_RUNTIME_TABLES:
+        assert f'"{table_name}"' in source
+    for index_name in [
+        "idx_run_agent_actions_run_seq",
+        "idx_run_agent_observations_run_seq",
+        "idx_run_agent_observations_run_failure",
+        "idx_run_agent_evaluations_run_seq",
+        "idx_run_agent_evaluations_run_failure",
+    ]:
+        assert index_name in source
 
 
 def test_main_does_not_unconditionally_create_all() -> None:

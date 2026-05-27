@@ -17,6 +17,7 @@ from app.agent.api_scope import (
     _path_template_re,
 )
 from app.agent.tool_registry import record_tool_call, tool_capabilities_by_name
+from app.agent.runtime.failure_taxonomy import classify_ui_failure, normalize_failure_type
 from app.core.redaction import redact_sensitive_data
 
 AGENT_ACTION_SCHEMA_VERSION = "2026-05-25"
@@ -924,7 +925,7 @@ def _api_failure_type(result: dict[str, Any]) -> str | None:
     if raw_failure_type:
         if raw_failure_type in API_NON_BLOCKING_SKIP_TYPES:
             return None
-        return API_RAW_FAILURE_TYPE_MAP.get(raw_failure_type, raw_failure_type)
+        return normalize_failure_type(API_RAW_FAILURE_TYPE_MAP.get(raw_failure_type, raw_failure_type))
 
     skip_reason = str(result.get("skip_reason") or "").lower()
     if result.get("skipped") and any(
@@ -1061,28 +1062,7 @@ def _api_safety_decision(
 
 
 def _ui_failure_type(result: dict[str, Any]) -> str | None:
-    if result.get("failure_type"):
-        return str(result.get("failure_type"))
-    if result.get("status") == "blocked":
-        if result.get("risk") == "high_risk":
-            return "ui_high_risk_action_blocked"
-        return "ui_action_blocked"
-    if result.get("status") == "skipped":
-        return "ui_command_skipped"
-    if result.get("passed") is not False and int(result.get("status_code") or 0) == 0:
-        return None
-    stderr = str(result.get("stderr") or "").lower()
-    if "timeout" in stderr or "timed out" in stderr:
-        return "timeout"
-    if any(marker in stderr for marker in ("not found", "locator", "strict mode violation")):
-        return "ui_locator_missing"
-    if "navigation" in stderr:
-        return "navigation_blocked"
-    if "snapshot did not contain" in stderr:
-        return "ui_assertion_failure"
-    if "screenshot file was not created" in stderr:
-        return "artifact_missing"
-    return "ui_command_failed"
+    return classify_ui_failure(result)
 
 
 def _outcome_from_status(status: str, failure_type: str | None = None) -> str:

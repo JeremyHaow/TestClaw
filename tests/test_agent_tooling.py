@@ -1,5 +1,6 @@
 import asyncio
 import json
+import uuid
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -27,6 +28,15 @@ from app.agent.action_runtime import (
     validate_and_record_agent_action_plan,
 )
 from app.agent.progress import build_execution_log_payload, determine_final_status
+from app.agent.runtime.failure_taxonomy import (
+    failure_requires_human,
+    failure_taxonomy_payload,
+    next_action_hint,
+    report_category_for_failure,
+)
+from app.agent.runtime.runtime import AgentRuntime
+from app.agent.runtime.event_store import AgentRuntimeEventStore, load_runtime_detail
+from app.agent.runtime.tool_executor import ToolExecutor
 from app.agent.strategy import normalize_agent_strategy_decision
 from app.agent.tool_registry import build_tool_registry, select_skills_for_state
 from app.config import settings
@@ -245,6 +255,124 @@ def test_tool_registry_exposes_evidence_evaluation_tool() -> None:
 
     assert "planner.evaluate_execution_evidence" in tool_names
     assert "planner.evaluate_execution_evidence" in planning["tools"]
+
+
+def test_runtime_failure_taxonomy_maps_decisions_and_report_categories() -> None:
+    taxonomy = failure_taxonomy_payload()
+
+    assert taxonomy["auth_failure"]["human_required"] is True
+    assert failure_requires_human("auth_failure") is True
+    assert next_action_hint("ui_locator_missing", layer="ui") == "replan_ui"
+    assert report_category_for_failure("safe_write_gate_blocked") == "safety_guardrail"
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_dispatches_api_http_request_with_redaction() -> None:
+    class FakeResponse:
+        status_code = 200
+
+    class FakeClient:
+        async def request(self, method: str, url: str, **kwargs):
+            assert method == "GET"
+            assert url == "https://api.example.test/profile"
+            assert kwargs["headers"]["Authorization"] == "Bearer raw-secret"
+            return FakeResponse()
+
+    result = await ToolExecutor({"api_execution_policy": "safe_read_only"}).execute(
+        "api.http_request",
+        {
+            "request": {
+                "method": "GET",
+                "url": "https://api.example.test/profile",
+                "headers": {"Authorization": "Bearer raw-secret"},
+            }
+        },
+        context={"client": FakeClient(), "retry_count": 0, "execution_policy": "safe_read_only"},
+    )
+
+    assert result.status == "success"
+    assert result.outputs["status_code"] == 200
+    assert result.raw["response"].status_code == 200
+    assert result.inputs["headers"]["Authorization"] == REDACTED_VALUE
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_validates_executes_and_evaluates_blocked_action() -> None:
+    state = {
+        "agent_tool_plan": [
+            {
+                "tool_name": "api.http_request",
+                "inputs": {"method": "POST", "path": "/orders"},
+                "reason": "Attempt unsafe write",
+            }
+        ],
+        "parsed_api_schema": [{"method": "POST", "path": "/orders"}],
+        "workflow_steps": [],
+    }
+    runtime = AgentRuntime(state)
+    actions = runtime.validate_plan(
+        stage="api_runner",
+        strategy={"tool_plan": state["agent_tool_plan"]},
+        parsed_api_schema=state["parsed_api_schema"],
+        execution_policy="safe_read_only",
+    )
+    observation = await runtime.run_action(actions[0], stage="api_runner")
+
+    assert actions[0]["allowed"] is False
+    assert observation["outcome"] == "blocked"
+    assert observation["failure_type"] == "safe_write_blocked"
+    assert state["agent_protocol_evaluations"][0]["next_action"] == "replan_api"
+
+
+@pytest.mark.asyncio
+async def test_runtime_event_store_persists_protocol_records_to_db() -> None:
+    from app.database import AsyncSessionLocal, Base, engine
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    run_id = str(uuid.uuid4())
+    state: dict = {"task_id": run_id}
+    observation = append_api_result_observations(
+        state,
+        {
+            "results": [
+                {
+                    "label": "GET /profile",
+                    "method": "GET",
+                    "url": "https://api.example.test/profile",
+                    "status_code": 401,
+                    "passed": False,
+                    "failure_type": "auth_failure",
+                    "http_executed": True,
+                }
+            ]
+        },
+        stage="api_runner",
+    )[0]
+    state["agent_protocol_evaluations"] = [
+        {
+            "evaluation_id": "eval-runtime-store",
+            "stage": "api",
+            "sufficient_evidence": False,
+            "outcome": "needs_human",
+            "next_action": "ask_human",
+            "confidence": "high",
+            "failure_type": "auth_failure",
+            "reason": "Auth context is missing.",
+            "missing_evidence": ["Authorization header"],
+            "observation_ids": [observation["observation_id"]],
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    ]
+
+    async with AsyncSessionLocal() as db:
+        await AgentRuntimeEventStore(db).flush_state(state, stage="api_runner")
+        detail = await load_runtime_detail(db, run_id)
+
+    assert detail["agent_observations"][0]["failure_type"] == "auth_failure"
+    assert detail["agent_protocol_evaluations"][0]["next_action"] == "ask_human"
+    assert detail["runtime_events"]
 
 
 def test_tool_registry_exposes_actionable_skill_and_tool_contracts() -> None:

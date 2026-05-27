@@ -16,6 +16,7 @@ from app.agent.action_runtime import append_evaluation_protocol
 from app.agent.json_utils import parse_llm_json_object
 from app.agent.progress import persist_progress
 from app.agent.prompts import EVIDENCE_EVALUATOR_PROMPT
+from app.agent.runtime.failure_taxonomy import failure_is_retryable, failure_requires_human
 from app.agent.state import AgentState
 from app.agent.strategy import STRATEGY_SCHEMA_SOURCE, strategy_summary
 from app.agent.tool_registry import install_tool_context, record_tool_call
@@ -476,7 +477,7 @@ def _api_needs_retry(state: AgentState, summary: dict[str, Any]) -> tuple[bool, 
         return False, "Current API execution passed; older transient failures do not require retry.", [], None
     protocol = summary.get("agent_protocol_stage") or {}
     failure_type = _stage_failure_type(protocol if isinstance(protocol, dict) else {})
-    if failure_type not in {"network_error", "timeout"}:
+    if not failure_is_retryable(failure_type) or failure_type not in {"network_error", "timeout"}:
         return False, "API observations do not indicate a transient transport failure.", [], None
     if not _can_retry(state, "api"):
         return False, "API retry limit reached.", [
@@ -493,7 +494,7 @@ def _api_needs_human(state: AgentState, summary: dict[str, Any]) -> tuple[bool, 
         return False, "Current API execution passed; older failures do not require human intervention.", [], None
     protocol = summary.get("agent_protocol_stage") or {}
     failure_type = _stage_failure_type(protocol if isinstance(protocol, dict) else {})
-    if failure_type == "auth_failure" and not _auth_context_available(state):
+    if failure_requires_human(failure_type) and failure_type == "auth_failure" and not _auth_context_available(state):
         return True, "API observations failed at authentication and no usable auth context is configured.", [
             "需要用户提供有效 token、cookie、登录配置，或明确确认该接口应在未登录状态下返回 401/403。"
         ], failure_type
@@ -588,7 +589,7 @@ def _ui_needs_retry(state: AgentState, summary: dict[str, Any]) -> tuple[bool, s
         return False, "Current UI execution passed; older transient failures do not require retry.", [], None
     protocol = summary.get("agent_protocol_stage") or {}
     failure_type = _stage_failure_type(protocol if isinstance(protocol, dict) else {})
-    if failure_type not in {"timeout", "navigation_blocked"}:
+    if not failure_is_retryable(failure_type) or failure_type not in {"timeout", "navigation_blocked"}:
         return False, "UI observations do not indicate a transient browser failure.", [], None
     if not _can_retry(state, "ui"):
         return False, "UI retry limit reached.", [
@@ -609,7 +610,7 @@ def _ui_needs_human(state: AgentState, summary: dict[str, Any]) -> tuple[bool, s
         return True, "UI setup/login failed and requires user intervention before more automation.", [
             "需要用户补充登录步骤、验证码/MFA 处理方式，或确认无需登录即可继续。"
         ], failure_type or "ui_setup_failed"
-    if failure_type == "ui_high_risk_action_blocked":
+    if failure_requires_human(failure_type) and failure_type == "ui_high_risk_action_blocked":
         return True, "UI observations include a blocked high-risk browser action.", [
             "需要用户确认是否允许该高风险浏览器动作，或提供安全的替代测试路径。"
         ], failure_type

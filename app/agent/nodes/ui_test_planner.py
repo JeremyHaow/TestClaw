@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import asyncio
+import shlex
 from datetime import datetime, timezone
 
 from langchain_core.messages import HumanMessage
@@ -725,6 +726,31 @@ def _generate_reproducible_script(
     return "\n".join(lines)
 
 
+def _structured_ui_actions_from_commands(commands: list[str]) -> list[dict]:
+    actions: list[dict] = []
+    for command in commands:
+        name = command_name(command)
+        try:
+            parts = shlex.split(command)
+        except ValueError:
+            parts = command.split()
+        arg = parts[1] if len(parts) > 1 else ""
+        if name in {"open", "goto"}:
+            actions.append({"type": name, "url": arg, "reason": "Structured navigation generated from planner command."})
+        elif name == "snapshot":
+            actions.append({"type": "snapshot", "reason": "Capture current accessibility tree."})
+        elif name == "screenshot":
+            actions.append({"type": "screenshot", "reason": "Capture visual evidence."})
+        elif name == "click" and arg:
+            actions.append({"type": "click_ref", "ref": arg, "reason": "Click a bounded page reference."})
+        elif name in {"fill", "type"} and arg:
+            value = parts[2] if len(parts) > 2 else ""
+            actions.append({"type": "fill_ref", "ref": arg, "value": value, "reason": "Fill a bounded page reference."})
+        elif name in {"run-code", "eval", "evaluate"}:
+            actions.append({"type": "run_code", "reason": "Legacy arbitrary code command converted to blocked structured action."})
+    return actions
+
+
 def _normalize_case(case: dict) -> dict:
     """Ensure steps and expected are string arrays, and keep command repair auditable."""
     for key in ("steps", "expected"):
@@ -747,6 +773,10 @@ def _normalize_case(case: dict) -> dict:
             for spec in normalize_playwright_commands(case["raw_playwright_commands"], include_unsupported=True)
             if spec.get("normalization")
         ]
+        if not case.get("ui_actions"):
+            structured_actions = _structured_ui_actions_from_commands(case["playwright_commands"])
+            if structured_actions:
+                case["ui_actions"] = structured_actions
     return case
 
 
@@ -934,6 +964,8 @@ async def run(state: AgentState) -> AgentState:
         auth_context["discovered_ui_actions"] = discovered_actions
         auth_context["business_case_count"] = len(business_cases)
         state["authenticated_ui_context"] = auth_context
+
+    ui_cases = [_normalize_case(case) for case in ui_cases]
 
     # Merge explore commands into login commands for script generation
     all_login_commands = login_commands + explore_commands

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.agent.action_runtime import append_agent_observation, append_ui_result_observations
+from app.agent.action_runtime import append_agent_observation, append_api_result_observations, append_ui_result_observations
 from app.agent.nodes import api_runner, execution_evaluator, knowledge_retriever, knowledge_sink, planner, reporter
 
 
@@ -159,6 +159,70 @@ async def test_golden_api_guardrails_cover_safe_write_and_path_dependency(monkey
 
 
 @pytest.mark.asyncio
+async def test_golden_api_failure_matrix_classifies_transport_server_and_schema_failures() -> None:
+    state = await _planned_base(test_type="api", objective="Golden API failure matrix regression")
+    state["agent_execution_stage"] = "api"
+    state["api_execution_result"] = {
+        "total": 4,
+        "executed": 4,
+        "passed": 0,
+        "failed": 4,
+        "skipped": 0,
+        "all_passed": False,
+        "complete": True,
+        "results": [
+            {
+                "label": "Network failure",
+                "method": "GET",
+                "url": "https://api.example.test/network",
+                "status_code": 0,
+                "passed": False,
+                "error": "network connection failed",
+                "http_executed": True,
+            },
+            {
+                "label": "Timeout failure",
+                "method": "GET",
+                "url": "https://api.example.test/timeout",
+                "status_code": 0,
+                "passed": False,
+                "error": "request timed out",
+                "http_executed": True,
+            },
+            {
+                "label": "Server failure",
+                "method": "GET",
+                "url": "https://api.example.test/server",
+                "status_code": 500,
+                "passed": False,
+                "failure_type": "backend_error",
+                "http_executed": True,
+            },
+            {
+                "label": "Schema failure",
+                "method": "GET",
+                "url": "https://api.example.test/schema",
+                "status_code": 200,
+                "passed": False,
+                "assertion_results": [
+                    {"type": "schema", "passed": False, "blocking": True, "error": "missing id"}
+                ],
+                "http_executed": True,
+            },
+        ],
+    }
+    append_api_result_observations(state, state["api_execution_result"], stage="api_runner")
+
+    failure_types = {item["failure_type"] for item in state["agent_observations"]}
+
+    assert {"network_error", "timeout", "backend_error", "schema_contract"} <= failure_types
+    assert state["agent_protocol_summary"]["by_failure_type"]["network_error"] == 1
+    assert state["agent_protocol_summary"]["by_failure_type"]["timeout"] == 1
+    assert state["agent_protocol_summary"]["by_failure_type"]["backend_error"] == 1
+    assert state["agent_protocol_summary"]["by_failure_type"]["schema_contract"] == 1
+
+
+@pytest.mark.asyncio
 async def test_golden_ui_locator_missing_replans_with_evidence_and_report() -> None:
     state = await _planned_base(test_type="ui", target_url="https://app.example.test")
     state["agent_execution_stage"] = "ui"
@@ -257,6 +321,47 @@ async def test_golden_ui_captcha_blocker_asks_human_and_reports_setup_failure() 
     assert state["agent_human_question"]
     assert state["final_report"]["overall_verdict"] == "FAIL"
     assert state["final_report"]["bugs_found"][0]["source"] == "ui_setup"
+
+
+@pytest.mark.asyncio
+async def test_golden_ui_high_risk_structured_action_is_blocked_and_asks_human() -> None:
+    state = await _planned_base(test_type="ui", target_url="https://app.example.test")
+    state["agent_execution_stage"] = "ui"
+    state["ui_execution_result"] = {
+        "total": 1,
+        "completed": 1,
+        "passed": 0,
+        "failed": 1,
+        "command_total": 1,
+        "command_completed": 1,
+        "command_failed": 1,
+        "screenshots": [],
+        "snapshot_texts": [MOCK_UI_PAGE_SNAPSHOT],
+        "all_passed": False,
+        "complete": True,
+        "commands": [
+            {
+                "case_index": 0,
+                "case_title": "High risk code",
+                "command": "structured run_code",
+                "normalized_command": None,
+                "status": "blocked",
+                "status_code": 1,
+                "stderr": "Blocked arbitrary code execution in structured Playwright action.",
+                "passed": False,
+                "risk": "high_risk",
+                "agent_action_type": "run_code",
+            }
+        ],
+        "cases": [{"case_index": 0, "title": "High risk code", "passed": False}],
+    }
+    append_ui_result_observations(state, state["ui_execution_result"], stage="ui_runner")
+
+    state = await execution_evaluator.run(state)
+
+    assert state["agent_observations"][0]["failure_type"] == "ui_high_risk_action_blocked"
+    assert state["evidence_evaluation"]["next_action"] == "ask_human"
+    assert state["agent_protocol_evaluations"][0]["outcome"] == "needs_human"
 
 
 @pytest.mark.asyncio

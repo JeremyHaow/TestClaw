@@ -11,6 +11,8 @@ from langchain_core.messages import HumanMessage
 
 from app.agent.action_runtime import append_ui_result_observations
 from app.agent.progress import persist_progress
+from app.agent.runtime.runtime import AgentRuntime
+from app.agent.runtime.tool_executor import ToolExecutor
 from app.agent.prompts import UI_EXECUTION_CONTEXT_PROMPT
 from app.agent.state import AgentState
 from app.agent.tool_registry import install_tool_context, record_tool_call, summarize_tool_calls
@@ -867,9 +869,9 @@ async def _execute_ui_case_batches(
     state: AgentState,
 ) -> dict:
     """Execute UI cases independently and collect per-case screenshot evidence."""
-    from app.tools.playwright_tool import run_playwright_cli_command
     from app.services.screenshot_storage import store_screenshot
 
+    tool_executor = ToolExecutor(state)
     case_results: list[dict] = []
     command_results: list[dict] = []
     screenshots: list[str] = []
@@ -1013,7 +1015,11 @@ async def _execute_ui_case_batches(
                         )
 
             start = time.perf_counter()
-            result = await run_playwright_cli_command(normalized_command)
+            tool_result = await tool_executor.execute(
+                "ui.playwright_cli",
+                {"command": normalized_command, "session": "default"},
+            )
+            result = tool_result.raw if isinstance(tool_result.raw, dict) else tool_result.outputs
             elapsed = round((time.perf_counter() - start) * 1000, 2)
             status_code = result.get("status_code", -1)
             stdout = result.get("stdout", "")
@@ -1136,7 +1142,11 @@ async def _execute_ui_case_batches(
             final_path = screenshot_dir / f"case_{case_index:03d}_final.png"
             final_command = _full_page_screenshot_command(final_path)
             start = time.perf_counter()
-            result = await run_playwright_cli_command(final_command)
+            tool_result = await tool_executor.execute(
+                "ui.playwright_cli",
+                {"command": final_command, "session": "default"},
+            )
+            result = tool_result.raw if isinstance(tool_result.raw, dict) else tool_result.outputs
             elapsed = round((time.perf_counter() - start) * 1000, 2)
             passed = result.get("status_code", -1) == 0 and final_path.exists()
             record_tool_call(
@@ -1256,6 +1266,7 @@ async def _execute_ui_case_batches(
 
 async def run(state: AgentState) -> AgentState:
     install_tool_context(state)
+    runtime = AgentRuntime(state)
     state["agent_execution_stage"] = "ui"
     target_url = state.get("target_url", "")
     ui_seed_url = state.get("ui_seed_url") or target_url
@@ -1316,6 +1327,7 @@ async def run(state: AgentState) -> AgentState:
         }
         state["ui_execution_result"] = exec_result
         append_ui_result_observations(state, exec_result, stage="ui_runner")
+        await runtime.flush_stage_events(stage="ui_runner")
         artifacts = state.get("artifacts") or {}
         artifacts["ui_screenshots"] = []
         artifacts["ui_screenshot_evidence"] = []
@@ -1362,6 +1374,7 @@ async def run(state: AgentState) -> AgentState:
 
     state["ui_execution_result"] = exec_result
     append_ui_result_observations(state, exec_result, stage="ui_runner")
+    await runtime.flush_stage_events(stage="ui_runner")
 
     artifacts = state.get("artifacts") or {}
     artifacts["ui_screenshots"] = exec_result["screenshots"]
