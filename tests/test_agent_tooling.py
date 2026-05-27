@@ -158,6 +158,33 @@ def test_api_runner_extracts_resource_scoped_ids_from_list_response() -> None:
     assert updates["warehouseId"] == 42
 
 
+def test_api_runner_auth_negative_path_params_do_not_wait_for_list_ids() -> None:
+    schema = [
+        {
+            "method": "GET",
+            "path": "/wms/warehouse/{id}",
+            "path_params": [{"name": "id", "schema": {"type": "integer"}}],
+            "auth_required": True,
+        }
+    ]
+
+    requests = api_runner._build_test_requests(
+        schema,
+        "https://wms.example.test/api",
+        {"Authorization": "Bearer token"},
+        "safe_read_only",
+    )
+
+    smoke = next(request for request in requests if request["category"] == "SMOKE")
+    unauthorized = next(request for request in requests if request["category"] == "AUTH")
+
+    assert smoke["url"] == "https://wms.example.test/api/wms/warehouse/{{warehouseId}}"
+    assert smoke["depends_on"] == ["warehouseId"]
+    assert unauthorized["url"] == "https://wms.example.test/api/wms/warehouse/1"
+    assert unauthorized.get("depends_on") is None
+    assert unauthorized.get("path_param_dependencies") is None
+
+
 def test_mock_json_body_generation_uses_spring_datetime_strings() -> None:
     body = generate_mock_json_body(
         {

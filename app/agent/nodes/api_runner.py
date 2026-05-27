@@ -1888,10 +1888,12 @@ def _build_test_requests(
 
         # 4. Unauthorized test
         if auth_required:
-            append_request({
-                "label": f"UNAUTHORIZED {method} {path}",
+            auth_probe_path = _resolve_path_params(raw_path, endpoint)
+            auth_probe_url = _build_request_url(base_url, auth_probe_path) or full_url
+            requests.append({
+                "label": f"UNAUTHORIZED {method} {auth_probe_path}",
                 "method": method,
-                "url": full_url,
+                "url": auth_probe_url,
                 "schema_method": method,
                 "schema_path": raw_path,
                 "headers": {"Content-Type": "application/json"} if req_body is not None else {},
