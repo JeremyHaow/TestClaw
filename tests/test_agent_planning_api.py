@@ -162,6 +162,7 @@ def test_multi_direct_api_urls_normalize_to_schema_source() -> None:
         "application/json"
     ]["schema"]
     assert response_schema["required"] == ["url", "headers"]
+    assert response_schema["x-testclaw-user-required-fields"] is True
 
     endpoints = parse_api_document_content(payload.source)
     assert [(item["method"], item["path"]) for item in endpoints] == [
@@ -777,6 +778,9 @@ def test_structured_intake_multi_url_target_supplement_builds_schema_source() ->
     assert document["paths"]["/headers"]["get"]["responses"]["200"]["content"][
         "application/json"
     ]["schema"]["required"] == ["url", "headers"]
+    assert document["paths"]["/headers"]["get"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]["x-testclaw-user-required-fields"] is True
 
 
 def test_generate_agent_plan_session_before_ready_returns_400() -> None:

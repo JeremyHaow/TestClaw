@@ -1041,7 +1041,8 @@ async def test_multi_direct_api_urls_flow_through_schema_case_generation(monkeyp
 
         async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
             calls.append({"method": method, "url": url, **kwargs})
-            return FakeResponse({"url": url, "headers": {}})
+            payload = {"headers": {}} if url.endswith("/headers") else {"url": url, "headers": {}}
+            return FakeResponse(payload)
 
     payload = normalize_planner_run_payload(
         None,
@@ -1084,6 +1085,15 @@ async def test_multi_direct_api_urls_flow_through_schema_case_generation(monkeyp
         "https://httpbin.org/headers",
     ]
     assert executed["api_request_selection"]["selected_total"] == 2
+    assert executed["api_execution_result"]["executed"] == 2
+    assert executed["api_execution_result"]["passed"] == 1
+    assert executed["api_execution_result"]["failed"] == 1
+    assert executed["api_execution_result"]["all_passed"] is False
+    headers_result = executed["api_execution_result"]["results"][1]
+    schema_assertion = headers_result["assertion_results"][1]
+    assert schema_assertion["type"] == "schema"
+    assert schema_assertion["blocking"] is True
+    assert schema_assertion["passed"] is False
 
 
 @pytest.mark.asyncio

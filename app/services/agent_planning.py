@@ -292,6 +292,7 @@ def _direct_url_response_schema(text: str) -> dict[str, Any]:
     if fields:
         schema["properties"] = {field: {} for field in fields}
         schema["required"] = fields
+        schema["x-testclaw-user-required-fields"] = True
     return schema
 
 

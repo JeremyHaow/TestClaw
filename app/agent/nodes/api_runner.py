@@ -1405,6 +1405,16 @@ def _api_execution_progress_detail(total_requests: int, request_selection: dict)
     )
 
 
+def _schema_assertion_mode_for_endpoint(endpoint: dict) -> str:
+    response_schema = endpoint.get("response_schema")
+    if (
+        isinstance(response_schema, dict)
+        and response_schema.get("x-testclaw-user-required-fields") is True
+    ):
+        return "blocking"
+    return "advisory"
+
+
 def _build_test_requests(
     api_schema: list[dict],
     base_url: str,
@@ -1540,7 +1550,7 @@ def _build_test_requests(
             "expected_status": _parse_status(endpoint.get("response_status", "200"), default=200),
             "response_schema": endpoint.get("response_schema"),
             "auto_schema_assertion": bool(endpoint.get("response_schema")),
-            "schema_assertion_mode": "advisory",
+            "schema_assertion_mode": _schema_assertion_mode_for_endpoint(endpoint),
             "category": "SMOKE",
             "request_body_source": "faker_json_schema" if body_generation else "example_request",
         }
