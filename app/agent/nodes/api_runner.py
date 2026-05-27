@@ -66,9 +66,13 @@ CRUD_SKILL_BLOCK_SKIP_TYPE = "crud_skill_blocked"
 BLOCKING_API_SKIP_TYPES = {SAFE_WRITE_BLOCK_SKIP_TYPE, CRUD_SKILL_BLOCK_SKIP_TYPE}
 SAFE_WRITE_GATE_CONFIRM_MARKERS = (
     "confirm",
+    "approval",
+    "approve",
     "test_env",
     "test_environment",
     "pre_call_check",
+    "safe_write_gate",
+    "use_safe_write_gate_result",
     "unique_prefix",
     "data_prefix",
     "testclaw",
@@ -79,13 +83,23 @@ SAFE_WRITE_GATE_CONFIRM_MARKERS = (
 SAFE_WRITE_ACTION_ISOLATION_MARKERS = (
     "unique_prefix",
     "use_unique_prefix",
+    "safe_write_gate",
+    "use_safe_write_gate_result",
     "data_prefix",
     "testclaw",
     "test_data",
     "disposable",
     "data_isolation",
     "cleanup",
+    "clean up",
     "cleanup_required",
+    "require_cleanup",
+)
+SAFE_WRITE_CLEANUP_MARKERS = (
+    "cleanup",
+    "clean up",
+    "cleanup_required",
+    "cleanup_test_data",
     "require_cleanup",
 )
 _NON_MUTATING_WRITE_MARKERS = (
@@ -490,7 +504,7 @@ def _safe_write_case_approved(case: dict | None, *, method: str) -> bool:
     )
     if not has_guardrail:
         return False
-    if method == "DELETE" and "cleanup" not in safety_text:
+    if method == "DELETE" and not any(marker in safety_text for marker in SAFE_WRITE_CLEANUP_MARKERS):
         return False
     return True
 
@@ -889,6 +903,7 @@ def _request_template_from_case(case: dict) -> dict:
 def _schema_endpoint_for_request(api_schema: list[dict], method: str, path_or_url: str) -> dict | None:
     method = str(method or "").upper()
     candidate_path = urlsplit(str(path_or_url or "")).path or str(path_or_url or "")
+    template_matches: list[dict] = []
     for endpoint in api_schema or []:
         if not isinstance(endpoint, dict):
             continue
@@ -898,6 +913,8 @@ def _schema_endpoint_for_request(api_schema: list[dict], method: str, path_or_ur
             continue
         if candidate_path == endpoint_path:
             return endpoint
+        if not endpoint.get("path_params") and not _OPENAPI_PATH_PARAM_RE.search(endpoint_path):
+            continue
         pattern_parts: list[str] = []
         last_end = 0
         for match in _OPENAPI_PATH_PARAM_RE.finditer(endpoint_path):
@@ -907,8 +924,16 @@ def _schema_endpoint_for_request(api_schema: list[dict], method: str, path_or_ur
         pattern_parts.append(re.escape(endpoint_path[last_end:]))
         pattern = "^" + "".join(pattern_parts) + "$"
         if re.match(pattern, candidate_path):
-            return endpoint
-    return None
+            template_matches.append(endpoint)
+    if not template_matches:
+        return None
+    return sorted(
+        template_matches,
+        key=lambda item: (
+            len(_OPENAPI_PATH_PARAM_RE.findall(str(item.get("path") or ""))),
+            -len(str(item.get("path") or "")),
+        ),
+    )[0]
 
 
 def _action_constraints(action: dict | None) -> list[str]:
@@ -960,6 +985,148 @@ def _replace_angle_placeholders(value, aliases: dict[str, str]):
     return value
 
 
+def _first_non_none_input(inputs: dict, keys: tuple[str, ...]):
+    for key in keys:
+        if key in inputs and inputs.get(key) is not None:
+            return inputs.get(key), key
+    return None, None
+
+
+def _placeholder_dependency_keys(value) -> list[str]:
+    names: list[str] = []
+
+    def visit(item) -> None:
+        if isinstance(item, str):
+            normalized = _normalize_model_placeholders(item)
+            for match in _PLACEHOLDER_RE.finditer(normalized):
+                name = match.group(1)
+                if name and name not in names:
+                    names.append(name)
+        elif isinstance(item, list):
+            for child in item:
+                visit(child)
+        elif isinstance(item, dict):
+            for child in item.values():
+                visit(child)
+
+    visit(value)
+    return names
+
+
+def _action_path_param_dependency_keys(raw_path: str, endpoint: dict) -> list[str]:
+    if not _OPENAPI_PATH_PARAM_RE.search(raw_path or ""):
+        return []
+    return _path_param_dependency_keys(raw_path, endpoint)
+
+
+def _normalized_field_name(value: object) -> str:
+    return "".join(ch.lower() for ch in str(value or "") if ch.isalnum())
+
+
+def _schema_body_properties(endpoint: dict | None) -> dict:
+    schema = (endpoint or {}).get("request_body_schema")
+    if not isinstance(schema, dict):
+        return {}
+    properties = schema.get("properties")
+    return properties if isinstance(properties, dict) else {}
+
+
+def _matching_schema_body_field(
+    source_key: object,
+    properties: dict,
+    used_fields: set[str],
+) -> str | None:
+    key_text = str(source_key or "")
+    if key_text in properties and key_text not in used_fields:
+        return key_text
+
+    normalized_key = _normalized_field_name(key_text)
+    for field in properties:
+        if field not in used_fields and _normalized_field_name(field) == normalized_key:
+            return str(field)
+
+    candidates = [str(field) for field in properties if str(field) not in used_fields]
+    if _CRUD_ID_FIELD_RE.search(key_text):
+        for field in candidates:
+            if _CRUD_ID_FIELD_RE.search(field):
+                return field
+
+    if _CRUD_TEXT_FIELD_RE.search(key_text):
+        for field in candidates:
+            if _CRUD_TEXT_FIELD_RE.search(field):
+                return field
+
+    key_tokens = set(_identifier_tokens(key_text))
+    if key_tokens:
+        for field in candidates:
+            field_tokens = set(_identifier_tokens(field))
+            if key_tokens <= field_tokens or field_tokens <= key_tokens:
+                return field
+    return None
+
+
+def _repair_agent_action_body_with_schema(
+    body,
+    endpoint: dict | None,
+    *,
+    method: str,
+    path: str,
+    content_type: str,
+) -> tuple[object, dict | None]:
+    if not endpoint:
+        return body, None
+
+    schema_body, generation = _request_body_from_schema(
+        endpoint,
+        method=method,
+        path=path,
+        content_type=content_type,
+    )
+    if body is None:
+        return schema_body, generation
+    if not isinstance(body, dict):
+        return body, None
+
+    properties = _schema_body_properties(endpoint)
+    if not properties:
+        return body, None
+
+    repaired: dict = {}
+    used_fields: set[str] = set()
+    changed = False
+    for key, value in body.items():
+        target_key = _matching_schema_body_field(key, properties, used_fields)
+        if target_key:
+            repaired[target_key] = value
+            used_fields.add(target_key)
+            changed = changed or target_key != key
+        else:
+            repaired[key] = value
+
+    if isinstance(schema_body, dict):
+        for field in _body_required_fields(endpoint):
+            if field in repaired or field not in schema_body:
+                continue
+            if str(method or "").upper() == "POST" and _CRUD_ID_FIELD_RE.search(field):
+                continue
+            repaired[field] = schema_body[field]
+            changed = True
+
+    if not changed:
+        return body, None
+    repair_generation = dict(generation or {})
+    repair_generation.update(
+        {
+            "source": "agent_action_schema_repair",
+            "method": method,
+            "path": path,
+            "content_type": content_type,
+            "summary": summarize_mock_body(repaired),
+        }
+    )
+    return repaired, repair_generation
+
+
 def _action_safe_write_approved(
     action: dict,
     *,
@@ -977,7 +1144,7 @@ def _action_safe_write_approved(
         marker in safety_text for marker in SAFE_WRITE_GATE_CONFIRM_MARKERS
     ):
         return False
-    if method == "DELETE" and "cleanup" not in safety_text:
+    if method == "DELETE" and not any(marker in safety_text for marker in SAFE_WRITE_CLEANUP_MARKERS):
         return False
     return any(
         marker in safety_text
@@ -1431,11 +1598,13 @@ def _build_agent_action_test_requests(
             continue
         if not action.get("allowed"):
             continue
-        inputs = action.get("inputs") if isinstance(action.get("inputs"), dict) else {}
+        raw_inputs = action.get("inputs") if isinstance(action.get("inputs"), dict) else {}
+        inputs = _normalize_model_placeholders(raw_inputs)
         method = str(inputs.get("method") or "GET").upper()
         if method not in SAFE_API_METHODS | WRITE_API_METHODS:
             continue
         raw_path = str(inputs.get("path") or inputs.get("endpoint") or inputs.get("url") or "")
+        raw_path = _normalize_model_placeholders(raw_path)
         if not raw_path:
             continue
         endpoint = _schema_endpoint_for_request(api_schema, method, raw_path)
@@ -1490,13 +1659,29 @@ def _build_agent_action_test_requests(
                     "action_id": action.get("action_id"),
                 })
                 continue
-        body = inputs.get("body", inputs.get("json"))
+        body, body_input_key = _first_non_none_input(inputs, ("body", "json", "body_template"))
         body = _replace_angle_placeholders(body, aliases)
         query_params = inputs.get("params") or inputs.get("query_params") or {}
         query_params = _replace_angle_placeholders(query_params, aliases)
+        extract_specs = _extract_specs(inputs.get("extract") or inputs.get("variable_extraction"))
+        content_type = (
+            inputs.get("content_type")
+            or inputs.get("request_body_content_type")
+            or (endpoint or {}).get("request_body_content_type")
+            or "application/json"
+        )
+        body_generation = None
+        if method in WRITE_API_METHODS:
+            body, body_generation = _repair_agent_action_body_with_schema(
+                body,
+                endpoint,
+                method=method,
+                path=endpoint.get("path") if endpoint else raw_path,
+                content_type=content_type,
+            )
         request_headers = _merge_request_headers(default_headers, inputs.get("headers"))
         if body is not None:
-            request_headers.setdefault("Content-Type", "application/json")
+            request_headers.setdefault("Content-Type", content_type)
         request = {
             "label": f"ACTION {method} {path}",
             "method": method,
@@ -1512,13 +1697,20 @@ def _build_agent_action_test_requests(
             "schema_assertion_mode": _schema_assertion_mode_for_endpoint(endpoint or {}),
             "category": "SMOKE",
             "assertions": [],
-            "request_body_source": "agent_action",
+            "request_body_source": "agent_action_schema_repair" if body_generation else (body_input_key or "agent_action"),
             "action_id": action.get("action_id"),
             "safety_constraints": constraints,
             "safe_write_approved": safe_write_approved,
         }
-        dependencies = _path_param_dependency_keys(raw_path, endpoint_for_params)
+        if extract_specs:
+            request["extract"] = extract_specs
+        if body_generation:
+            request["mock_body_generation"] = body_generation
+        dependencies = _action_path_param_dependency_keys(raw_path, endpoint_for_params)
         dependencies.extend(alias for alias in aliases.values() if alias not in dependencies)
+        for dependency in _placeholder_dependency_keys([path, body, query_params, request_headers]):
+            if dependency not in dependencies:
+                dependencies.append(dependency)
         _add_path_dependency_metadata(request, dependencies)
         requests.append(request)
     return requests
@@ -1622,6 +1814,7 @@ def _status_matches(expected_status, http_status: int, payload) -> bool:
 
 _JSON_PATH_TOKEN_RE = re.compile(r"([A-Za-z0-9_\-]+)|\[(\d+)\]")
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z0-9_.\-]+)\s*\}\}")
+_MODEL_PLACEHOLDER_RE = re.compile(r"\$\{\{?\s*([A-Za-z0-9_.\-]+)\s*\}?\}")
 _OPENAPI_PATH_PARAM_RE = re.compile(r"(?<!\{)\{([A-Za-z0-9_\-]+)\}(?!\})")
 _ID_FIELD_RE = re.compile(r"(^id$|id$|uuid$)", re.I)
 _SENSITIVE_DEPENDENCY_FIELD_RE = re.compile(
@@ -1667,11 +1860,22 @@ def _json_path_get(payload, path_expr: str):
 
 def _substitute_context(value, context: dict[str, object]):
     if isinstance(value, str):
-        return _PLACEHOLDER_RE.sub(lambda match: str(context.get(match.group(1), "")), value)
+        normalized = _normalize_model_placeholders(value)
+        return _PLACEHOLDER_RE.sub(lambda match: str(context.get(match.group(1), "")), normalized)
     if isinstance(value, list):
         return [_substitute_context(item, context) for item in value]
     if isinstance(value, dict):
         return {key: _substitute_context(item, context) for key, item in value.items()}
+    return value
+
+
+def _normalize_model_placeholders(value):
+    if isinstance(value, str):
+        return _MODEL_PLACEHOLDER_RE.sub(lambda match: f"{{{{{match.group(1)}}}}}", value)
+    if isinstance(value, list):
+        return [_normalize_model_placeholders(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _normalize_model_placeholders(item) for key, item in value.items()}
     return value
 
 

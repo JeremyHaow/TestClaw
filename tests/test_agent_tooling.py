@@ -4018,6 +4018,226 @@ async def test_api_runner_accepts_equivalent_safe_write_gate_terms(monkeypatch) 
     assert api_result["skipped"] == 0
 
 
+def test_api_runner_prefers_exact_action_path_over_template_match() -> None:
+    schema = [
+        {
+            "method": "GET",
+            "path": "/itemBrand/{id}",
+            "path_params": [{"name": "id", "schema": {"type": "integer"}}],
+            "response_status": "200",
+        },
+        {"method": "GET", "path": "/itemBrand/list", "response_status": "200"},
+    ]
+    actions = validate_agent_action_plan(
+        [
+            {
+                "tool_name": "api.http_request",
+                "inputs": {"method": "GET", "path": "/itemBrand/list"},
+                "safety_constraints": ["read_only"],
+            }
+        ],
+        parsed_api_schema=schema,
+        execution_policy="write_allowed",
+    )
+
+    requests = api_runner._build_agent_action_test_requests(
+        actions,
+        schema,
+        "https://api.example.test",
+        {},
+        execution_policy="write_allowed",
+    )
+
+    assert len(requests) == 1
+    assert requests[0]["schema_path"] == "/itemBrand/list"
+    assert requests[0]["url"] == "https://api.example.test/itemBrand/list"
+    assert requests[0].get("depends_on") is None
+    assert requests[0].get("path_param_dependencies") is None
+
+
+@pytest.mark.asyncio
+async def test_api_runner_normalizes_model_action_template_aliases_and_repairs_body(
+    monkeypatch,
+) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+            self.text = json.dumps(payload)
+            self.content = self.text.encode()
+
+        def json(self) -> dict:
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            body = kwargs.get("json") or {}
+            if method == "POST":
+                assert body == {"brandName": "TestClaw_Model_Brand"}
+                return FakeResponse({"code": 200, "data": {"id": 88, **body}})
+            if method == "GET" and url.endswith("/itemBrand/list"):
+                assert kwargs["params"] == {"brandName": "TestClaw_Model_Brand"}
+                return FakeResponse({"code": 200, "rows": [{"id": 88, "brandName": body.get("brandName")}]})
+            if method == "GET" and url.endswith("/itemBrand/88"):
+                return FakeResponse({"code": 200, "data": {"id": 88, "brandName": "TestClaw_Model_Brand"}})
+            if method == "PUT":
+                assert body == {"brandId": "88", "brandName": "TestClaw_Model_Brand_updated"}
+                return FakeResponse({"code": 200, "data": body})
+            if method == "DELETE" and url.endswith("/itemBrand/88"):
+                return FakeResponse({"code": 200, "data": None})
+            return FakeResponse({"code": 404})
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "api_execution_policy": "write_allowed",
+            "parsed_api_schema": [
+                {
+                    "method": "POST",
+                    "path": "/itemBrand",
+                    "request_body_content_type": "application/json",
+                    "request_body_schema": {
+                        "type": "object",
+                        "required": ["id", "brandName"],
+                        "properties": {
+                            "id": {"type": "integer"},
+                            "brandName": {"type": "string"},
+                        },
+                    },
+                    "response_status": "200",
+                },
+                {"method": "GET", "path": "/itemBrand/list", "response_status": "200"},
+                {
+                    "method": "GET",
+                    "path": "/itemBrand/{id}",
+                    "path_params": [{"name": "id", "schema": {"type": "integer"}}],
+                    "response_status": "200",
+                },
+                {
+                    "method": "PUT",
+                    "path": "/itemBrand",
+                    "request_body_content_type": "application/json",
+                    "request_body_schema": {
+                        "type": "object",
+                        "required": ["brandId", "brandName"],
+                        "properties": {
+                            "brandId": {"type": "integer"},
+                            "brandName": {"type": "string"},
+                        },
+                    },
+                    "response_status": "200",
+                },
+                {
+                    "method": "DELETE",
+                    "path": "/itemBrand/{id}",
+                    "path_params": [{"name": "id", "schema": {"type": "integer"}}],
+                    "response_status": "200",
+                },
+            ],
+            "agent_strategy_decision": {
+                "source": "llm",
+                "intent": "api_focused_endpoints",
+                "coverage_scope": "focused_documented_endpoints",
+                "method_policy": {"allowed_methods": ["GET", "POST", "PUT", "DELETE"], "write_allowed": True},
+                "endpoint_selection": {"source": "model_focus", "include": []},
+                "tool_plan": [
+                    {
+                        "tool_name": "api.safe_write_gate",
+                        "inputs": {
+                            "safe_write_gate": "approval",
+                            "method": "POST",
+                            "path": "/itemBrand",
+                            "data_prefix": "TestClaw_",
+                        },
+                        "safety_constraints": [
+                            "write_allowed",
+                            "data_isolation",
+                            "cleanup_required",
+                        ],
+                        "reason": "Approve isolated TestClaw-prefixed CRUD data with cleanup.",
+                    },
+                    {
+                        "tool_name": "api.http_request",
+                        "inputs": {
+                            "method": "POST",
+                            "path": "/itemBrand",
+                            "body_template": {"name": "TestClaw_Model_Brand"},
+                            "variable_extraction": {"created_id": "$.data.id"},
+                        },
+                        "safety_constraints": ["use_safe_write_gate_result", "data_prefix"],
+                    },
+                    {
+                        "tool_name": "api.http_request",
+                        "inputs": {
+                            "method": "GET",
+                            "path": "/itemBrand/list",
+                            "params": {"brandName": "TestClaw_Model_Brand"},
+                        },
+                        "safety_constraints": ["read_only"],
+                    },
+                    {
+                        "tool_name": "api.http_request",
+                        "inputs": {"method": "GET", "path": "/itemBrand/${created_id}"},
+                        "safety_constraints": ["read_only"],
+                    },
+                    {
+                        "tool_name": "api.http_request",
+                        "inputs": {
+                            "method": "PUT",
+                            "path": "/itemBrand",
+                            "body_template": {
+                                "brandId": "${created_id}",
+                                "name": "TestClaw_Model_Brand_updated",
+                            },
+                        },
+                        "safety_constraints": ["use_safe_write_gate_result", "data_prefix"],
+                    },
+                    {
+                        "tool_name": "api.http_request",
+                        "inputs": {"method": "DELETE", "path": "/itemBrand/${created_id}"},
+                        "safety_constraints": ["use_safe_write_gate_result"],
+                        "reason": "Clean up the disposable TestClaw brand record.",
+                    },
+                ],
+            },
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+
+    assert [call["method"] for call in calls] == ["POST", "GET", "GET", "PUT", "DELETE"]
+    assert calls[2]["url"].endswith("/itemBrand/88")
+    assert calls[4]["url"].endswith("/itemBrand/88")
+    assert api_result["executed"] == 5
+    assert api_result["passed"] == 5
+    assert api_result["failed"] == 0
+    assert api_result["skipped"] == 0
+    assert api_result["results"][0]["extractions"] == [
+        {"name": "created_id", "path": "$.data.id", "extracted": True}
+    ]
+    assert api_result["results"][0]["request_body_source"] == "agent_action_schema_repair"
+    assert api_result["results"][3]["request_body_source"] == "agent_action_schema_repair"
+
+
 @pytest.mark.asyncio
 async def test_api_runner_synthesizes_safe_crud_actions_when_model_falls_back_to_read_only(monkeypatch) -> None:
     calls = []
