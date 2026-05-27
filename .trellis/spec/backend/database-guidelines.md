@@ -612,12 +612,20 @@ rows = await db.execute(select(sampled.c.id, sampled.c.target_url, sampled.c.sta
 - Do not reuse generated screenshot filenames such as `step1.png`; the runner owns evidence paths.
 - Generated pseudo-commands `wait`, `sleep`, `pause`, `assert`, and `expect` must be normalized before execution or skipped without being counted as playwright syntax failures.
 - `assert snapshot contains "text"` becomes a `snapshot` execution plus an in-process text check.
+- Generated visibility pseudo-commands `assert_visible`, `assert-visible`, `assertvisible`, and `ui.assert_visible` become snapshot executions plus in-process accessibility text checks. `text=...` and `/regex-like/` wrappers are unwrapped. Simple selector targets must be mapped to accessible snapshot terms when possible (`h1`-`h6` -> `heading`, `a` -> `link`, `input`/`textarea` -> `textbox`, `select` -> `combobox`); class/id/attribute selectors that cannot be proven from the accessibility snapshot become snapshot evidence instead of blocking product failures.
+- `run-code` must be executable in the `playwright-cli` dialect. Bare JavaScript snippets are wrapped as `async page => { ... }`; `async ({ page }) =>` is normalized to `async page =>`. Diagnostic snippets that only log information and reference transient snapshot refs such as `page.locator('[ref=e6]')` are converted to snapshot evidence, because playwright-cli refs are not stable Playwright JS selectors.
+- Semantic `click`, `fill`, and `select` commands may resolve model-friendly text targets to current snapshot refs. If a `click "label"` target does not text-match but the current snapshot has exactly one clickable `link` or `button`, resolve to that single ref; if multiple clickable targets exist, do not guess.
 - Auto runs must execute API first when an API schema, API cases, or `base_url_override` is available, then continue to UI when a UI URL is available.
 - The reporter must build result counts from `api_execution_result` and `ui_execution_result`, not from draft plans or LLM-generated summaries.
 
 ### 4. Validation & Error Matrix
 
 - Generated `wait 2000` -> normalize to `snapshot`; no syntax failure.
+- Generated `assert_visible "h1"` against a snapshot containing `heading "Example Domain" [level=1]` -> pass by checking for `heading`, not literal text `h1`.
+- Generated `assert_visible ".hero"` -> run `snapshot` for evidence and do not fail the product solely because the accessibility snapshot cannot prove a CSS class selector.
+- Generated `run-code "console.log('x');"` -> normalize to `run-code "async page => { console.log('x'); }"`.
+- Generated diagnostic `run-code "const link = await page.locator('[ref=e6]'); console.log(...);"` -> convert to snapshot evidence; do not execute invalid transient-ref JavaScript.
+- Generated `click "More information..."` on a page whose snapshot has a single clickable link `Learn more [ref=e6]` -> resolve to `click e6`; the same command on a page with multiple clickable targets remains unresolved and may fail/replan.
 - Generated `assert snapshot contains "Dashboard"` -> execute `snapshot`, fail only if actual snapshot text is missing `Dashboard`.
 - Generated `screenshot shared.png` -> save to the runner-owned case evidence path.
 - API schema/base URL available but no API execution -> final report recommendation: verify schema/base URL.
