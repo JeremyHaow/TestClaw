@@ -60,6 +60,7 @@ SAFE_WRITE_BLOCK_REASON = (
     "write_allowed 策略仍需通过安全写入闸门；当前请求看起来会修改业务数据，"
     "且没有被识别为登录、验证码、导出/下载或鉴权负向探测，因此未执行。"
 )
+AGENT_ACTION_HTTP_REQUEST_SOURCE = "agent_action_http_requests"
 _NON_MUTATING_WRITE_MARKERS = (
     "login",
     "signin",
@@ -292,6 +293,8 @@ def _safe_write_skip_reason(
     method = str(method or "GET").upper()
     if method not in WRITE_API_METHODS:
         return None
+    if _safe_write_case_approved(case, method=method):
+        return None
 
     descriptor = _request_descriptor_text(
         method=method,
@@ -317,6 +320,29 @@ def _safe_write_skip_reason(
         return SAFE_WRITE_BLOCK_REASON
 
     return SAFE_WRITE_BLOCK_REASON
+
+
+def _safe_write_case_approved(case: dict | None, *, method: str) -> bool:
+    if not isinstance(case, dict) or not case.get("safe_write_approved"):
+        return False
+    constraints = " ".join(str(item).lower() for item in (case.get("safety_constraints") or []))
+    if "write_allowed" not in constraints:
+        return False
+    has_guardrail = any(
+        marker in constraints
+        for marker in (
+            "confirm_test_env",
+            "confirm_test_environment",
+            "safe_write_gate",
+            "unique_prefix",
+            "require_cleanup",
+        )
+    )
+    if not has_guardrail:
+        return False
+    if method == "DELETE" and "cleanup" not in constraints:
+        return False
+    return True
 
 
 def _make_skipped_result(req: dict, reason: str) -> dict:
@@ -708,6 +734,217 @@ def _request_template_from_case(case: dict) -> dict:
         return test_data
 
     return {}
+
+
+def _schema_endpoint_for_request(api_schema: list[dict], method: str, path_or_url: str) -> dict | None:
+    method = str(method or "").upper()
+    candidate_path = urlsplit(str(path_or_url or "")).path or str(path_or_url or "")
+    for endpoint in api_schema or []:
+        if not isinstance(endpoint, dict):
+            continue
+        endpoint_method = str(endpoint.get("method") or "").upper()
+        endpoint_path = str(endpoint.get("path") or "")
+        if endpoint_method != method or not endpoint_path:
+            continue
+        if candidate_path == endpoint_path:
+            return endpoint
+        pattern_parts: list[str] = []
+        last_end = 0
+        for match in _OPENAPI_PATH_PARAM_RE.finditer(endpoint_path):
+            pattern_parts.append(re.escape(endpoint_path[last_end:match.start()]))
+            pattern_parts.append(r"[^/]+")
+            last_end = match.end()
+        pattern_parts.append(re.escape(endpoint_path[last_end:]))
+        pattern = "^" + "".join(pattern_parts) + "$"
+        if re.match(pattern, candidate_path):
+            return endpoint
+    return None
+
+
+def _action_constraints(action: dict | None) -> list[str]:
+    if not isinstance(action, dict):
+        return []
+    return [str(item) for item in (action.get("safety_constraints") or []) if str(item)]
+
+
+def _has_confirmed_safe_write_gate(actions: list[dict] | None) -> bool:
+    for action in actions or []:
+        if not isinstance(action, dict) or action.get("tool_name") != "api.safe_write_gate":
+            continue
+        if not action.get("allowed") or str(action.get("policy") or "") != "write_allowed":
+            continue
+        text = " ".join(
+            [
+                *(_action_constraints(action)),
+                json.dumps(action.get("inputs") or {}, ensure_ascii=False, default=str),
+            ]
+        ).lower()
+        if "confirm" in text or "test_env" in text or "unique_prefix" in text:
+            return True
+    return False
+
+
+def _placeholder_aliases_for_action(path: str, inputs: dict, endpoint: dict | None) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    path_params = inputs.get("path_params")
+    if not isinstance(path_params, dict):
+        return aliases
+    for name, value in path_params.items():
+        value_text = str(value or "").strip()
+        if not (value_text.startswith("<") and value_text.endswith(">")):
+            continue
+        placeholder = value_text[1:-1].strip()
+        if not placeholder:
+            continue
+        context_key = _path_param_context_key(path, str(name))
+        aliases[placeholder] = context_key
+    return aliases
+
+
+def _replace_angle_placeholders(value, aliases: dict[str, str]):
+    if isinstance(value, str):
+        def replace(match: re.Match[str]) -> str:
+            name = match.group(1).strip()
+            return f"{{{{{aliases.get(name, name)}}}}}"
+
+        return re.sub(r"<([A-Za-z0-9_.\-]+)>", replace, value)
+    if isinstance(value, list):
+        return [_replace_angle_placeholders(item, aliases) for item in value]
+    if isinstance(value, dict):
+        return {key: _replace_angle_placeholders(item, aliases) for key, item in value.items()}
+    return value
+
+
+def _action_safe_write_approved(
+    action: dict,
+    *,
+    method: str,
+    safe_write_gate_confirmed: bool,
+) -> bool:
+    if str(method or "").upper() not in WRITE_API_METHODS:
+        return False
+    if not action.get("allowed") or str(action.get("policy") or "") != "write_allowed":
+        return False
+    constraints = set(_action_constraints(action))
+    if "write_allowed" not in {item.lower() for item in constraints}:
+        return False
+    if not safe_write_gate_confirmed and not any("confirm" in item.lower() for item in constraints):
+        return False
+    if method == "DELETE" and not any("cleanup" in item.lower() for item in constraints):
+        return False
+    return any(
+        marker in " ".join(item.lower() for item in constraints)
+        for marker in ("unique_prefix", "cleanup", "test_env")
+    )
+
+
+def _build_agent_action_test_requests(
+    actions: list[dict] | None,
+    api_schema: list[dict],
+    base_url: str,
+    auth_headers: dict | None,
+    *,
+    execution_policy: str,
+) -> list[dict]:
+    if _normalize_api_execution_policy(execution_policy) != "write_allowed":
+        return []
+    safe_write_gate_confirmed = _has_confirmed_safe_write_gate(actions)
+    requests: list[dict] = []
+    default_headers = auth_headers or {}
+    known_placeholder_aliases: dict[str, str] = {}
+    for action in actions or []:
+        if not isinstance(action, dict) or action.get("tool_name") != "api.http_request":
+            continue
+        if not action.get("allowed"):
+            continue
+        inputs = action.get("inputs") if isinstance(action.get("inputs"), dict) else {}
+        method = str(inputs.get("method") or "GET").upper()
+        if method not in SAFE_API_METHODS | WRITE_API_METHODS:
+            continue
+        raw_path = str(inputs.get("path") or inputs.get("endpoint") or inputs.get("url") or "")
+        if not raw_path:
+            continue
+        endpoint = _schema_endpoint_for_request(api_schema, method, raw_path)
+        endpoint_for_params = endpoint or {"path_params": []}
+        aliases = {
+            **known_placeholder_aliases,
+            **_placeholder_aliases_for_action(raw_path, inputs, endpoint),
+        }
+        known_placeholder_aliases.update(aliases)
+        path = _resolve_path_params(raw_path, endpoint_for_params, unresolved_as_dependency=True)
+        path = _replace_angle_placeholders(path, aliases)
+        url = _build_request_url(base_url, path)
+        if not url:
+            continue
+        constraints = _action_constraints(action)
+        safe_write_approved = _action_safe_write_approved(
+            action,
+            method=method,
+            safe_write_gate_confirmed=safe_write_gate_confirmed,
+        )
+        case_context = {
+            "safe_write_approved": safe_write_approved,
+            "safety_constraints": constraints,
+            "title": action.get("reason") or action.get("expected_observation"),
+        }
+        if method in WRITE_API_METHODS:
+            safe_write_reason = _safe_write_skip_reason(
+                method=method,
+                path_or_url=raw_path,
+                label=f"ACTION {method} {raw_path}",
+                case=case_context,
+                category="SMOKE",
+                expected_status=200,
+            )
+            if safe_write_reason:
+                requests.append({
+                    "label": f"BLOCKED_ACTION_WRITE {method} {path}",
+                    "method": method,
+                    "url": url,
+                    "schema_method": method,
+                    "schema_path": endpoint.get("path") if endpoint else raw_path,
+                    "headers": {},
+                    "body": None,
+                    "expected_status": None,
+                    "category": "SKIPPED",
+                    "skip_reason": safe_write_reason,
+                    "skip_type": SAFE_WRITE_BLOCK_SKIP_TYPE,
+                    "failure_type": SAFE_WRITE_BLOCK_SKIP_TYPE,
+                    "action_id": action.get("action_id"),
+                })
+                continue
+        body = inputs.get("body", inputs.get("json"))
+        body = _replace_angle_placeholders(body, aliases)
+        query_params = inputs.get("params") or inputs.get("query_params") or {}
+        query_params = _replace_angle_placeholders(query_params, aliases)
+        request_headers = _merge_request_headers(default_headers, inputs.get("headers"))
+        if body is not None:
+            request_headers.setdefault("Content-Type", "application/json")
+        request = {
+            "label": f"ACTION {method} {path}",
+            "method": method,
+            "url": url,
+            "schema_method": method,
+            "schema_path": endpoint.get("path") if endpoint else raw_path,
+            "headers": request_headers,
+            "body": body,
+            "query_params": query_params,
+            "expected_status": 200,
+            "response_schema": endpoint.get("response_schema") if endpoint else None,
+            "auto_schema_assertion": bool(endpoint and endpoint.get("response_schema")),
+            "schema_assertion_mode": _schema_assertion_mode_for_endpoint(endpoint or {}),
+            "category": "SMOKE",
+            "assertions": [],
+            "request_body_source": "agent_action",
+            "action_id": action.get("action_id"),
+            "safety_constraints": constraints,
+            "safe_write_approved": safe_write_approved,
+        }
+        dependencies = _path_param_dependency_keys(raw_path, endpoint_for_params)
+        dependencies.extend(alias for alias in aliases.values() if alias not in dependencies)
+        _add_path_dependency_metadata(request, dependencies)
+        requests.append(request)
+    return requests
 
 
 def _payload_status_code(payload) -> int | None:
@@ -1578,7 +1815,8 @@ def _select_requests_for_execution(
     fallback_reason: str | None = None,
     coverage_metadata: dict | None = None,
 ) -> tuple[list[dict], dict]:
-    requests = _order_requests_for_dependencies(requests)
+    if source != AGENT_ACTION_HTTP_REQUEST_SOURCE:
+        requests = _order_requests_for_dependencies(requests)
     candidate_total = len(requests)
     if execution_budget is None or candidate_total <= execution_budget:
         selected = list(requests)
@@ -1953,6 +2191,7 @@ def _update_api_execution_state(
     skipped_count = sum(1 for r in results if r.get("skipped"))
     advisory_count = sum(1 for r in results if r.get("advisory"))
     environment_skipped_count = sum(1 for r in results if r.get("skip_type") == "environment_not_executable")
+    blocking_skipped_count = sum(1 for r in results if r.get("skip_type") == SAFE_WRITE_BLOCK_SKIP_TYPE)
     budget_skipped_count = (
         sum(1 for r in results if r.get("skip_type") == "execution_budget_exhausted")
         + budget_omitted_count
@@ -1960,7 +2199,7 @@ def _update_api_execution_state(
     executed_count = len(results) - skipped_count
     passed_count = sum(1 for r in results if r.get("passed") is True)
     completed = len(results)
-    failed_count = max(executed_count - passed_count, 0)
+    failed_count = max(executed_count - passed_count, 0) + blocking_skipped_count
     pending_count = 0 if complete else max(total_requests - completed, 0)
     all_passed = complete and total_requests > 0 and failed_count == 0
     stderr = ""
@@ -1981,6 +2220,7 @@ def _update_api_execution_state(
         "skipped": skipped_count,
         "advisory": advisory_count,
         "environment_skipped": environment_skipped_count,
+        "blocking_skipped": blocking_skipped_count,
         "budget_skipped": budget_skipped_count,
         "pending": pending_count,
         "http_executed": http_executed_count if http_executed_count is not None else sum(1 for r in results if r.get("http_executed")),
@@ -2081,7 +2321,22 @@ async def run(state: AgentState) -> AgentState:
     selection_source = "fallback_url"
     fallback_reason = None
     strategy_coverage_endpoints: list[dict] = []
-    if all_safe_get_coverage_requested:
+    action_request_candidates = _build_agent_action_test_requests(
+        agent_actions,
+        api_schema,
+        base_url,
+        auth_headers,
+        execution_policy=execution_policy,
+    )
+    if action_request_candidates:
+        request_candidates = action_request_candidates
+        selection_source = AGENT_ACTION_HTTP_REQUEST_SOURCE
+        fallback_reason = (
+            "agent_http_action_plan"
+            if _has_executable_request(action_request_candidates)
+            else "agent_http_action_plan_blocked_by_guardrail"
+        )
+    elif all_safe_get_coverage_requested:
         request_candidates = _build_test_requests(
             safe_schema_endpoints,
             base_url,
@@ -2668,7 +2923,8 @@ async def run(state: AgentState) -> AgentState:
     skipped_count = sum(1 for r in results if r.get("skipped"))
     executed_count = total - skipped_count
     passed_count = sum(1 for r in results if r.get("passed") is True)
-    failed_count = max(executed_count - passed_count, 0)
+    blocking_skipped_count = sum(1 for r in results if r.get("skip_type") == SAFE_WRITE_BLOCK_SKIP_TYPE)
+    failed_count = max(executed_count - passed_count, 0) + blocking_skipped_count
     all_passed = total > 0 and failed_count == 0
 
     _update_api_execution_state(

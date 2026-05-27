@@ -448,6 +448,10 @@ except Exception:
     "diagnostics": []
   }
   ```
+- API runner action request source:
+  ```python
+  AGENT_ACTION_HTTP_REQUEST_SOURCE = "agent_action_http_requests"
+  ```
 
 ### 3. Contracts
 
@@ -455,9 +459,14 @@ except Exception:
 - The model may choose strategy, coverage scope, endpoint include/exclude lists, and tool plan. It may not grant itself write permission, invent schema paths, or introduce unknown tools.
 - Local normalizers must convert invalid model output into `agent_strategy_diagnostics`; the action runtime must then convert `tool_plan` steps into validated `agent_actions`, enrich them with registry risk/policy metadata, record `agent_action_observations`, and block invalid paths/methods/tools before execution.
 - Under `safe_read_only` and `safe_with_auth`, POST/PUT/PATCH/DELETE remain blocked even if the model sets `write_allowed=true`.
+- Under `write_allowed`, `api_runner` may execute planner-provided `api.http_request` actions only after local validation. Write actions require both a validated `api.safe_write_gate` context and per-action safety constraints such as `write_allowed`, `unique_prefix`, `test_env`, and `require_cleanup` for DELETE.
+- Planner-provided CRUD chains must keep the model's action order so POST/list/detail/update/delete dependency flow is not reordered by generic request prioritization.
+- Planner angle placeholders such as `<id_from_post>` must be converted into dependency placeholders and resolved from prior successful observations; unresolved path parameters must be skipped rather than replaced with synthetic IDs.
+- If planner-provided `api.http_request` actions are present but all write actions are blocked by guardrails, `api_runner` must keep the blocked action results under `agent_action_http_requests`; it must not fall back to direct URL or schema smoke requests that would make the run look successful.
 - Schema-backed API execution must execute only documented method+path pairs selected by the validated strategy or derived from documented safe methods.
 - `objective_requests_all_safe_get_coverage(...)` is a fallback only when the planner strategy is missing/unavailable, not the primary strategy mechanism.
 - `execution_evaluator` must treat completed `all_documented_safe_methods`, `focused_documented_endpoints`, and `sampled_contract` coverage as reportable evidence even if generated case counts are small.
+- `safe_write_gate_blocked` skips are blocking evidence: they must increment `failed`/`blocking_skipped` and keep `all_passed=false`.
 
 ### 4. Validation & Error Matrix
 
@@ -466,16 +475,20 @@ except Exception:
 - LLM includes POST/PUT/PATCH/DELETE under read-only policy -> drop endpoint, force `write_allowed=false`, record `method_blocked_by_policy`.
 - LLM includes schema-missing method/path -> drop endpoint, record `out_of_schema_endpoint`.
 - LLM emits an unknown tool action -> action is `allowed=false`, records `unknown_tool_name`, and is not executed.
+- LLM emits an `api.http_request` write action without a validated safe-write gate or required action constraints -> create a `safe_write_gate_blocked` skipped result, do not send HTTP, count it as failed.
+- LLM emits an `api.http_request` chain with unresolved path dependency -> skip the dependent request with `path_param_unresolved`, do not synthesize placeholder IDs.
 - Valid focused/sample strategy with no surviving include endpoints -> no schema-wide fallback execution; record missing selection and let evaluator/report surface the blocker.
 
 ### 5. Good/Base/Bad Cases
 
 - Good: model selects `all_documented_safe_methods`; runner derives GET/HEAD/OPTIONS from OpenAPI and records budget omissions.
 - Good: model selects `focused_documented_endpoints`; runner executes only validated include paths and does not force full schema coverage.
+- Good: model selects a safe CRUD chain with `api.safe_write_gate`, unique test data, dependency placeholders, and cleanup; runner executes the action sequence and records dependency extraction/injection evidence.
 - Good: `agent_react_trace` shows concise action reason, selected tool, validated inputs, and observation/diagnostic without storing hidden chain-of-thought.
 - Base: model unavailable and objective explicitly asks for all GET requests; fallback derives documented safe method coverage.
 - Bad: adding a UI option or keyword branch for "all GET coverage" instead of relying on the strategy contract.
 - Bad: treating model-selected POST as safe because it appeared in `method_policy.allowed_methods`.
+- Bad: all planner write actions are guardrail-blocked, then runner falls back to a direct GET and reports success.
 
 ### 6. Tests Required
 
@@ -484,6 +497,8 @@ except Exception:
 - Regression: unavailable LLM still handles explicit "test all GET requests" fallback.
 - Regression: read-only policy drops model-selected write methods and out-of-schema paths.
 - Regression: generic `AgentAction` validation blocks unknown tools, unsafe methods, and out-of-schema paths while preserving redacted observations.
+- Regression: `api_runner` executes a safe planner-provided CRUD action chain in the original action order and injects IDs from prior responses.
+- Regression: an unsafe planner-provided write action without `api.safe_write_gate` sends no HTTP request, keeps source `agent_action_http_requests`, increments `blocking_skipped`, and reports failure.
 - Regression: evaluator reports completed model strategy scope instead of repeated replanning.
 
 ### 7. Wrong vs Correct
@@ -501,6 +516,20 @@ if objective_requests_all_safe_get_coverage(objective):
 strategy = normalize_agent_strategy_decision(raw_model_json, parsed_api_schema, execution_policy, test_type)
 if strategy["coverage_scope"] == "all_documented_safe_methods":
     execute_validated_schema_safe_methods(strategy)
+```
+
+#### Wrong
+
+```python
+if not has_executable_agent_actions(action_requests):
+    execute_direct_get_fallback()
+```
+
+#### Correct
+
+```python
+if action_requests:
+    execute_or_record_guardrail_blocks(action_requests, source=AGENT_ACTION_HTTP_REQUEST_SOURCE)
 ```
 
 ## Scenario: Run Auth Preflight and Captcha Modes
