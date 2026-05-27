@@ -11,6 +11,7 @@ from app.agent.nodes import (
     api_runner,
     agent_supervisor,
     execution_evaluator,
+    knowledge_sink,
     knowledge_retriever,
     mission_planner,
     planner,
@@ -767,6 +768,8 @@ def test_execution_log_payload_preserves_agent_protocol_records() -> None:
         "agent_retry_counts": {"api": 1},
         "agent_retry_feedback": "Retry same request batch.",
         "agent_human_question": "Please provide valid login details.",
+        "rag_facts": [{"fact_type": "known_blocker", "confidence": "high"}],
+        "memory_candidates": [{"kind": "known_blocker", "confidence": "high"}],
     }
 
     payload = build_execution_log_payload(state)
@@ -779,6 +782,8 @@ def test_execution_log_payload_preserves_agent_protocol_records() -> None:
     assert payload["agent_retry_counts"] == {"api": 1}
     assert payload["agent_retry_feedback"] == "Retry same request batch."
     assert payload["agent_human_question"] == "Please provide valid login details."
+    assert payload["rag_facts"][0]["fact_type"] == "known_blocker"
+    assert payload["memory_candidates"][0]["kind"] == "known_blocker"
 
 
 @pytest.mark.asyncio
@@ -2067,6 +2072,83 @@ async def test_knowledge_service_stores_embedding_for_new_entries(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_knowledge_sink_generates_redacted_memory_candidate_from_evaluation(monkeypatch) -> None:
+    created: list[dict] = []
+
+    async def fake_create(db, *, content: str, source_script_id: str | None = None):
+        created.append({"db": db, "content": content, "source_script_id": source_script_id})
+        return SimpleNamespace(id="knowledge-1", content=content, source_script_id=source_script_id)
+
+    db = object()
+    monkeypatch.setattr(knowledge_sink.knowledge_service, "create", fake_create)
+
+    state = await knowledge_sink.run(
+        {
+            "db_session": db,
+            "task_id": "run-memory-1",
+            "objective": "Checkout regression password=secret-password",
+            "target_url": "https://shop.example.test/checkout?token=secret-token",
+            "source_input": "https://shop.example.test/checkout?token=secret-token",
+            "test_type": "ui",
+            "input_type": "url",
+            "workflow_steps": [],
+            "evidence_evaluation": {
+                "stage": "ui",
+                "confidence": "high",
+                "sufficient_evidence": False,
+                "next_action": "ask_human",
+                "failure_type": "auth_failure",
+                "reason": "Login failed with password=secret-password",
+                "human_question": "Please provide a fresh password=secret-password",
+                "missing_evidence": ["valid session cookie=session-secret"],
+                "replan_hint": "Collect fresh login context before replaying checkout.",
+            },
+            "agent_observations": [
+                {
+                    "observation_id": "obs-1",
+                    "stage": "ui_runner",
+                    "layer": "ui",
+                    "tool_name": "ui.playwright_cli",
+                    "status": "failed",
+                    "outcome": "blocked",
+                    "failure_type": "auth_failure",
+                    "summary": "Login failed with token=secret-token",
+                    "evidence_ids": ["evidence-1"],
+                }
+            ],
+            "agent_protocol_summary": {
+                "observation_total": 1,
+                "evidence_total": 1,
+                "by_failure_type": {"auth_failure": 1},
+            },
+            "final_report": {
+                "overall_verdict": "FAIL",
+                "summary": "Auth setup blocked checkout.",
+                "recommendations": ["Refresh login context before replay."],
+            },
+        }
+    )
+
+    assert "bug_report" not in state
+    candidate = state["memory_candidates"][0]
+    serialized = json.dumps(candidate, ensure_ascii=False)
+    assert candidate["schema_version"] == knowledge_sink.MEMORY_CANDIDATE_SCHEMA
+    assert candidate["kind"] == "known_blocker"
+    assert candidate["confidence"] == "high"
+    assert candidate["failure_type"] == "auth_failure"
+    assert candidate["facts"][0]["fact_type"] == "known_blocker"
+    assert candidate["observation_refs"][0]["observation_id"] == "obs-1"
+    assert "secret-password" not in serialized
+    assert "secret-token" not in serialized
+    assert "session-secret" not in serialized
+    assert created[0]["db"] is db
+    assert created[0]["source_script_id"] == "run-memory-1"
+    assert knowledge_sink.MEMORY_CANDIDATE_MARKER in created[0]["content"]
+    assert "secret-password" not in created[0]["content"]
+    assert "secret-token" not in created[0]["content"]
+
+
+@pytest.mark.asyncio
 async def test_knowledge_retriever_uses_vector_similarity_and_redacts_context(monkeypatch) -> None:
     class FakeEmbeddingService:
         async def get_client(self, _db):
@@ -2124,6 +2206,87 @@ async def test_knowledge_retriever_uses_vector_similarity_and_redacts_context(mo
     assert "secret-token" not in state["rag_context"]
     assert "[REDACTED]" in state["rag_context"]
     assert "rag-knowledge-retrieval" in {skill["name"] for skill in state["skill_plan"]}
+
+
+@pytest.mark.asyncio
+async def test_knowledge_retriever_returns_structured_memory_facts(monkeypatch) -> None:
+    candidate = {
+        "schema_version": knowledge_sink.MEMORY_CANDIDATE_SCHEMA,
+        "kind": "known_blocker",
+        "confidence": "high",
+        "source": "execution_evaluation",
+        "source_run_id": "previous-run-1",
+        "target_hint": "https://shop.example.test/checkout?token=secret-token",
+        "objective": "Checkout regression",
+        "test_type": "ui",
+        "stage": "ui",
+        "next_action": "ask_human",
+        "sufficient_evidence": False,
+        "failure_type": "auth_failure",
+        "reason": "Checkout login is blocked.",
+        "planner_hint": "Collect fresh login context with password=secret-password before replay.",
+        "facts": [
+            {
+                "fact_type": "known_blocker",
+                "summary": "Checkout login is blocked.",
+                "failure_type": "auth_failure",
+                "next_action": "ask_human",
+                "planner_hint": "Collect fresh login context with password=secret-password before replay.",
+            }
+        ],
+        "observation_refs": [{"observation_id": "obs-1", "evidence_ids": ["evidence-1"]}],
+    }
+
+    class FakeEmbeddingService:
+        async def get_client(self, _db):
+            return object()
+
+        async def embed_query_with_client(self, _client, _query):
+            return [1.0, 0.0]
+
+        async def embed_documents_with_client(self, _client, _texts):
+            raise AssertionError("stored embeddings should be used")
+
+    class FakeResult:
+        def scalars(self):
+            return [
+                SimpleNamespace(
+                    id="knowledge-structured",
+                    source_script_id="previous-run-1",
+                    content=f"{knowledge_sink.MEMORY_CANDIDATE_MARKER}\n{json.dumps(candidate, ensure_ascii=False)}",
+                    embedding=[1.0, 0.0],
+                    created_at=datetime(2026, 5, 24),
+                )
+            ]
+
+    class FakeDb:
+        async def execute(self, _stmt):
+            return FakeResult()
+
+    monkeypatch.setattr(knowledge_retriever, "embedding_service", FakeEmbeddingService())
+
+    state = await knowledge_retriever.run(
+        {
+            "db_session": FakeDb(),
+            "objective": "checkout regression",
+            "target_url": "https://shop.example.test/checkout",
+            "source_input": "https://shop.example.test/checkout",
+            "test_type": "ui",
+            "input_type": "url",
+            "workflow_steps": [],
+        }
+    )
+
+    fact = state["rag_facts"][0]
+    serialized = json.dumps(state["rag_retrieval"], ensure_ascii=False)
+    assert state["rag_retrieval"]["fact_count"] == 1
+    assert fact["fact_type"] == "known_blocker"
+    assert fact["failure_type"] == "auth_failure"
+    assert fact["source_script_id"] == "previous-run-1"
+    assert "Structured memory facts" in state["rag_context"]
+    assert "secret-token" not in serialized
+    assert "secret-password" not in serialized
+    assert "[REDACTED]" in serialized
 
 
 @pytest.mark.asyncio
@@ -3203,6 +3366,70 @@ async def test_planner_llm_timeout_records_progress_and_uses_fallback_strategy(m
     assert strategy["source"] == "agent_strategy_fallback"
     assert strategy["coverage_scope"] == "all_documented_safe_methods"
     assert "planner.strategy timed out" in strategy["fallback_reason"]
+
+
+@pytest.mark.asyncio
+async def test_planner_attaches_only_high_confidence_target_memory_to_plan() -> None:
+    planned = await planner.run(
+        {
+            "test_type": "api",
+            "input_type": "swagger_json",
+            "objective": "Repeat profile auth regression",
+            "target_url": "https://api.example.test",
+            "source_input": "https://api.example.test/openapi.json",
+            "api_execution_policy": "safe_read_only",
+            "parsed_api_schema": [
+                {"method": "GET", "path": "/profile", "response_status": "200"},
+            ],
+            "rag_retrieval": {"sources": [{"id": "knowledge-1"}]},
+            "rag_facts": [
+                {
+                    "fact_type": "known_blocker",
+                    "confidence": "high",
+                    "source_id": "knowledge-1",
+                    "source_script_id": "run-previous",
+                    "target_hint": "https://api.example.test/profile",
+                    "stage": "api",
+                    "failure_type": "auth_failure",
+                    "next_action": "ask_human",
+                    "summary": "Profile reads were blocked by missing auth.",
+                    "planner_hint": "Ask for valid auth headers before replaying /profile.",
+                },
+                {
+                    "fact_type": "known_blocker",
+                    "confidence": "low",
+                    "source_id": "knowledge-low",
+                    "target_hint": "https://api.example.test/profile",
+                    "failure_type": "schema_contract",
+                    "planner_hint": "Low confidence fact should not be used.",
+                },
+                {
+                    "fact_type": "known_blocker",
+                    "confidence": "high",
+                    "source_id": "knowledge-other",
+                    "target_hint": "https://other.example.test/profile",
+                    "failure_type": "network_error",
+                    "planner_hint": "Different target should not be used.",
+                },
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    api_plan = planned["api_plan"]
+    serialized = json.dumps(api_plan, ensure_ascii=False)
+    assert api_plan["memory_fact_count"] == 1
+    assert api_plan["known_blockers"][0]["failure_type"] == "auth_failure"
+    assert api_plan["known_blockers"][0]["source_script_id"] == "run-previous"
+    assert "schema_contract" not in serialized
+    assert "network_error" not in serialized
+    tool_call = next(
+        item
+        for item in planned["tool_calls"]
+        if item["tool"] == "planner.generate_execution_plan"
+    )
+    assert tool_call["output"]["memory_fact_count"] == 1
+    assert tool_call["output"]["memory_blocker_count"] == 1
 
 
 @pytest.mark.asyncio

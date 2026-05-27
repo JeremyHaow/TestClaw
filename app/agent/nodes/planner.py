@@ -1,5 +1,8 @@
 import json
 import logging
+import re
+from typing import Any
+from urllib.parse import urlsplit
 
 from langchain_core.messages import HumanMessage
 
@@ -18,6 +21,7 @@ from app.agent.strategy import (
     strategy_summary,
 )
 from app.agent.tool_registry import install_tool_context, record_tool_call
+from app.core.redaction import redact_sensitive_data, redact_sensitive_text
 from app.core.llm_gateway import ainvoke_with_timeout, llm_gateway
 
 logger = logging.getLogger(__name__)
@@ -76,6 +80,139 @@ def _auth_preflight_summary(value: object) -> dict:
     }
 
 
+def _safe_text(value: Any, limit: int = 500) -> str:
+    text = redact_sensitive_text(str(value or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit]
+
+
+def _safe_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _host(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = urlsplit(text)
+    except Exception:
+        return ""
+    return parsed.netloc.lower()
+
+
+def _memory_fact_target_related(fact: dict[str, Any], *, target_url: str, source_input: str) -> bool:
+    target_hint = str(fact.get("target_hint") or "")
+    current_target = target_url or source_input
+    fact_host = _host(target_hint)
+    current_host = _host(current_target)
+    if fact_host and current_host:
+        return fact_host == current_host
+    if target_hint and current_target:
+        return target_hint in current_target or current_target in target_hint
+    return False
+
+
+def _planner_memory_facts(
+    state: AgentState,
+    rag_retrieval: dict[str, Any],
+    *,
+    target_url: str,
+    source_input: str,
+) -> list[dict[str, Any]]:
+    raw_facts = state.get("rag_facts") or rag_retrieval.get("facts") or []
+    facts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw_facts:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("confidence") or "").lower() != "high":
+            continue
+        if not _memory_fact_target_related(item, target_url=target_url, source_input=source_input):
+            continue
+        fact = redact_sensitive_data(
+            {
+                "fact_type": item.get("fact_type") or "execution_memory",
+                "confidence": "high",
+                "source_id": item.get("source_id"),
+                "source_script_id": item.get("source_script_id"),
+                "target_hint": item.get("target_hint"),
+                "stage": item.get("stage"),
+                "failure_type": item.get("failure_type"),
+                "next_action": item.get("next_action"),
+                "summary": _safe_text(item.get("summary"), 300),
+                "planner_hint": _safe_text(item.get("planner_hint"), 300),
+            }
+        )
+        marker = json.dumps(fact, ensure_ascii=False, sort_keys=True, default=str)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        facts.append(fact)
+    return facts[:4]
+
+
+def _memory_fact_lines(memory_facts: list[dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    for index, fact in enumerate(memory_facts, start=1):
+        failure = f" failure_type={fact.get('failure_type')}" if fact.get("failure_type") else ""
+        detail = fact.get("planner_hint") or fact.get("summary") or ""
+        lines.append(
+            f"{index}. type={fact.get('fact_type')}{failure}; action={fact.get('next_action')}; {_safe_text(detail, 240)}"
+        )
+    return lines
+
+
+def _planner_rag_context(rag_context: str, memory_facts: list[dict[str, Any]]) -> str:
+    if not memory_facts:
+        return rag_context
+    lines = [
+        "High-confidence target-related memory facts:",
+        *_memory_fact_lines(memory_facts),
+        "",
+        "Retrieved snippets:",
+        rag_context,
+    ]
+    return "\n".join(lines)[:3000]
+
+
+def _memory_plan_fields(memory_facts: list[dict[str, Any]]) -> dict[str, Any]:
+    if not memory_facts:
+        return {"memory_fact_count": 0}
+    blockers = [
+        fact
+        for fact in memory_facts
+        if fact.get("fact_type") in {"known_blocker", "failure_recovery"}
+    ]
+    successes = [
+        fact
+        for fact in memory_facts
+        if fact.get("fact_type") == "successful_strategy"
+    ]
+    fields: dict[str, Any] = {
+        "memory_fact_count": len(memory_facts),
+        "memory_facts": memory_facts,
+    }
+    if blockers:
+        fields["known_blockers"] = blockers
+    if successes:
+        fields["historical_success_strategies"] = successes
+    return fields
+
+
+def _attach_memory_fields(plan: dict | None, memory_facts: list[dict[str, Any]]) -> None:
+    if not isinstance(plan, dict):
+        return
+    fields = _memory_plan_fields(memory_facts)
+    plan["memory_fact_count"] = fields["memory_fact_count"]
+    if memory_facts:
+        plan.setdefault("memory_facts", fields["memory_facts"])
+        if fields.get("known_blockers"):
+            plan.setdefault("known_blockers", fields["known_blockers"])
+        if fields.get("historical_success_strategies"):
+            plan.setdefault("historical_success_strategies", fields["historical_success_strategies"])
+
+
 async def run(state: AgentState) -> AgentState:
     objective = state.get("objective", "")
     target_url = state.get("target_url", "")
@@ -84,6 +221,14 @@ async def run(state: AgentState) -> AgentState:
     parsed_api_schema = state.get("parsed_api_schema")
     rag_context = state.get("rag_context") or "No relevant prior testing knowledge"
     rag_retrieval = state.get("rag_retrieval") or {}
+    memory_facts = _planner_memory_facts(
+        state,
+        rag_retrieval,
+        target_url=target_url,
+        source_input=str(state.get("source_input") or ""),
+    )
+    state["rag_facts"] = memory_facts
+    planner_rag_context = _planner_rag_context(rag_context, memory_facts)
     mission_plan = state.get("agent_mission_plan") or {}
     db = state.get("db_session")
     install_tool_context(state)
@@ -153,6 +298,7 @@ async def run(state: AgentState) -> AgentState:
                 {
                     "skills": state.get("skill_plan", []),
                     "roster": state.get("agent_roster", []),
+                    "memory_facts": memory_facts,
                 },
                 ensure_ascii=False,
                 default=str,
@@ -164,7 +310,7 @@ async def run(state: AgentState) -> AgentState:
                 mission_plan=mission_plan_context,
                 tool_context=tool_context,
                 api_schema_summary=schema_summary,
-                rag_context=rag_context,
+                rag_context=planner_rag_context,
             )
             resp = await ainvoke_with_timeout(
                 llm,
@@ -228,6 +374,7 @@ async def run(state: AgentState) -> AgentState:
                 if skill.get("layer") == "api"
             ],
             "rag_source_count": len(rag_retrieval.get("sources") or []),
+            "memory_fact_count": len(memory_facts),
         }
 
     if not ui_plan:
@@ -257,6 +404,7 @@ async def run(state: AgentState) -> AgentState:
                 if skill.get("layer") == "ui"
             ],
             "rag_source_count": len(rag_retrieval.get("sources") or []),
+            "memory_fact_count": len(memory_facts),
         }
 
     if test_type == "ui":
@@ -270,12 +418,14 @@ async def run(state: AgentState) -> AgentState:
             [skill["name"] for skill in state.get("skill_plan", []) if skill.get("layer") == "api"],
         )
         api_plan.setdefault("rag_source_count", len(rag_retrieval.get("sources") or []))
+        _attach_memory_fields(api_plan, memory_facts)
     if isinstance(ui_plan, dict):
         ui_plan.setdefault(
             "skills",
             [skill["name"] for skill in state.get("skill_plan", []) if skill.get("layer") == "ui"],
         )
         ui_plan.setdefault("rag_source_count", len(rag_retrieval.get("sources") or []))
+        _attach_memory_fields(ui_plan, memory_facts)
 
     state["api_plan"] = api_plan
     state["ui_plan"] = ui_plan
@@ -311,18 +461,20 @@ async def run(state: AgentState) -> AgentState:
                         "subgoals": mission_plan.get("subgoals", [])[:8],
                         "environment_needs": mission_plan.get("environment_needs", [])[:6],
                         "success_criteria": mission_plan.get("success_criteria", [])[:5],
+                        "memory_facts": memory_facts,
                     },
                     ensure_ascii=False,
                     default=str,
                 )[:5000] if isinstance(mission_plan, dict) else "{}",
                 api_schema_summary=schema_summary[:6000],
-                rag_context=rag_context[:3000],
+                rag_context=planner_rag_context[:3000],
                 tool_context=json.dumps(
                     {
                         "skills": state.get("skill_plan", []),
                         "roster": state.get("agent_roster", []),
                         "api_plan_available": bool(api_plan),
                         "ui_plan_available": bool(ui_plan),
+                        "memory_fact_count": len(memory_facts),
                     },
                     ensure_ascii=False,
                     default=str,
@@ -412,6 +564,14 @@ async def run(state: AgentState) -> AgentState:
             "agent_strategy": strategy_summary(strategy_decision),
             "selected_skills": [skill.get("name") for skill in state.get("skill_plan", [])],
             "rag_source_count": len(rag_retrieval.get("sources") or []),
+            "memory_fact_count": len(memory_facts),
+            "memory_blocker_count": len(
+                [
+                    fact
+                    for fact in memory_facts
+                    if fact.get("fact_type") in {"known_blocker", "failure_recovery"}
+                ]
+            ),
             "mission_subgoals": len(mission_plan.get("subgoals", []))
             if isinstance(mission_plan, dict)
             else 0,

@@ -138,6 +138,8 @@ def parse_task_detail(task_orm) -> dict:
         "auth_discovery": parsed.get("auth_discovery"),
         "rag_context": parsed.get("rag_context"),
         "rag_retrieval": parsed.get("rag_retrieval"),
+        "rag_facts": parsed.get("rag_facts"),
+        "memory_candidates": parsed.get("memory_candidates"),
         "cancelled": parsed.get("cancelled", False),
         "cancelled_at": parsed.get("cancelled_at"),
         "last_error": parsed.get("last_error"),

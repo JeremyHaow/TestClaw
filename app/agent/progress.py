@@ -77,6 +77,8 @@ EXECUTION_LOG_KEYS = (
     "auth_chain",
     "rag_context",
     "rag_retrieval",
+    "rag_facts",
+    "memory_candidates",
     "setup_instructions",
     "setup_result",
     "login_instructions",

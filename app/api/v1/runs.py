@@ -3762,6 +3762,8 @@ async def get_run_detail(run_id: str, db: DbSession, _: CurrentUser):
     detail["auth_chain"] = parsed.get("auth_chain")
     detail["rag_context"] = parsed.get("rag_context")
     detail["rag_retrieval"] = parsed.get("rag_retrieval")
+    detail["rag_facts"] = parsed.get("rag_facts")
+    detail["memory_candidates"] = parsed.get("memory_candidates")
     detail["api_execution_policy"] = parsed.get("api_execution_policy")
     detail["allow_out_of_schema_api_cases"] = parsed.get("allow_out_of_schema_api_cases")
     detail["api_path_prefix_rewrite"] = parsed.get("api_path_prefix_rewrite")
