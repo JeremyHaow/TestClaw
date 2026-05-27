@@ -37,6 +37,19 @@ _ASSERT_VISIBLE_COMMANDS = {
     "assertvisible",
     "ui.assert_visible",
 }
+_VISIBLE_SELECTOR_SNAPSHOT_TERMS = {
+    "a": "link",
+    "button": "button",
+    "h1": "heading",
+    "h2": "heading",
+    "h3": "heading",
+    "h4": "heading",
+    "h5": "heading",
+    "h6": "heading",
+    "input": "textbox",
+    "select": "combobox",
+    "textarea": "textbox",
+}
 _SNAPSHOT_REF_TOKEN = re.compile(r"(?P<quote>['\"]?)\[ref=(?P<ref>[A-Za-z0-9_-]+)\](?P=quote)")
 _RUN_CODE_REF_LOCATOR = re.compile(
     r"page\.locator\(\s*['\"]\[ref=[A-Za-z0-9_-]+\]['\"]\s*\)",
@@ -90,6 +103,13 @@ def _extract_visible_assertion(command: str) -> str | None:
         target = _strip_wrapping_quotes(target)
     if len(target) >= 2 and target[0] == "/" and target[-1] == "/":
         target = target[1:-1]
+    selector = target.lower()
+    if selector.startswith(("css=", "selector=")):
+        selector = selector.split("=", 1)[1].strip()
+    if selector in _VISIBLE_SELECTOR_SNAPSHOT_TERMS:
+        return _VISIBLE_SELECTOR_SNAPSHOT_TERMS[selector]
+    if selector.startswith((".", "#", "[")):
+        return None
     return target or None
 
 
