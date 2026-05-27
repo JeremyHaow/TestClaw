@@ -14,8 +14,9 @@ withDefaults(
 
 function markerClass(status: string) {
   const value = String(status || '').toLowerCase()
-  if (value === 'failed') return 'bg-red-500'
-  if (value === 'done') return 'bg-emerald-500'
+  if (['failed', 'error', 'blocked', 'needs_human'].includes(value)) return 'bg-red-500'
+  if (['done', 'success', 'sufficient', 'passed'].includes(value)) return 'bg-emerald-500'
+  if (['needs_replan', 'needs_retry', 'insufficient'].includes(value)) return 'bg-blue-500'
   if (value === 'cancelled') return 'bg-gray-400'
   return 'bg-blue-500'
 }

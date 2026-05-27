@@ -101,11 +101,19 @@ const snapshotKeys = [
   'agent_actions',
   'agent_action_observations',
   'agent_action_diagnostics',
+  'agent_tool_calls',
+  'agent_observations',
+  'agent_evidence',
+  'agent_protocol_evaluations',
+  'agent_protocol_summary',
   'evidence_evaluation',
   'agent_evaluations',
   'agent_attempt_history',
   'agent_replan_counts',
   'agent_replan_feedback',
+  'agent_retry_counts',
+  'agent_retry_feedback',
+  'agent_human_question',
   'agent_strategy_decision',
   'agent_tool_plan',
   'agent_strategy_diagnostics',
@@ -721,11 +729,33 @@ const recentToolCalls = computed(() => toolCalls.value.slice().reverse())
 const pagedToolCalls = computed(() => indexedPage(recentToolCalls.value, toolCallPage.value, toolCallPageSize))
 const skillPlan = computed(() => ensureList(run.value?.skill_plan || run.value?.final_report?.skill_plan))
 const agentActionObservations = computed(() => ensureList(run.value?.agent_action_observations))
+const agentToolCalls = computed(() => ensureList(run.value?.agent_tool_calls))
+const agentProtocolObservations = computed(() => ensureList(run.value?.agent_observations))
+const agentProtocolEvidence = computed(() => ensureList(run.value?.agent_evidence))
+const agentProtocolEvaluations = computed(() => ensureList(run.value?.agent_protocol_evaluations))
+const agentProtocolSummary = computed(() => run.value?.agent_protocol_summary || null)
+const latestProtocolObservation = computed(() => lastItem(agentProtocolObservations.value))
+const latestProtocolEvaluation = computed(() => lastItem(agentProtocolEvaluations.value))
+const recentProtocolObservations = computed(() => agentProtocolObservations.value.slice().reverse().slice(0, 6))
+const recentProtocolEvidence = computed(() => agentProtocolEvidence.value.slice().reverse().slice(0, 6))
+const protocolEvidenceCount = computed(() => Number(agentProtocolSummary.value?.evidence_total ?? agentProtocolEvidence.value.length))
+const protocolObservationCount = computed(() => Number(agentProtocolSummary.value?.observation_total ?? agentProtocolObservations.value.length))
+const protocolFailureCount = computed(() => {
+  const byFailureType = agentProtocolSummary.value?.by_failure_type
+  if (byFailureType && typeof byFailureType === 'object') {
+    return Object.values(byFailureType).reduce((total: number, value: any) => total + Number(value || 0), 0)
+  }
+  return agentProtocolObservations.value.filter((item: any) => item.failure_type || ['failed', 'blocked'].includes(String(item.status || item.outcome || '').toLowerCase())).length
+})
+const hasProtocolSurface = computed(() => protocolObservationCount.value > 0 || protocolEvidenceCount.value > 0 || agentProtocolEvaluations.value.length > 0)
 const toolSummary = computed(() => run.value?.tool_summary || run.value?.final_report?.tool_summary || run.value?.artifacts?.tool_summary || null)
 const agentEvaluations = computed<any[]>(() => ensureList(run.value?.agent_evaluations || run.value?.final_report?.agent_diagnostics?.evaluations))
-const latestAgentEvaluation = computed(() => run.value?.evidence_evaluation || run.value?.final_report?.agent_diagnostics?.latest_evaluation || lastItem(agentEvaluations.value))
+const latestAgentEvaluation = computed(() => run.value?.evidence_evaluation || run.value?.final_report?.agent_diagnostics?.latest_evaluation || lastItem(agentEvaluations.value) || latestProtocolEvaluation.value)
+const agentEvaluationRecords = computed(() => agentEvaluations.value.length ? agentEvaluations.value : agentProtocolEvaluations.value)
 const agentReplanCounts = computed(() => run.value?.agent_replan_counts || run.value?.final_report?.agent_diagnostics?.replan_counts || {})
 const agentReplanTotal = computed(() => Object.values(agentReplanCounts.value || {}).reduce((total: number, value: any) => total + Number(value || 0), 0))
+const agentRetryCounts = computed(() => run.value?.agent_retry_counts || {})
+const agentRetryTotal = computed(() => Object.values(agentRetryCounts.value || {}).reduce((total: number, value: any) => total + Number(value || 0), 0))
 const ragRetrieval = computed(() => run.value?.rag_retrieval || null)
 const ragSources = computed(() => ensureList(ragRetrieval.value?.sources))
 const ragDisplayStatus = computed(() => ragRetrieval.value?.status || 'metadata_unavailable')
@@ -798,8 +828,8 @@ function ragScoreLabel(source: any) {
   return source?.mode === 'vector' ? `sim ${source.score}` : `score ${source?.score ?? 0}`
 }
 const hasRagSurface = computed(() => Boolean(ragRetrieval.value || run.value?.rag_context))
-const hasAgentEvaluationSurface = computed(() => Boolean(latestAgentEvaluation.value || agentEvaluations.value.length))
-const hasToolSurface = computed(() => toolCalls.value.length > 0 || skillPlan.value.length > 0 || agentActionObservations.value.length > 0 || Boolean(toolSummary.value) || hasRagSurface.value || hasAgentEvaluationSurface.value)
+const hasAgentEvaluationSurface = computed(() => Boolean(latestAgentEvaluation.value || agentEvaluationRecords.value.length))
+const hasToolSurface = computed(() => toolCalls.value.length > 0 || agentToolCalls.value.length > 0 || skillPlan.value.length > 0 || agentActionObservations.value.length > 0 || Boolean(toolSummary.value) || hasRagSurface.value || hasAgentEvaluationSurface.value || hasProtocolSurface.value)
 const triageSummary = computed(() => run.value?.triage_summary || null)
 const triageAffectedSurfaces = computed(() => ensureList(triageSummary.value?.affected_surfaces))
 const pagedTriageAffectedSurfaces = computed(() => indexedPage(triageAffectedSurfaces.value, triageSurfacePage.value, triageSurfacePageSize))
@@ -814,20 +844,62 @@ function toolStatusClass(status: string) {
   const value = String(status || '').toLowerCase()
   if (['success', 'passed', 'done'].includes(value)) return 'bg-emerald-100 text-emerald-700'
   if (value === 'skipped') return 'bg-amber-100 text-amber-700'
-  if (['failed', 'error'].includes(value)) return 'bg-red-100 text-red-700'
+  if (['failed', 'error', 'blocked'].includes(value)) return 'bg-red-100 text-red-700'
+  if (['needs_replan', 'needs_retry', 'needs_human', 'insufficient'].includes(value)) return 'bg-blue-100 text-blue-700'
   return 'bg-gray-100 text-gray-600'
 }
 function agentActionLabel(action: string) {
   const value = String(action || '').toLowerCase()
   if (value === 'continue_to_ui') return '继续 UI'
+  if (value === 'continue') return '继续执行'
+  if (value === 'retry_same_action') return '重试动作'
   if (value === 'replan_api') return '重规划 API'
   if (value === 'replan_ui') return '重规划 UI'
+  if (value === 'ask_human') return '请求人工补充'
   if (value === 'report') return '生成报告'
   return value || '等待判断'
+}
+function protocolRecordTitle(item: any) {
+  if (!item) return '协议记录'
+  if (item.record_type === 'evaluation') return `Evaluation · ${agentActionLabel(item.next_action)}`
+  if (item.record_type === 'action') return `Action · ${item.tool_name || item.action_id || 'tool'}`
+  return `Observation · ${item.tool_name || item.layer || item.stage || 'tool'}`
+}
+function protocolRecordDetail(item: any) {
+  if (!item) return ''
+  return item.summary || item.reason || item.observation || item.detail || item.replan_hint || ''
+}
+function protocolRecordStatus(item: any) {
+  if (!item) return 'unknown'
+  return item.outcome || item.status || (item.sufficient_evidence ? 'sufficient' : item.next_action || 'unknown')
+}
+function protocolTimestampValue(value: any) {
+  const parsed = Date.parse(String(value || ''))
+  return Number.isFinite(parsed) ? parsed : 0
+}
+function observationInputLabel(item: any) {
+  const inputs = item?.inputs || {}
+  if (inputs.method || inputs.path || inputs.url) return [inputs.method, inputs.path || inputs.url].filter(Boolean).join(' ')
+  if (inputs.command) return inputs.command
+  if (inputs.action) return inputs.action
+  return ''
+}
+function observationOutputLabel(item: any) {
+  const outputs = item?.outputs || item?.output || {}
+  const parts = [
+    outputs.status_code !== undefined ? `status ${outputs.status_code}` : '',
+    outputs.duration_ms !== undefined ? `${outputs.duration_ms}ms` : '',
+    outputs.error_type ? `error ${outputs.error_type}` : '',
+    outputs.safety_decision ? `safety ${outputs.safety_decision}` : '',
+  ].filter(Boolean)
+  if (item?.failure_type) parts.push(`failure ${item.failure_type}`)
+  return parts.join(' · ')
 }
 function agentEvidenceClass(evaluation: any) {
   if (!evaluation) return 'border-gray-200 bg-gray-50 text-gray-600'
   if (evaluation.sufficient_evidence) return 'border-emerald-100 bg-emerald-50 text-emerald-700'
+  if (String(evaluation.next_action || evaluation.outcome || '') === 'ask_human' || String(evaluation.outcome || '') === 'needs_human') return 'border-amber-200 bg-amber-50 text-amber-800'
+  if (String(evaluation.next_action || evaluation.outcome || '') === 'retry_same_action' || String(evaluation.outcome || '') === 'needs_retry') return 'border-blue-100 bg-blue-50 text-blue-700'
   if (String(evaluation.next_action || '').startsWith('replan')) return 'border-blue-100 bg-blue-50 text-blue-700'
   return 'border-amber-100 bg-amber-50 text-amber-700'
 }
@@ -963,8 +1035,41 @@ const progressPercent = computed(() => {
 
   return run.value.status === 'running' ? 12 : 0
 })
+const protocolTimelineItems = computed(() => {
+  const actions = agentActionObservations.value.map((item: any) => ({
+    ...item,
+    record_type: 'action',
+    source: 'protocol_action',
+    node: protocolRecordTitle({ ...item, record_type: 'action' }),
+    status: protocolRecordStatus(item),
+    detail: [protocolRecordDetail(item), observationInputLabel(item)].filter(Boolean).join(' · '),
+    timestamp: item.timestamp || '',
+  }))
+  const observations = agentProtocolObservations.value.map((item: any) => ({
+    ...item,
+    record_type: 'observation',
+    source: 'protocol_observation',
+    node: protocolRecordTitle(item),
+    status: protocolRecordStatus(item),
+    detail: [protocolRecordDetail(item), observationInputLabel(item), observationOutputLabel(item)].filter(Boolean).join(' · '),
+    timestamp: item.timestamp || '',
+  }))
+  const evaluations = agentProtocolEvaluations.value.map((item: any) => ({
+    ...item,
+    record_type: 'evaluation',
+    source: 'protocol_evaluation',
+    node: protocolRecordTitle({ ...item, record_type: 'evaluation' }),
+    status: protocolRecordStatus(item),
+    detail: protocolRecordDetail(item),
+    timestamp: item.timestamp || '',
+  }))
+  return [...actions, ...observations, ...evaluations]
+    .sort((a: any, b: any) => protocolTimestampValue(a.timestamp) - protocolTimestampValue(b.timestamp))
+})
 const activityFeed = computed(() => {
-  const feed = [
+  const feed = protocolTimelineItems.value.length
+    ? [...protocolTimelineItems.value]
+    : [
     ...progressEvents.value.map((event: any) => ({
       ...event,
       source: 'progress',
@@ -994,6 +1099,7 @@ const statusTitle = computed(() => {
   return 'Agent Cockpit'
 })
 const statusDescription = computed(() => {
+  if (latestProtocolObservation.value?.summary) return latestProtocolObservation.value.summary
   if (isActiveRun.value) return '测试智能体正在准备测试计划、执行动作并采集证据'
   if (run.value?.last_error) return run.value.last_error
   if (run.value?.final_report?.summary) return run.value.final_report.summary
@@ -1001,6 +1107,7 @@ const statusDescription = computed(() => {
   return '暂无更多执行信息'
 })
 const currentStepLabel = computed(() => {
+  if (latestProtocolObservation.value) return protocolRecordTitle(latestProtocolObservation.value)
   const step = currentStep.value
   if (!step) return '初始化'
   if (typeof step === 'string') return step
@@ -1018,10 +1125,10 @@ const failedCount = computed(() => {
 })
 const skippedCount = computed(() => Number(apiSkippedCount.value || 0) + Number(uiSummary.value?.skipped || 0))
 const evidenceCount = computed(() => {
-  return Number(triageSummary.value?.evidence?.count || 0) + uiScreenshotCount.value + toolCalls.value.length
+  return Number(triageSummary.value?.evidence?.count || 0) + uiScreenshotCount.value + toolCalls.value.length + protocolEvidenceCount.value
 })
 const currentBlockingText = computed(() => {
-  return interventionSummary.value?.reason || run.value?.last_error || latestAgentEvaluation.value?.reason || ''
+  return run.value?.agent_human_question || interventionSummary.value?.reason || run.value?.last_error || latestAgentEvaluation.value?.reason || latestProtocolObservation.value?.failure_type || ''
 })
 const releaseRiskLabel = computed(() => triageSummary.value?.release_risk?.label || triageSummary.value?.release_risk?.level || '等待结果')
 
@@ -1275,6 +1382,68 @@ watch(
       :submitting="interventionSubmitting"
       @submit="submitInterventionRerun"
     />
+
+    <!-- Protocol Evidence -->
+    <AgentEvidenceCard
+      v-if="hasProtocolSurface && !triageSummary"
+      :evidence-count="protocolEvidenceCount"
+      :finding-count="protocolFailureCount"
+      :risk-label="latestAgentEvaluation ? agentActionLabel(latestAgentEvaluation.next_action) : '等待评估'"
+    >
+      <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+          <div class="mb-3 flex items-center justify-between gap-3">
+            <h3 class="text-xs font-bold uppercase tracking-widest text-gray-400">统一执行协议</h3>
+            <span class="rounded bg-gray-100 px-2 py-1 text-[10px] font-bold text-gray-500">
+              {{ protocolObservationCount }} observations
+            </span>
+          </div>
+          <div class="space-y-2">
+            <div
+              v-for="observation in recentProtocolObservations"
+              :key="observation.observation_id || `${observation.tool_name}-${observation.timestamp}`"
+              class="rounded-lg border border-gray-100 bg-gray-50 p-3 text-xs"
+            >
+              <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                <div class="min-w-0">
+                  <div class="truncate font-mono font-bold text-gray-800">{{ protocolRecordTitle(observation) }}</div>
+                  <div class="mt-1 text-gray-500">{{ protocolRecordDetail(observation) }}</div>
+                  <div v-if="observationInputLabel(observation) || observationOutputLabel(observation)" class="mt-1 truncate font-mono text-[10px] text-gray-400">
+                    {{ [observationInputLabel(observation), observationOutputLabel(observation)].filter(Boolean).join(' · ') }}
+                  </div>
+                </div>
+                <span class="shrink-0 rounded px-2 py-0.5 text-[10px] font-bold" :class="toolStatusClass(protocolRecordStatus(observation))">
+                  {{ protocolRecordStatus(observation) }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+          <div class="mb-3 flex items-center justify-between gap-3">
+            <h3 class="text-xs font-bold uppercase tracking-widest text-gray-400">证据索引</h3>
+            <span class="rounded bg-gray-100 px-2 py-1 text-[10px] font-bold text-gray-500">
+              {{ protocolEvidenceCount }} 条
+            </span>
+          </div>
+          <div class="space-y-2">
+            <div
+              v-for="evidence in recentProtocolEvidence"
+              :key="evidence.evidence_id || `${evidence.kind}-${evidence.timestamp}`"
+              class="rounded-lg border border-gray-100 bg-gray-50 p-3 text-xs"
+            >
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="truncate font-bold text-gray-800">{{ evidence.title || evidence.kind }}</div>
+                  <div class="mt-1 line-clamp-2 text-gray-500">{{ evidence.summary || evidence.kind }}</div>
+                </div>
+                <span class="shrink-0 rounded bg-white px-2 py-0.5 text-[10px] font-bold text-gray-500">{{ evidence.kind }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </AgentEvidenceCard>
 
     <!-- Triage Summary -->
     <AgentEvidenceCard
@@ -1879,16 +2048,16 @@ watch(
         <pre v-if="run.rag_context" class="mt-4 max-h-44 overflow-auto rounded-lg border border-gray-100 bg-gray-950 p-3 text-[11px] leading-relaxed text-gray-100">{{ run.rag_context }}</pre>
       </div>
 
-      <div v-if="agentEvaluations.length" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
+      <div v-if="agentEvaluationRecords.length" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
         <div class="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
             <Activity :size="14" /> 证据评估与重规划
           </h3>
-          <span class="rounded bg-gray-100 px-2 py-1 text-[10px] font-bold text-gray-500">{{ agentEvaluations.length }} 次评估</span>
+          <span class="rounded bg-gray-100 px-2 py-1 text-[10px] font-bold text-gray-500">{{ agentEvaluationRecords.length }} 次评估</span>
         </div>
         <div class="space-y-3">
           <div
-            v-for="(evaluation, index) in agentEvaluations.slice().reverse()"
+            v-for="(evaluation, index) in agentEvaluationRecords.slice().reverse()"
             :key="`agent-evaluation-${index}-${evaluation.next_action}`"
             class="rounded-lg border p-4"
             :class="agentEvidenceClass(evaluation)"
@@ -1913,6 +2082,39 @@ watch(
                 class="rounded border border-current/10 bg-white/60 px-2 py-1 text-[11px]"
               >
                 {{ item }}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="hasProtocolSurface" class="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
+        <div class="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <h3 class="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
+            <Activity :size="14" /> 统一执行协议
+          </h3>
+          <div class="flex flex-wrap gap-2">
+            <span class="rounded bg-gray-100 px-2 py-1 text-[10px] font-bold text-gray-500">{{ protocolObservationCount }} observations</span>
+            <span class="rounded bg-gray-100 px-2 py-1 text-[10px] font-bold text-gray-500">{{ protocolEvidenceCount }} evidence</span>
+            <span v-if="protocolFailureCount" class="rounded bg-red-100 px-2 py-1 text-[10px] font-bold text-red-700">{{ protocolFailureCount }} failures</span>
+          </div>
+        </div>
+        <div class="grid gap-3 lg:grid-cols-2">
+          <div
+            v-for="observation in recentProtocolObservations"
+            :key="observation.observation_id || `${observation.tool_name}-${observation.timestamp}`"
+            class="rounded-lg border border-gray-100 bg-gray-50 p-3"
+          >
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <div class="truncate font-mono text-xs font-bold text-gray-800">{{ protocolRecordTitle(observation) }}</div>
+                <div class="mt-1 line-clamp-2 text-xs leading-5 text-gray-600">{{ protocolRecordDetail(observation) }}</div>
+                <div v-if="observationInputLabel(observation) || observationOutputLabel(observation)" class="mt-1 truncate font-mono text-[10px] text-gray-400">
+                  {{ [observationInputLabel(observation), observationOutputLabel(observation)].filter(Boolean).join(' · ') }}
+                </div>
+              </div>
+              <span class="shrink-0 rounded px-2 py-0.5 text-[10px] font-bold" :class="toolStatusClass(protocolRecordStatus(observation))">
+                {{ protocolRecordStatus(observation) }}
               </span>
             </div>
           </div>
@@ -2013,7 +2215,7 @@ watch(
         </div>
       </div>
 
-      <div v-if="!skillPlan.length && !toolCalls.length && !agentEvaluations.length" class="text-center py-12 text-gray-400 text-sm">暂无工具调用记录</div>
+      <div v-if="!skillPlan.length && !toolCalls.length && !agentEvaluationRecords.length && !hasProtocolSurface" class="text-center py-12 text-gray-400 text-sm">暂无工具调用记录</div>
     </div>
 
     <!-- Tab: Test Cases -->

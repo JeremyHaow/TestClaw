@@ -281,7 +281,51 @@ def test_run_detail_exposes_agent_evidence_evaluation_surface() -> None:
                 "reason": "UI stopped after one shallow selector failure.",
             }
         ],
+        "agent_tool_calls": [
+            {
+                "tool_call_id": "tool-1",
+                "tool_name": "playwright.cli",
+                "action_id": "action-1",
+            }
+        ],
+        "agent_observations": [
+            {
+                "observation_id": "obs-1",
+                "tool_call_id": "tool-1",
+                "tool_name": "playwright.cli",
+                "status": "failed",
+                "failure_type": "ui_locator_missing",
+                "summary": "Selector #submit was not visible.",
+            }
+        ],
+        "agent_evidence": [
+            {
+                "evidence_id": "evidence-1",
+                "observation_id": "obs-1",
+                "kind": "screenshot",
+                "title": "Login failure screenshot",
+            }
+        ],
+        "agent_protocol_evaluations": [
+            {
+                "evaluation_id": "protocol-eval-1",
+                "stage": "ui",
+                "outcome": "needs_replan",
+                "next_action": "replan_ui",
+                "failure_type": "ui_locator_missing",
+                "sufficient_evidence": False,
+            }
+        ],
+        "agent_protocol_summary": {
+            "tool_call_total": 1,
+            "observation_total": 1,
+            "evidence_total": 1,
+            "by_failure_type": {"ui_locator_missing": 1},
+        },
         "agent_replan_counts": {"ui": 1},
+        "agent_retry_counts": {"ui": 1},
+        "agent_retry_feedback": {"ui": "Retry with a more stable locator before replanning."},
+        "agent_human_question": "Please confirm the login button selector.",
         "final_report": {
             "overall_verdict": "FAIL",
             "summary": "UI run needs better evidence.",
@@ -305,6 +349,14 @@ def test_run_detail_exposes_agent_evidence_evaluation_surface() -> None:
     assert payload["evidence_evaluation"]["next_action"] == "replan_ui"
     assert payload["agent_evaluations"][0]["sufficient_evidence"] is False
     assert payload["agent_replan_counts"]["ui"] == 1
+    assert payload["agent_tool_calls"][0]["tool_call_id"] == "tool-1"
+    assert payload["agent_observations"][0]["observation_id"] == "obs-1"
+    assert payload["agent_evidence"][0]["evidence_id"] == "evidence-1"
+    assert payload["agent_protocol_evaluations"][0]["evaluation_id"] == "protocol-eval-1"
+    assert payload["agent_protocol_summary"]["evidence_total"] == 1
+    assert payload["agent_retry_counts"]["ui"] == 1
+    assert payload["agent_retry_feedback"]["ui"].startswith("Retry")
+    assert payload["agent_human_question"] == "Please confirm the login button selector."
 
 
 def test_run_detail_exposes_api_scope_guard_diagnostics() -> None:

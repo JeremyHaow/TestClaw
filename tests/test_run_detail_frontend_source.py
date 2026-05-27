@@ -92,3 +92,43 @@ def test_agent_components_keep_run_detail_as_side_effect_owner() -> None:
     assert "defineProps" in components_source
     assert "defineEmits" in components_source
     assert "<slot" in components_source
+
+
+def test_run_detail_wires_agent_protocol_records_into_cockpit() -> None:
+    source = _source(RUN_DETAIL_PAGE)
+
+    for key in [
+        "agent_tool_calls",
+        "agent_observations",
+        "agent_evidence",
+        "agent_protocol_evaluations",
+        "agent_protocol_summary",
+        "agent_retry_counts",
+        "agent_retry_feedback",
+        "agent_human_question",
+    ]:
+        assert f"'{key}'" in source
+
+    for symbol in [
+        "protocolTimelineItems",
+        "hasProtocolSurface",
+        'v-if="hasProtocolSurface && !triageSummary"',
+        "agentEvaluationRecords",
+        "recentProtocolObservations",
+        "recentProtocolEvidence",
+        "protocolFailureCount",
+    ]:
+        assert symbol in source
+
+
+def test_agent_timeline_marks_protocol_statuses() -> None:
+    source = _source(AGENT_COMPONENT_DIR / "AgentTimeline.vue")
+
+    for status in [
+        "needs_retry",
+        "needs_replan",
+        "needs_human",
+        "sufficient",
+        "insufficient",
+    ]:
+        assert status in source
