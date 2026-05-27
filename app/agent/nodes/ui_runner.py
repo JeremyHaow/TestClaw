@@ -460,6 +460,19 @@ def _find_ref_by_text(snapshot: str, text: str, *, control_only: bool = False) -
     return candidates[0][1]
 
 
+def _find_single_clickable_ref(snapshot: str) -> str | None:
+    refs: list[str] = []
+    for line in (snapshot or "").splitlines():
+        if "[cursor=pointer]" not in line:
+            continue
+        if not re.search(r"\b(link|button)\b", line.lower()):
+            continue
+        ref_match = _SNAPSHOT_REF_RE.search(line)
+        if ref_match:
+            refs.append(ref_match.group(1))
+    return refs[0] if len(set(refs)) == 1 else None
+
+
 async def _resolve_semantic_command(command: str) -> tuple[str, dict | None]:
     """Resolve model-friendly text targets to current snapshot refs when possible."""
     name = command_name(command)
@@ -489,6 +502,11 @@ async def _resolve_semantic_command(command: str) -> tuple[str, dict | None]:
         target_text,
         control_only=name in {"fill", "select"},
     )
+    fallback_reason = None
+    if not ref and name == "click":
+        ref = _find_single_clickable_ref(snapshot_result.get("stdout", ""))
+        if ref:
+            fallback_reason = "single clickable target fallback"
     if not ref:
         return command, {
             "resolved": False,
@@ -509,7 +527,10 @@ async def _resolve_semantic_command(command: str) -> tuple[str, dict | None]:
 
     if resolved == command:
         return command, None
-    return resolved, {"resolved": True, "target": target_text, "ref": ref}
+    result = {"resolved": True, "target": target_text, "ref": ref}
+    if fallback_reason:
+        result["reason"] = fallback_reason
+    return resolved, result
 
 
 def _build_commands_from_steps(

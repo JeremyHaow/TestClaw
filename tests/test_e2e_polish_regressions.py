@@ -11,7 +11,12 @@ from app.agent.progress import build_execution_log_payload
 from app.agent.analysis.auth_chain import extract_auth_chain
 from app.agent.graph import _after_api_runner, _after_tc_generator, _after_ui_login
 from app.agent.nodes import api_runner, planner, reporter, source_loader, tc_generator, ui_login, ui_test_planner
-from app.agent.nodes.ui_runner import _build_ui_case_batches, _execute_ui_case_batches, run as ui_runner_run
+from app.agent.nodes.ui_runner import (
+    _build_ui_case_batches,
+    _execute_ui_case_batches,
+    _find_single_clickable_ref,
+    run as ui_runner_run,
+)
 from app.api.v1.runs import (
     RunCreate,
     _rerun_context_from_task,
@@ -269,6 +274,31 @@ def test_ui_case_batches_add_screenshot_evidence_after_generated_actions() -> No
 
     assert "auto screenshot after open" in screenshot_sources
     assert "auto screenshot after click" in screenshot_sources
+
+
+def test_semantic_click_can_fallback_to_single_clickable_snapshot_target() -> None:
+    snapshot = """
+### Snapshot
+```yaml
+- generic [ref=e2]:
+  - heading "Example Domain" [level=1] [ref=e3]
+  - paragraph [ref=e4]: Documentation example.
+  - paragraph [ref=e5]:
+    - link "Learn more" [ref=e6] [cursor=pointer]:
+      - /url: https://iana.org/domains/example
+```
+"""
+    ambiguous_snapshot = """
+### Snapshot
+```yaml
+- generic [ref=e1]:
+  - link "Learn more" [ref=e2] [cursor=pointer]
+  - button "Cancel" [ref=e3] [cursor=pointer]
+```
+"""
+
+    assert _find_single_clickable_ref(snapshot) == "e6"
+    assert _find_single_clickable_ref(ambiguous_snapshot) is None
 
 
 def test_authenticated_business_cases_use_real_snapshot_actions_without_reopening_login() -> None:
