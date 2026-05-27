@@ -18,6 +18,7 @@ from app.agent.api_scope import (
 from app.agent.action_runtime import (
     find_agent_action,
     record_agent_action_observation,
+    validate_agent_action_plan,
     validate_and_record_agent_action_plan,
 )
 from app.agent.progress import persist_progress
@@ -61,6 +62,8 @@ SAFE_WRITE_BLOCK_REASON = (
     "且没有被识别为登录、验证码、导出/下载或鉴权负向探测，因此未执行。"
 )
 AGENT_ACTION_HTTP_REQUEST_SOURCE = "agent_action_http_requests"
+CRUD_SKILL_BLOCK_SKIP_TYPE = "crud_skill_blocked"
+BLOCKING_API_SKIP_TYPES = {SAFE_WRITE_BLOCK_SKIP_TYPE, CRUD_SKILL_BLOCK_SKIP_TYPE}
 _NON_MUTATING_WRITE_MARKERS = (
     "login",
     "signin",
@@ -107,6 +110,97 @@ _HIGH_RISK_WRITE_MARKERS = (
     "支付",
     "退款",
 )
+_CRUD_INTENT_RE = re.compile(
+    r"(?i)\bcrud\b|\bcreate\b|\bupdate\b|\bdelete\b|\bcleanup\b|"
+    r"新增|创建|新建|修改|更新|删除|清理|增删改|增删查改|新增-列表查询-详情-修改"
+)
+_CRUD_LIST_SEGMENTS = {
+    "all",
+    "find",
+    "index",
+    "list",
+    "listNoPage",
+    "listnopage",
+    "lookup",
+    "optionselect",
+    "options",
+    "page",
+    "pages",
+    "query",
+    "search",
+    "select",
+    "treeselect",
+}
+_CRUD_HIGH_RISK_RESOURCE_MARKERS = {
+    "auth",
+    "authuser",
+    "batch",
+    "check",
+    "checkorder",
+    "confirm",
+    "file",
+    "force",
+    "grant",
+    "import",
+    "inventory",
+    "log",
+    "login",
+    "movement",
+    "online",
+    "order",
+    "password",
+    "pay",
+    "permission",
+    "receipt",
+    "refund",
+    "reset",
+    "role",
+    "shipment",
+    "stock",
+    "token",
+    "upload",
+    "user",
+    "盘点",
+    "出库",
+    "入库",
+    "库存",
+    "订单",
+    "支付",
+    "退款",
+    "授权",
+    "密码",
+    "用户",
+    "角色",
+    "权限",
+}
+_CRUD_LOW_RISK_RESOURCE_MARKERS = {
+    "area",
+    "brand",
+    "category",
+    "class",
+    "code",
+    "customer",
+    "dict",
+    "dictionary",
+    "group",
+    "itembrand",
+    "itemcategory",
+    "label",
+    "merchant",
+    "notice",
+    "reference",
+    "tag",
+    "type",
+    "unit",
+    "warehouse",
+    "zone",
+}
+_CRUD_TEXT_FIELD_RE = re.compile(
+    r"(name|title|code|key|label|remark|memo|description|desc|note|comment|"
+    r"名称|标题|编码|备注|描述)",
+    re.I,
+)
+_CRUD_ID_FIELD_RE = re.compile(r"(^id$|id$|Id$|ID$|Code$|code$)")
 
 
 def _max_executed_requests() -> int | None:
@@ -836,6 +930,433 @@ def _action_safe_write_approved(
         marker in " ".join(item.lower() for item in constraints)
         for marker in ("unique_prefix", "cleanup", "test_env")
     )
+
+
+def _path_segments(path: str) -> list[str]:
+    return [segment for segment in str(path or "").strip("/").split("/") if segment]
+
+
+def _canonical_crud_resource(path: str) -> str | None:
+    segments = _path_segments(path)
+    if not segments:
+        return None
+    filtered = [
+        segment
+        for segment in segments
+        if not (segment.startswith("{") and segment.endswith("}"))
+        and segment.lower() not in {item.lower() for item in _CRUD_LIST_SEGMENTS}
+    ]
+    if not filtered:
+        return None
+    return filtered[-1]
+
+
+def _resource_text(resource: str, endpoints: list[dict]) -> str:
+    parts = [resource]
+    for endpoint in endpoints:
+        for key in ("path", "summary", "description", "operationId"):
+            value = endpoint.get(key)
+            if value:
+                parts.append(str(value))
+        tags = endpoint.get("tags")
+        if isinstance(tags, list):
+            parts.extend(str(tag) for tag in tags)
+    return " ".join(parts)
+
+
+def _crud_resource_risk_score(resource: str, endpoints: list[dict]) -> tuple[int, bool]:
+    text = _resource_text(resource, endpoints).lower()
+    tokens = set(_identifier_tokens(text))
+    high_risk = any(marker.lower() in text or marker.lower() in tokens for marker in _CRUD_HIGH_RISK_RESOURCE_MARKERS)
+    low_risk = any(marker.lower() in text or marker.lower() in tokens for marker in _CRUD_LOW_RISK_RESOURCE_MARKERS)
+    score = 0
+    if high_risk:
+        score += 100
+    if not low_risk:
+        score += 10
+    score += min(len([endpoint for endpoint in endpoints if endpoint.get("request_body_schema")]), 3)
+    return score, high_risk
+
+
+def _endpoint_has_path_params(endpoint: dict) -> bool:
+    path = str(endpoint.get("path") or "")
+    return bool(_path_param_names(path, endpoint))
+
+
+def _is_collection_read_endpoint(endpoint: dict, resource: str) -> bool:
+    if str(endpoint.get("method") or "").upper() != "GET":
+        return False
+    path = str(endpoint.get("path") or "")
+    if _endpoint_has_path_params(endpoint):
+        return False
+    segments = [segment.lower() for segment in _path_segments(path)]
+    resource_lower = resource.lower()
+    return (
+        any(segment in {item.lower() for item in _CRUD_LIST_SEGMENTS} for segment in segments)
+        or bool(segments and segments[-1] == resource_lower)
+    )
+
+
+def _is_detail_read_endpoint(endpoint: dict) -> bool:
+    return str(endpoint.get("method") or "").upper() == "GET" and _endpoint_has_path_params(endpoint)
+
+
+def _choose_crud_endpoint(endpoints: list[dict], method: str, *, resource: str) -> dict | None:
+    method = method.upper()
+    candidates = [endpoint for endpoint in endpoints if str(endpoint.get("method") or "").upper() == method]
+    if not candidates:
+        return None
+    if method == "GET":
+        list_candidates = [endpoint for endpoint in candidates if _is_collection_read_endpoint(endpoint, resource)]
+        if list_candidates:
+            return sorted(list_candidates, key=lambda endpoint: (len(_path_segments(endpoint.get("path", ""))), endpoint.get("path", "")))[0]
+        detail_candidates = [endpoint for endpoint in candidates if _is_detail_read_endpoint(endpoint)]
+        if detail_candidates:
+            return sorted(detail_candidates, key=lambda endpoint: (len(_path_segments(endpoint.get("path", ""))), endpoint.get("path", "")))[0]
+    if method == "DELETE":
+        with_params = [endpoint for endpoint in candidates if _endpoint_has_path_params(endpoint)]
+        if with_params:
+            return sorted(with_params, key=lambda endpoint: (len(_path_segments(endpoint.get("path", ""))), endpoint.get("path", "")))[0]
+    without_params = [endpoint for endpoint in candidates if not _endpoint_has_path_params(endpoint)]
+    if without_params:
+        return sorted(without_params, key=lambda endpoint: (len(_path_segments(endpoint.get("path", ""))), endpoint.get("path", "")))[0]
+    return sorted(candidates, key=lambda endpoint: (len(_path_segments(endpoint.get("path", ""))), endpoint.get("path", "")))[0]
+
+
+def _crud_groups(api_schema: list[dict]) -> list[tuple[str, list[dict]]]:
+    groups: dict[str, list[dict]] = {}
+    for endpoint in api_schema or []:
+        if not isinstance(endpoint, dict):
+            continue
+        method = str(endpoint.get("method") or "").upper()
+        if method not in SAFE_API_METHODS | WRITE_API_METHODS:
+            continue
+        resource = _canonical_crud_resource(str(endpoint.get("path") or ""))
+        if not resource:
+            continue
+        groups.setdefault(resource, []).append(endpoint)
+
+    complete_groups: list[tuple[str, list[dict]]] = []
+    for resource, endpoints in groups.items():
+        methods = {str(endpoint.get("method") or "").upper() for endpoint in endpoints}
+        if {"POST", "GET", "DELETE"}.issubset(methods) and methods.intersection({"PUT", "PATCH"}):
+            complete_groups.append((resource, endpoints))
+    return sorted(
+        complete_groups,
+        key=lambda item: (
+            *_crud_resource_risk_score(item[0], item[1]),
+            item[0].lower(),
+        ),
+    )
+
+
+def _objective_requests_crud_action_chain(state: AgentState, strategy: dict) -> bool:
+    text_parts = [
+        state.get("objective"),
+        state.get("setup_instructions"),
+        state.get("agent_replan_feedback"),
+        strategy.get("case_generation_guidance"),
+        strategy.get("reason"),
+        strategy.get("intent"),
+        strategy.get("coverage_scope"),
+    ]
+    mission_plan = state.get("agent_mission_plan")
+    if isinstance(mission_plan, dict):
+        text_parts.append(json.dumps(mission_plan, ensure_ascii=False, default=str)[:4000])
+    return bool(_CRUD_INTENT_RE.search(" ".join(str(part or "") for part in text_parts)))
+
+
+def _unique_prefix(resource: str) -> str:
+    safe_resource = re.sub(r"[^A-Za-z0-9]+", "_", resource).strip("_") or "resource"
+    return f"TestClaw_{safe_resource}_{int(time.time() * 1000)}"
+
+
+def _inject_unique_prefix(value, prefix: str):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return [_inject_unique_prefix(item, prefix) for item in value]
+    if isinstance(value, dict):
+        updated = {}
+        prefix_applied = False
+        for key, item in value.items():
+            if _CRUD_TEXT_FIELD_RE.search(str(key)):
+                updated[key] = prefix if not prefix_applied else f"{prefix}_{str(key)}"
+                prefix_applied = True
+            else:
+                updated[key] = _inject_unique_prefix(item, prefix)
+        if not prefix_applied and updated:
+            first_key = next(iter(updated))
+            if isinstance(updated[first_key], str):
+                updated[first_key] = prefix
+        return updated
+    return value
+
+
+def _body_for_crud_endpoint(endpoint: dict, *, method: str, resource: str, prefix: str) -> tuple[object, dict | None]:
+    path = str(endpoint.get("path") or "")
+    content_type = endpoint.get("request_body_content_type") or "application/json"
+    body, generation = _request_body_from_schema(
+        endpoint,
+        method=method,
+        path=path,
+        content_type=content_type,
+    )
+    if isinstance(body, dict):
+        body = _inject_unique_prefix(body, prefix)
+        if method in {"PUT", "PATCH"}:
+            for key in list(body.keys()):
+                if _CRUD_ID_FIELD_RE.search(str(key)):
+                    body[key] = f"<id_from_{resource}>"
+                    break
+    return body, generation
+
+
+def _path_params_for_dependency(endpoint: dict, resource: str) -> dict[str, str]:
+    path = str(endpoint.get("path") or "")
+    params = {}
+    for name in _path_param_names(path, endpoint):
+        params[name] = f"<id_from_{resource}>"
+    return params
+
+
+def _crud_list_query_params(endpoint: dict, prefix: str) -> dict:
+    query_params = _extract_query_params(endpoint)
+    for key in list(query_params.keys()):
+        if _CRUD_TEXT_FIELD_RE.search(str(key)):
+            query_params[key] = prefix
+            break
+    return query_params
+
+
+def _safe_write_gate_action_step(resource: str) -> dict:
+    return {
+        "tool_name": "api.safe_write_gate",
+        "inputs": {
+            "pre_call_check": "confirm_test_environment_unique_prefix_and_cleanup",
+            "resource": resource,
+        },
+        "safety_constraints": [
+            "write_allowed",
+            "confirm_test_env",
+            "unique_prefix",
+            "require_cleanup",
+        ],
+        "expected_observation": "safe write boundary confirmed before CRUD chain execution",
+        "reason": "User requested CRUD execution under write_allowed policy; local CRUD skill added the required safe-write gate.",
+        "source": "local_crud_skill",
+    }
+
+
+def _crud_http_action_step(
+    endpoint: dict,
+    *,
+    method: str,
+    resource: str,
+    prefix: str,
+    safety_constraints: list[str],
+    reason: str,
+) -> dict:
+    inputs: dict[str, object] = {
+        "method": method,
+        "path": endpoint.get("path"),
+    }
+    if method in {"POST", "PUT", "PATCH"}:
+        body, _generation = _body_for_crud_endpoint(endpoint, method=method, resource=resource, prefix=prefix)
+        if body is not None:
+            inputs["body"] = body
+    if _endpoint_has_path_params(endpoint):
+        inputs["path_params"] = _path_params_for_dependency(endpoint, resource)
+    if method == "GET" and not _endpoint_has_path_params(endpoint):
+        inputs["params"] = _crud_list_query_params(endpoint, prefix)
+    return {
+        "tool_name": "api.http_request",
+        "inputs": inputs,
+        "safety_constraints": safety_constraints,
+        "expected_observation": "HTTP response evidence with status, envelope code, and extracted dependency values",
+        "reason": reason,
+        "source": "local_crud_skill",
+    }
+
+
+def _build_synthetic_crud_action_plan(state: AgentState, api_schema: list[dict], strategy: dict) -> list[dict]:
+    if _normalize_api_execution_policy(state.get("api_execution_policy")) != "write_allowed":
+        return []
+    if not _objective_requests_crud_action_chain(state, strategy):
+        return []
+    groups = [
+        (resource, endpoints)
+        for resource, endpoints in _crud_groups(api_schema)
+        if not _crud_resource_risk_score(resource, endpoints)[1]
+    ]
+    if not groups:
+        return []
+
+    resource, endpoints = groups[0]
+    prefix = _unique_prefix(resource)
+    create_endpoint = _choose_crud_endpoint(endpoints, "POST", resource=resource)
+    list_endpoint = _choose_crud_endpoint(endpoints, "GET", resource=resource)
+    update_endpoint = _choose_crud_endpoint(endpoints, "PUT", resource=resource) or _choose_crud_endpoint(endpoints, "PATCH", resource=resource)
+    detail_endpoint = next(
+        (
+            endpoint
+            for endpoint in endpoints
+            if _is_detail_read_endpoint(endpoint)
+        ),
+        None,
+    )
+    delete_endpoint = _choose_crud_endpoint(endpoints, "DELETE", resource=resource)
+    ordered_endpoints = [create_endpoint, list_endpoint, detail_endpoint, update_endpoint, delete_endpoint]
+    if not all(ordered_endpoints):
+        return []
+
+    return [
+        _safe_write_gate_action_step(resource),
+        _crud_http_action_step(
+            create_endpoint,
+            method="POST",
+            resource=resource,
+            prefix=prefix,
+            safety_constraints=["write_allowed", "confirm_test_env", "unique_prefix"],
+            reason=f"Create a disposable {resource} record with a generated TestClaw prefix.",
+        ),
+        _crud_http_action_step(
+            list_endpoint,
+            method="GET",
+            resource=resource,
+            prefix=prefix,
+            safety_constraints=["safe_read_only", "unique_prefix"],
+            reason=f"List/search {resource} records to verify the created TestClaw record can be queried.",
+        ),
+        _crud_http_action_step(
+            detail_endpoint,
+            method="GET",
+            resource=resource,
+            prefix=prefix,
+            safety_constraints=["safe_read_only", "dependency_from_create"],
+            reason=f"Read {resource} detail using the id extracted from create/list response.",
+        ),
+        _crud_http_action_step(
+            update_endpoint,
+            method=str(update_endpoint.get("method") or "PUT").upper(),
+            resource=resource,
+            prefix=f"{prefix}_updated",
+            safety_constraints=["write_allowed", "confirm_test_env", "unique_prefix"],
+            reason=f"Update the disposable {resource} record and keep it scoped to the TestClaw prefix.",
+        ),
+        _crud_http_action_step(
+            delete_endpoint,
+            method="DELETE",
+            resource=resource,
+            prefix=prefix,
+            safety_constraints=["write_allowed", "confirm_test_env", "unique_prefix", "cleanup", "require_cleanup"],
+            reason=f"Clean up the disposable {resource} record created by this run.",
+        ),
+    ]
+
+
+def _append_synthetic_crud_actions_if_needed(
+    state: AgentState,
+    agent_actions: list[dict],
+    *,
+    api_schema: list[dict],
+    strategy: dict,
+    execution_policy: str,
+) -> list[dict]:
+    if _normalize_api_execution_policy(execution_policy) != "write_allowed":
+        return agent_actions
+    existing_http_actions = [
+        action for action in agent_actions
+        if isinstance(action, dict)
+        and action.get("tool_name") == "api.http_request"
+        and action.get("allowed")
+        and isinstance(action.get("inputs"), dict)
+        and str(action["inputs"].get("method") or "").upper() in WRITE_API_METHODS
+    ]
+    if existing_http_actions:
+        return agent_actions
+
+    synthetic_plan = _build_synthetic_crud_action_plan(state, api_schema, strategy)
+    if not synthetic_plan:
+        return agent_actions
+
+    synthetic_actions = validate_agent_action_plan(
+        synthetic_plan,
+        strategy={**strategy, "source": "local_crud_skill"},
+        parsed_api_schema=api_schema,
+        execution_policy=execution_policy,
+    )
+    if not synthetic_actions:
+        return agent_actions
+
+    state.setdefault("agent_action_diagnostics", []).append(
+        {
+            "kind": "synthetic_crud_action_plan",
+            "severity": "info",
+            "action": "added",
+            "detail": "Local CRUD skill generated an ordered safe-write action chain because the objective requested CRUD under write_allowed but the model did not provide executable write actions.",
+        }
+    )
+    for action in synthetic_actions:
+        record_agent_action_observation(state, action, stage="api_runner")
+    return [*agent_actions, *synthetic_actions]
+
+
+def _crud_action_chain_required(
+    state: AgentState,
+    strategy: dict,
+    execution_policy: str,
+) -> bool:
+    return (
+        _normalize_api_execution_policy(execution_policy) == "write_allowed"
+        and _objective_requests_crud_action_chain(state, strategy)
+    )
+
+
+def _build_crud_skill_blocked_requests(
+    state: AgentState,
+    api_schema: list[dict],
+    base_url: str,
+    strategy: dict,
+    execution_policy: str,
+) -> list[dict]:
+    if not _crud_action_chain_required(state, strategy, execution_policy):
+        return []
+
+    groups = _crud_groups(api_schema)
+    high_risk_groups = [
+        resource for resource, endpoints in groups
+        if _crud_resource_risk_score(resource, endpoints)[1]
+    ]
+    safe_groups = [
+        resource for resource, endpoints in groups
+        if not _crud_resource_risk_score(resource, endpoints)[1]
+    ]
+    if not groups:
+        reason = "本次任务明确要求 CRUD 写入链路，但 OpenAPI 中未发现完整的新增/查询/详情/修改/删除资源组。"
+    elif high_risk_groups and not safe_groups:
+        reason = (
+            "本次任务明确要求 CRUD 写入链路，但可识别的完整 CRUD 资源均属于高风险业务面 "
+            f"({', '.join(high_risk_groups[:5])})，未自动执行写入。"
+        )
+    else:
+        reason = "本次任务明确要求 CRUD 写入链路，但未能生成通过本地校验的安全写入 action 计划。"
+
+    target = _build_request_url("", base_url or str(state.get("target_url") or "")) or base_url or str(state.get("target_url") or "")
+    return [
+        {
+            "label": "BLOCKED_CRUD_ACTION_PLAN",
+            "method": "POST",
+            "url": target,
+            "headers": {},
+            "body": None,
+            "expected_status": None,
+            "category": "SKIPPED",
+            "skip_reason": reason,
+            "skip_type": CRUD_SKILL_BLOCK_SKIP_TYPE,
+            "failure_type": CRUD_SKILL_BLOCK_SKIP_TYPE,
+        }
+    ]
 
 
 def _build_agent_action_test_requests(
@@ -2191,7 +2712,7 @@ def _update_api_execution_state(
     skipped_count = sum(1 for r in results if r.get("skipped"))
     advisory_count = sum(1 for r in results if r.get("advisory"))
     environment_skipped_count = sum(1 for r in results if r.get("skip_type") == "environment_not_executable")
-    blocking_skipped_count = sum(1 for r in results if r.get("skip_type") == SAFE_WRITE_BLOCK_SKIP_TYPE)
+    blocking_skipped_count = sum(1 for r in results if r.get("skip_type") in BLOCKING_API_SKIP_TYPES)
     budget_skipped_count = (
         sum(1 for r in results if r.get("skip_type") == "execution_budget_exhausted")
         + budget_omitted_count
@@ -2282,6 +2803,14 @@ async def run(state: AgentState) -> AgentState:
             parsed_api_schema=api_schema,
             execution_policy=execution_policy,
         )
+    agent_actions = _append_synthetic_crud_actions_if_needed(
+        state,
+        agent_actions,
+        api_schema=api_schema,
+        strategy=strategy,
+        execution_policy=execution_policy,
+    )
+    state["agent_actions"] = agent_actions
     safe_schema_endpoints = safe_schema_method_endpoints(api_schema)
     selected_strategy_endpoints = strategy_selected_schema_endpoints(strategy, api_schema)
     all_safe_get_coverage_requested = strategy_requests_all_safe_coverage(strategy)
@@ -2336,6 +2865,16 @@ async def run(state: AgentState) -> AgentState:
             if _has_executable_request(action_request_candidates)
             else "agent_http_action_plan_blocked_by_guardrail"
         )
+    elif crud_blocked_requests := _build_crud_skill_blocked_requests(
+        state,
+        api_schema,
+        base_url,
+        strategy,
+        execution_policy,
+    ):
+        request_candidates = crud_blocked_requests
+        selection_source = AGENT_ACTION_HTTP_REQUEST_SOURCE
+        fallback_reason = "crud_action_chain_required_but_not_executable"
     elif all_safe_get_coverage_requested:
         request_candidates = _build_test_requests(
             safe_schema_endpoints,
@@ -2923,7 +3462,7 @@ async def run(state: AgentState) -> AgentState:
     skipped_count = sum(1 for r in results if r.get("skipped"))
     executed_count = total - skipped_count
     passed_count = sum(1 for r in results if r.get("passed") is True)
-    blocking_skipped_count = sum(1 for r in results if r.get("skip_type") == SAFE_WRITE_BLOCK_SKIP_TYPE)
+    blocking_skipped_count = sum(1 for r in results if r.get("skip_type") in BLOCKING_API_SKIP_TYPES)
     failed_count = max(executed_count - passed_count, 0) + blocking_skipped_count
     all_passed = total > 0 and failed_count == 0
 

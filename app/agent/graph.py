@@ -54,6 +54,22 @@ def _after_tc_generator(state: AgentState) -> str:
     return "ui_login"
 
 
+def _after_agent_supervisor(state: AgentState) -> str:
+    """Route UI-only runs directly into browser setup after action observation."""
+    test_type = (state.get("test_type") or "auto").lower()
+    input_type = state.get("input_type", "unknown")
+    has_api_schema = bool(state.get("parsed_api_schema"))
+    has_api_cases = bool(state.get("api_cases"))
+    has_api_target = has_api_schema or has_api_cases or bool(state.get("base_url_override"))
+    has_ui_target = input_type == "url" or bool(state.get("ui_seed_url"))
+
+    if test_type == "ui":
+        return "ui_login"
+    if test_type == "auto" and has_ui_target and not has_api_target:
+        return "ui_login"
+    return "tc_generator"
+
+
 def _after_api_runner(state: AgentState) -> str:
     """After API runner, chain to UI login when the run has a UI target."""
     test_type = (state.get("test_type") or "auto").lower()
@@ -108,7 +124,14 @@ def build_graph():
     graph.add_edge("mission_planner", "knowledge_retriever")
     graph.add_edge("knowledge_retriever", "planner")
     graph.add_edge("planner", "agent_supervisor")
-    graph.add_edge("agent_supervisor", "tc_generator")
+    graph.add_conditional_edges(
+        "agent_supervisor",
+        _after_agent_supervisor,
+        {
+            "tc_generator": "tc_generator",
+            "ui_login": "ui_login",
+        },
+    )
     graph.add_conditional_edges(
         "ui_login",
         _after_ui_login,

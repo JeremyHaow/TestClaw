@@ -257,7 +257,7 @@ task = await create_run(RunCreate(**run_payload), db, user)
 
 - Graph path:
   ```text
-  input_classifier -> source_loader -> mission_planner -> knowledge_retriever -> planner -> agent_supervisor -> tc_generator -> api_runner/ui_login -> execution_evaluator -> reporter -> knowledge_sink
+  input_classifier -> source_loader -> mission_planner -> knowledge_retriever -> planner -> agent_supervisor -> tc_generator/ui_login -> api_runner/ui_runner -> execution_evaluator -> reporter -> knowledge_sink
   ```
 - Persisted execution-log keys:
   ```python
@@ -280,6 +280,7 @@ task = await create_run(RunCreate(**run_payload), db, user)
 - Active graph wiring must not register or route through legacy `coder`, `executor`, `analyzer`, or `healer` nodes.
 - `mission_planner` runs before memory retrieval and persists a real `agent_mission_plan` containing subgoals, memory needs, environment needs, selected skills, execution order, and success criteria.
 - `agent_supervisor` runs after planner strategy selection and before fixed case generation. It may add validated skill/tool observations, auth discovery, memory retrieval, and human-input blockers, but it must continue through the existing deterministic execution path until a full supervisor loop replaces it.
+- UI-only runs must route from `agent_supervisor` directly into `ui_login -> ui_test_planner -> ui_runner`; they must not wait in `tc_generator` after generating UI cases. API, full, and API+UI auto runs continue through `tc_generator` before API/browser execution.
 - Downstream planner, case generator, and evidence evaluator prompts must consume the mission plan as bounded context.
 - Multi-agent collaboration is role-based and persisted through `agent_roster` and `agent_delegation_trace`; expected roles include supervisor/planner, memory researcher, API executor, UI explorer, evidence evaluator, and reporter when relevant to the run.
 - ReAct-style trace fields are visible operational summaries only: concise `reason`, `action`, selected `tool`, `observation`, `evidence`, and `next_decision`. Do not store hidden chain-of-thought.
@@ -293,6 +294,7 @@ task = await create_run(RunCreate(**run_payload), db, user)
 - `RAG_VECTOR_STORE_BACKEND=milvus` without `pymilvus` or `MILVUS_URI` -> database fallback, `requested_backend="milvus"`, and non-secret `backend_config.fallback_reason`.
 - Legacy graph node appears in active graph nodes/edges -> failing regression test.
 - Tool call includes secret-bearing inputs -> `tool_calls` and `agent_react_trace` must be redacted before persistence.
+- UI-only run with `test_type="ui"` or auto URL-only target -> graph route after `agent_supervisor` is `ui_login`, not `tc_generator`.
 
 ### 5. Good/Base/Bad Cases
 
@@ -305,7 +307,7 @@ task = await create_run(RunCreate(**run_payload), db, user)
 
 - Unit: complex objective decomposes into multiple mission subgoals with active role delegation.
 - Unit: active graph nodes/edges exclude `coder`, `executor`, `analyzer`, and `healer`.
-- Unit: active graph routes `planner -> agent_supervisor -> tc_generator`.
+- Unit: active graph routes `planner -> agent_supervisor -> tc_generator` for API-capable runs and `planner -> agent_supervisor -> ui_login` for UI-only runs.
 - Unit: `build_execution_log_payload(...)` preserves `agent_mission_plan`, `agent_roster`, `agent_delegation_trace`, and `agent_react_trace`.
 - Unit: default vector backend selects database storage.
 - Unit: Milvus backend selection exposes config metadata without requiring a runtime dependency.
@@ -461,12 +463,14 @@ except Exception:
 - Under `safe_read_only` and `safe_with_auth`, POST/PUT/PATCH/DELETE remain blocked even if the model sets `write_allowed=true`.
 - Under `write_allowed`, `api_runner` may execute planner-provided `api.http_request` actions only after local validation. Write actions require both a validated `api.safe_write_gate` context and per-action safety constraints such as `write_allowed`, `unique_prefix`, `test_env`, and `require_cleanup` for DELETE.
 - Planner-provided CRUD chains must keep the model's action order so POST/list/detail/update/delete dependency flow is not reordered by generic request prioritization.
+- If the objective explicitly requests CRUD and local policy is `write_allowed`, but the planner only produced read-only schema selection, `api_runner` may synthesize a local safe CRUD action chain from complete low-risk OpenAPI resource groups. The synthesized chain must still use `api.safe_write_gate`, unique TestClaw-prefixed data, dependency placeholders, cleanup, and normal action validation before execution.
+- If CRUD is required but no complete low-risk resource group can be found, runner must emit a `crud_skill_blocked` skipped result under `agent_action_http_requests`, increment `failed`/`blocking_skipped`, and keep `all_passed=false`; it must not fall back to schema GETs that make the CRUD task look successful.
 - Planner angle placeholders such as `<id_from_post>` must be converted into dependency placeholders and resolved from prior successful observations; unresolved path parameters must be skipped rather than replaced with synthetic IDs.
 - If planner-provided `api.http_request` actions are present but all write actions are blocked by guardrails, `api_runner` must keep the blocked action results under `agent_action_http_requests`; it must not fall back to direct URL or schema smoke requests that would make the run look successful.
 - Schema-backed API execution must execute only documented method+path pairs selected by the validated strategy or derived from documented safe methods.
 - `objective_requests_all_safe_get_coverage(...)` is a fallback only when the planner strategy is missing/unavailable, not the primary strategy mechanism.
 - `execution_evaluator` must treat completed `all_documented_safe_methods`, `focused_documented_endpoints`, and `sampled_contract` coverage as reportable evidence even if generated case counts are small.
-- `safe_write_gate_blocked` skips are blocking evidence: they must increment `failed`/`blocking_skipped` and keep `all_passed=false`.
+- `safe_write_gate_blocked` and `crud_skill_blocked` skips are blocking evidence: they must increment `failed`/`blocking_skipped` and keep `all_passed=false`.
 
 ### 4. Validation & Error Matrix
 
@@ -476,6 +480,7 @@ except Exception:
 - LLM includes schema-missing method/path -> drop endpoint, record `out_of_schema_endpoint`.
 - LLM emits an unknown tool action -> action is `allowed=false`, records `unknown_tool_name`, and is not executed.
 - LLM emits an `api.http_request` write action without a validated safe-write gate or required action constraints -> create a `safe_write_gate_blocked` skipped result, do not send HTTP, count it as failed.
+- Objective requires CRUD under `write_allowed`, but the only complete CRUD groups are high-risk resources such as inventory/order/user/role/permission -> create a `crud_skill_blocked` skipped result, do not send HTTP, count it as failed.
 - LLM emits an `api.http_request` chain with unresolved path dependency -> skip the dependent request with `path_param_unresolved`, do not synthesize placeholder IDs.
 - Valid focused/sample strategy with no surviving include endpoints -> no schema-wide fallback execution; record missing selection and let evaluator/report surface the blocker.
 
@@ -484,11 +489,13 @@ except Exception:
 - Good: model selects `all_documented_safe_methods`; runner derives GET/HEAD/OPTIONS from OpenAPI and records budget omissions.
 - Good: model selects `focused_documented_endpoints`; runner executes only validated include paths and does not force full schema coverage.
 - Good: model selects a safe CRUD chain with `api.safe_write_gate`, unique test data, dependency placeholders, and cleanup; runner executes the action sequence and records dependency extraction/injection evidence.
+- Good: model falls back to read-only while the objective requires CRUD; local CRUD skill synthesizes a safe low-risk resource chain or blocks with `crud_skill_blocked`.
 - Good: `agent_react_trace` shows concise action reason, selected tool, validated inputs, and observation/diagnostic without storing hidden chain-of-thought.
 - Base: model unavailable and objective explicitly asks for all GET requests; fallback derives documented safe method coverage.
 - Bad: adding a UI option or keyword branch for "all GET coverage" instead of relying on the strategy contract.
 - Bad: treating model-selected POST as safe because it appeared in `method_policy.allowed_methods`.
 - Bad: all planner write actions are guardrail-blocked, then runner falls back to a direct GET and reports success.
+- Bad: a CRUD objective runs only focused GET endpoints, reports PASS, and hides that no create/update/delete action was executable.
 
 ### 6. Tests Required
 
@@ -499,6 +506,8 @@ except Exception:
 - Regression: generic `AgentAction` validation blocks unknown tools, unsafe methods, and out-of-schema paths while preserving redacted observations.
 - Regression: `api_runner` executes a safe planner-provided CRUD action chain in the original action order and injects IDs from prior responses.
 - Regression: an unsafe planner-provided write action without `api.safe_write_gate` sends no HTTP request, keeps source `agent_action_http_requests`, increments `blocking_skipped`, and reports failure.
+- Regression: a CRUD objective with a model read-only fallback synthesizes a local safe CRUD chain for low-risk complete resource groups.
+- Regression: a CRUD objective with only high-risk complete resource groups sends no HTTP request, keeps source `agent_action_http_requests`, sets `crud_skill_blocked`, increments `blocking_skipped`, and reports failure.
 - Regression: evaluator reports completed model strategy scope instead of repeated replanning.
 
 ### 7. Wrong vs Correct

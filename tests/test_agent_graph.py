@@ -1,4 +1,5 @@
 from app.agent.graph import (
+    _after_agent_supervisor,
     _after_api_runner,
     _after_execution_evaluator,
     _after_tc_generator,
@@ -16,6 +17,7 @@ def test_graph_routes_source_loader_through_rag_before_planning() -> None:
     assert ("knowledge_retriever", "planner") in edges
     assert ("planner", "agent_supervisor") in edges
     assert ("agent_supervisor", "tc_generator") in edges
+    assert ("agent_supervisor", "ui_login") in edges
     assert ("source_loader", "planner") not in edges
     assert ("planner", "tc_generator") not in edges
     assert ("api_runner", "execution_evaluator") in edges
@@ -47,6 +49,25 @@ def test_after_tc_generator_routes_ui_runs_through_login_chain() -> None:
             "api_cases": [{"title": "smoke"}],
         }
     ) == "api_runner"
+
+
+def test_after_agent_supervisor_routes_ui_only_runs_to_browser_chain() -> None:
+    assert _after_agent_supervisor({"test_type": "ui", "input_type": "url"}) == "ui_login"
+    assert _after_agent_supervisor(
+        {
+            "test_type": "auto",
+            "input_type": "url",
+            "ui_seed_url": "https://web.example.test",
+        }
+    ) == "ui_login"
+    assert _after_agent_supervisor(
+        {
+            "test_type": "auto",
+            "input_type": "url",
+            "base_url_override": "https://api.example.test",
+            "ui_seed_url": "https://web.example.test",
+        }
+    ) == "tc_generator"
 
 
 def test_after_api_runner_routes_back_to_ui_for_auto_and_full_runs() -> None:

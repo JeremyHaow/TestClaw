@@ -3879,6 +3879,206 @@ async def test_api_runner_executes_safe_write_agent_action_crud_chain(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_api_runner_synthesizes_safe_crud_actions_when_model_falls_back_to_read_only(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+            self.text = json.dumps(payload)
+            self.content = self.text.encode()
+
+        def json(self) -> dict:
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            if method == "POST":
+                assert kwargs["json"]["name"].startswith("TestClaw_brands_")
+                return FakeResponse({"code": 200, "data": {"id": 91, "name": kwargs["json"]["name"]}})
+            if url.endswith("/brands/list"):
+                return FakeResponse({"code": 200, "rows": [{"id": 91, "name": "TestClaw_brands_1"}]})
+            if method == "GET" and url.endswith("/brands/91"):
+                return FakeResponse({"code": 200, "data": {"id": 91, "name": "TestClaw_brands_1"}})
+            if method == "PUT":
+                assert kwargs["json"]["id"] == "91"
+                assert kwargs["json"]["name"].startswith("TestClaw_brands_")
+                return FakeResponse({"code": 200, "data": kwargs["json"]})
+            if method == "DELETE" and url.endswith("/brands/91"):
+                return FakeResponse({"code": 200, "data": None})
+            return FakeResponse({"code": 404})
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "objective": "请执行安全 CRUD：新增-列表查询-详情-修改-删除，并清理测试数据",
+            "api_execution_policy": "write_allowed",
+            "parsed_api_schema": [
+                {
+                    "method": "POST",
+                    "path": "/brands",
+                    "response_status": "200",
+                    "request_body_schema": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}},
+                        "required": ["name"],
+                    },
+                },
+                {"method": "GET", "path": "/brands/list", "response_status": "200"},
+                {
+                    "method": "GET",
+                    "path": "/brands/{id}",
+                    "path_params": [{"name": "id", "schema": {"type": "integer"}}],
+                    "response_status": "200",
+                },
+                {
+                    "method": "PUT",
+                    "path": "/brands",
+                    "response_status": "200",
+                    "request_body_schema": {
+                        "type": "object",
+                        "properties": {"id": {"type": "integer"}, "name": {"type": "string"}},
+                        "required": ["id", "name"],
+                    },
+                },
+                {
+                    "method": "DELETE",
+                    "path": "/brands/{id}",
+                    "path_params": [{"name": "id", "schema": {"type": "integer"}}],
+                    "response_status": "200",
+                },
+            ],
+            "agent_strategy_decision": {
+                "source": "llm",
+                "intent": "api_read_only_coverage",
+                "coverage_scope": "focused_documented_endpoints",
+                "method_policy": {"allowed_methods": ["GET"], "write_allowed": True},
+                "endpoint_selection": {
+                    "source": "model_focus",
+                    "include": [{"method": "GET", "path": "/brands/{id}"}],
+                    "budget_behavior": "focused_only",
+                },
+                "tool_plan": [
+                    {
+                        "tool_name": "api.derive_schema_requests",
+                        "inputs": {
+                            "scope": "focused_documented_endpoints",
+                            "include": [{"method": "GET", "path": "/brands/{id}"}],
+                        },
+                        "safety_constraints": ["schema_only", "safe_methods_only"],
+                    }
+                ],
+            },
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+
+    assert [call["method"] for call in calls] == ["POST", "GET", "GET", "PUT", "DELETE"]
+    assert calls[2]["url"].endswith("/brands/91")
+    assert calls[4]["url"].endswith("/brands/91")
+    assert api_result["request_selection"]["source"] == api_runner.AGENT_ACTION_HTTP_REQUEST_SOURCE
+    assert api_result["request_selection"]["fallback_reason"] == "agent_http_action_plan"
+    assert api_result["executed"] == 5
+    assert api_result["passed"] == 5
+    assert api_result["failed"] == 0
+    assert api_result["all_passed"] is True
+    assert any(action.get("source") == "local_crud_skill" for action in result["agent_actions"])
+
+
+@pytest.mark.asyncio
+async def test_api_runner_blocks_required_crud_when_only_high_risk_resources_exist(monkeypatch) -> None:
+    calls = []
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs):
+            calls.append({"method": method, "url": url, **kwargs})
+            raise AssertionError("high-risk CRUD should be blocked before HTTP execution")
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "objective": "执行 CRUD 新增、修改、删除并清理",
+            "api_execution_policy": "write_allowed",
+            "parsed_api_schema": [
+                {"method": "POST", "path": "/orders", "response_status": "200"},
+                {"method": "GET", "path": "/orders/list", "response_status": "200"},
+                {
+                    "method": "GET",
+                    "path": "/orders/{id}",
+                    "path_params": [{"name": "id", "schema": {"type": "integer"}}],
+                    "response_status": "200",
+                },
+                {"method": "PUT", "path": "/orders", "response_status": "200"},
+                {
+                    "method": "DELETE",
+                    "path": "/orders/{id}",
+                    "path_params": [{"name": "id", "schema": {"type": "integer"}}],
+                    "response_status": "200",
+                },
+            ],
+            "agent_strategy_decision": {
+                "source": "llm",
+                "intent": "api_read_only_coverage",
+                "coverage_scope": "focused_documented_endpoints",
+                "method_policy": {"allowed_methods": ["GET"], "write_allowed": True},
+                "endpoint_selection": {
+                    "source": "model_focus",
+                    "include": [{"method": "GET", "path": "/orders/{id}"}],
+                    "budget_behavior": "focused_only",
+                },
+                "tool_plan": [],
+            },
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+
+    assert calls == []
+    assert api_result["request_selection"]["source"] == api_runner.AGENT_ACTION_HTTP_REQUEST_SOURCE
+    assert api_result["request_selection"]["fallback_reason"] == "crud_action_chain_required_but_not_executable"
+    assert api_result["executed"] == 0
+    assert api_result["passed"] == 0
+    assert api_result["failed"] == 1
+    assert api_result["skipped"] == 1
+    assert api_result["blocking_skipped"] == 1
+    assert api_result["all_passed"] is False
+    assert api_result["results"][0]["skip_type"] == api_runner.CRUD_SKILL_BLOCK_SKIP_TYPE
+
+
+@pytest.mark.asyncio
 async def test_api_runner_blocks_unsafe_write_agent_action_without_gate(monkeypatch) -> None:
     calls = []
 
