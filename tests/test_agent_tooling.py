@@ -4449,6 +4449,164 @@ async def test_api_runner_synthesizes_safe_crud_actions_when_model_falls_back_to
 
 
 @pytest.mark.asyncio
+async def test_api_runner_crud_fallback_tries_business_candidates_after_failed_create(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+            self.text = json.dumps(payload)
+            self.content = self.text.encode()
+
+        def json(self) -> dict:
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            assert "/system/" not in url
+            if method == "POST" and url.endswith("/brands"):
+                return FakeResponse({"code": 500, "msg": "brand create rejected"})
+            if method == "GET" and url.endswith("/brands/list"):
+                return FakeResponse({"code": 200, "rows": []})
+            if method == "POST" and url.endswith("/categories"):
+                return FakeResponse({"code": 200, "data": {"id": 92, "name": kwargs["json"]["name"]}})
+            if method == "GET" and url.endswith("/categories/list"):
+                return FakeResponse({"code": 200, "rows": [{"id": 92, "name": "TestClaw_categories_1"}]})
+            if method == "GET" and url.endswith("/categories/92"):
+                return FakeResponse({"code": 200, "data": {"id": 92, "name": "TestClaw_categories_1"}})
+            if method == "PUT" and url.endswith("/categories"):
+                assert kwargs["json"]["id"] == "92"
+                return FakeResponse({"code": 200, "data": kwargs["json"]})
+            if method == "DELETE" and url.endswith("/categories/92"):
+                return FakeResponse({"code": 200, "data": None})
+            return FakeResponse({"code": 404})
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "objective": "请执行复杂 CRUD：新增、列表查询、详情、修改、删除，并在失败时继续尝试其它低风险资源",
+            "api_execution_policy": "write_allowed",
+            "parsed_api_schema": [
+                {
+                    "method": "POST",
+                    "path": "/system/dict/data",
+                    "request_body_schema": {
+                        "type": "object",
+                        "properties": {"dictLabel": {"type": "string"}},
+                        "required": ["dictLabel"],
+                    },
+                },
+                {"method": "GET", "path": "/system/dict/data/list"},
+                {"method": "GET", "path": "/system/dict/data/{dictCode}"},
+                {
+                    "method": "PUT",
+                    "path": "/system/dict/data",
+                    "request_body_schema": {
+                        "type": "object",
+                        "properties": {"dictCode": {"type": "integer"}, "dictLabel": {"type": "string"}},
+                        "required": ["dictCode", "dictLabel"],
+                    },
+                },
+                {"method": "DELETE", "path": "/system/dict/data/{dictCodes}"},
+                {
+                    "method": "POST",
+                    "path": "/brands",
+                    "request_body_schema": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}},
+                        "required": ["name"],
+                    },
+                },
+                {"method": "GET", "path": "/brands/list"},
+                {"method": "GET", "path": "/brands/{id}"},
+                {
+                    "method": "PUT",
+                    "path": "/brands",
+                    "request_body_schema": {
+                        "type": "object",
+                        "properties": {"id": {"type": "integer"}, "name": {"type": "string"}},
+                        "required": ["id", "name"],
+                    },
+                },
+                {"method": "DELETE", "path": "/brands/{id}"},
+                {
+                    "method": "POST",
+                    "path": "/categories",
+                    "request_body_schema": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}},
+                        "required": ["name"],
+                    },
+                },
+                {"method": "GET", "path": "/categories/list"},
+                {"method": "GET", "path": "/categories/{id}"},
+                {
+                    "method": "PUT",
+                    "path": "/categories",
+                    "request_body_schema": {
+                        "type": "object",
+                        "properties": {"id": {"type": "integer"}, "name": {"type": "string"}},
+                        "required": ["id", "name"],
+                    },
+                },
+                {"method": "DELETE", "path": "/categories/{id}"},
+            ],
+            "agent_strategy_decision": {
+                "source": "agent_strategy_fallback",
+                "intent": "api_read_only_coverage",
+                "coverage_scope": "all_documented_safe_methods",
+                "method_policy": {"allowed_methods": ["GET"], "write_allowed": True},
+                "endpoint_selection": {"source": "schema", "include": []},
+                "tool_plan": [],
+            },
+            "workflow_steps": [],
+        }
+    )
+
+    urls = [call["url"] for call in calls]
+    assert not any("/system/dict/data" in url for url in urls)
+    assert [call["method"] for call in calls] == [
+        "POST",
+        "GET",
+        "POST",
+        "GET",
+        "GET",
+        "PUT",
+        "DELETE",
+    ]
+    assert urls[0].endswith("/brands")
+    assert urls[2].endswith("/categories")
+    assert urls[-1].endswith("/categories/92")
+    resources = next(
+        item["resources"]
+        for item in result["agent_action_diagnostics"]
+        if item.get("kind") == "synthetic_crud_resource_candidates"
+    )
+    assert resources == ["brands", "categories"]
+    api_result = result["api_execution_result"]
+    assert api_result["request_selection"]["fallback_reason"] == "agent_http_action_plan"
+    assert api_result["failed"] == 1
+    assert any(row["url"].endswith("/categories/92") for row in api_result["results"])
+
+
+@pytest.mark.asyncio
 async def test_api_runner_blocks_required_crud_when_only_high_risk_resources_exist(monkeypatch) -> None:
     calls = []
 

@@ -64,6 +64,7 @@ SAFE_WRITE_BLOCK_REASON = (
 AGENT_ACTION_HTTP_REQUEST_SOURCE = "agent_action_http_requests"
 CRUD_SKILL_BLOCK_SKIP_TYPE = "crud_skill_blocked"
 BLOCKING_API_SKIP_TYPES = {SAFE_WRITE_BLOCK_SKIP_TYPE, CRUD_SKILL_BLOCK_SKIP_TYPE}
+CRUD_MAX_SYNTHETIC_RESOURCE_CHAINS = 3
 SAFE_WRITE_GATE_CONFIRM_MARKERS = (
     "confirm",
     "approval",
@@ -170,11 +171,13 @@ _CRUD_LIST_SEGMENTS = {
     "treeselect",
 }
 _CRUD_HIGH_RISK_RESOURCE_MARKERS = {
+    "admin",
     "auth",
     "authuser",
     "batch",
     "check",
     "checkorder",
+    "config",
     "confirm",
     "file",
     "force",
@@ -183,7 +186,9 @@ _CRUD_HIGH_RISK_RESOURCE_MARKERS = {
     "inventory",
     "log",
     "login",
+    "management",
     "movement",
+    "monitor",
     "online",
     "order",
     "password",
@@ -195,7 +200,9 @@ _CRUD_HIGH_RISK_RESOURCE_MARKERS = {
     "role",
     "shipment",
     "stock",
+    "system",
     "token",
+    "tool",
     "upload",
     "user",
     "盘点",
@@ -1471,20 +1478,10 @@ def _crud_http_action_step(
     }
 
 
-def _build_synthetic_crud_action_plan(state: AgentState, api_schema: list[dict], strategy: dict) -> list[dict]:
-    if _normalize_api_execution_policy(state.get("api_execution_policy")) != "write_allowed":
-        return []
-    if not _objective_requests_crud_action_chain(state, strategy):
-        return []
-    groups = [
-        (resource, endpoints)
-        for resource, endpoints in _crud_groups(api_schema)
-        if not _crud_resource_risk_score(resource, endpoints)[1]
-    ]
-    if not groups:
-        return []
-
-    resource, endpoints = groups[0]
+def _synthetic_crud_action_chain_for_resource(
+    resource: str,
+    endpoints: list[dict],
+) -> list[dict]:
     prefix = _unique_prefix(resource)
     create_endpoint = _choose_crud_endpoint(endpoints, "POST", resource=resource)
     list_endpoint = _choose_crud_endpoint(endpoints, "GET", resource=resource)
@@ -1545,6 +1542,46 @@ def _build_synthetic_crud_action_plan(state: AgentState, api_schema: list[dict],
             reason=f"Clean up the disposable {resource} record created by this run.",
         ),
     ]
+
+
+def _build_synthetic_crud_action_plan(state: AgentState, api_schema: list[dict], strategy: dict) -> list[dict]:
+    if _normalize_api_execution_policy(state.get("api_execution_policy")) != "write_allowed":
+        return []
+    if not _objective_requests_crud_action_chain(state, strategy):
+        return []
+    groups = [
+        (resource, endpoints)
+        for resource, endpoints in _crud_groups(api_schema)
+        if not _crud_resource_risk_score(resource, endpoints)[1]
+    ]
+    if not groups:
+        return []
+
+    synthetic_plan: list[dict] = []
+    selected_resources: list[str] = []
+    for resource, endpoints in groups:
+        action_chain = _synthetic_crud_action_chain_for_resource(resource, endpoints)
+        if not action_chain:
+            continue
+        synthetic_plan.extend(action_chain)
+        selected_resources.append(resource)
+        if len(selected_resources) >= CRUD_MAX_SYNTHETIC_RESOURCE_CHAINS:
+            break
+
+    if selected_resources:
+        state.setdefault("agent_action_diagnostics", []).append(
+            {
+                "kind": "synthetic_crud_resource_candidates",
+                "severity": "info",
+                "action": "selected",
+                "detail": (
+                    "Local CRUD skill selected safe resource candidate chain(s): "
+                    f"{', '.join(selected_resources)}"
+                ),
+                "resources": selected_resources,
+            }
+        )
+    return synthetic_plan
 
 
 def _append_synthetic_crud_actions_if_needed(
@@ -1779,7 +1816,6 @@ def _build_agent_action_test_requests(
         if body_generation:
             request["mock_body_generation"] = body_generation
         dependencies = _action_path_param_dependency_keys(raw_path, endpoint_for_params)
-        dependencies.extend(alias for alias in aliases.values() if alias not in dependencies)
         for dependency in _placeholder_dependency_keys([path, body, query_params, request_headers]):
             if dependency not in dependencies:
                 dependencies.append(dependency)
