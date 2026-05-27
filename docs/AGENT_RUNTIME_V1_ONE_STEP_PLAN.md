@@ -311,6 +311,119 @@ frontend/src/components/runtime/
 4. 证据是否足够，失败类型是什么？
 5. 下一步为什么是 retry、replan、ask human 或 report？
 
+### 5.4 shadcn-vue Design System Setup
+
+下一轮 Codex 必须把前端 UI 系统标准化到 `shadcn-vue`，不要继续手写大量一次性 Tailwind class 作为新 UI 的主方式。
+
+官方参考：
+
+- shadcn-vue Vite installation: `https://www.shadcn-vue.com/docs/installation/vite`
+- shadcn-vue components: `https://www.shadcn-vue.com/docs/components`
+
+重要判断：
+
+- 当前 `frontend` 是 Vue 3 + Vite + Tailwind v4，不是 React 项目。
+- 不要安装 React 版 `shadcn/ui`。
+- 必须使用 Vue 生态的 `shadcn-vue`。
+- 当前仓库已有 `frontend/package-lock.json`，项目前端包管理优先使用 `npm` / `npx`，不要无故切换成 pnpm。
+
+Codex 在开始前端 Runtime Workbench 实现前必须执行：
+
+1. 检查 `frontend/components.json` 是否存在。
+2. 如果不存在，先配置 shadcn-vue：
+
+```bash
+cd /opt/testclaw/frontend
+npx shadcn-vue@latest init
+```
+
+3. 初始化过程中按当前项目约定选择：
+
+```text
+Framework: Vite
+Language: TypeScript
+Tailwind CSS file: src/styles/main.css
+Components alias: @/components
+UI components path: src/components/ui
+Utils alias: @/lib/utils
+Utils path: src/lib/utils
+Base color: neutral 或 zinc
+CSS variables: yes
+```
+
+4. 如果 `@` alias 尚未配置，必须补齐：
+
+- `frontend/vite.config.ts` 增加 `resolve.alias`，将 `@` 指向 `frontend/src`。
+- `frontend/tsconfig.json` 增加 `baseUrl` 和 `paths`。
+
+5. 安装 Runtime Workbench 需要的基础组件：
+
+```bash
+cd /opt/testclaw/frontend
+npx shadcn-vue@latest add button card badge input textarea select tabs dialog sheet tooltip table scroll-area separator skeleton dropdown-menu alert
+```
+
+6. 安装后检查：
+
+- `frontend/components.json`
+- `frontend/src/components/ui/`
+- `frontend/src/lib/utils.ts`
+- `frontend/src/styles/main.css`
+- `frontend/package.json`
+- `frontend/package-lock.json`
+
+7. 跑前端构建：
+
+```bash
+cd /opt/testclaw/frontend
+npm run build
+```
+
+### 5.5 shadcn-vue Skill and MCP Setup
+
+Codex 下一轮应尽量启用 shadcn-vue Skill 和 MCP，但不能假设它们在当前会话里已经可用。
+
+官方参考：
+
+- shadcn-vue Skill: `https://www.shadcn-vue.com/docs/skills`
+- shadcn-vue MCP: `https://www.shadcn-vue.com/docs/mcp`
+
+Skill 安装指令：
+
+```bash
+pnpm dlx skills add unovue/shadcn-vue
+```
+
+执行规则：
+
+- 如果 `pnpm` 或 `skills` CLI 不可用，不要阻塞主任务；在最终回复中说明 skill 未安装。
+- 如果安装成功，继续使用 skill 读取 `components.json`、已安装组件和 shadcn-vue 约定。
+- Skill 是 Codex 环境增强，不应写入项目业务代码。
+
+MCP 配置指令：
+
+```toml
+[mcp_servers.shadcn]
+command = "npx"
+args = ["shadcn-vue@latest", "mcp"]
+```
+
+执行规则：
+
+- 将以上配置写入 `~/.codex/config.toml` 需要明确当前环境允许修改 Codex 配置。
+- MCP 配置后通常需要重启 Codex 才能暴露工具；当前运行中的 Codex 不应假设 MCP 立刻可用。
+- 如果本次会话没有 shadcn MCP 工具，继续使用本地 `npx shadcn-vue@latest add ...` 和官方文档完成组件安装。
+- 不要把 MCP 配置写入项目仓库。
+
+使用规则：
+
+- 新增 Runtime Workbench 组件优先使用 `src/components/ui` 下的 shadcn-vue 组件。
+- `Button`、`Badge`、`Card`、`Tabs`、`Sheet`、`Dialog`、`Tooltip`、`Table`、`ScrollArea` 等基础交互必须来自 shadcn-vue。
+- 业务组件放 `frontend/src/components/runtime/`，不要把业务逻辑塞进 `components/ui`。
+- `components/ui` 只保存可复用设计系统组件。
+- 不要混用另一个大型 UI 框架。
+- 不要把 React shadcn 组件复制到 Vue 项目。
+
 ## 6. Human-in-the-loop v1
 
 既然 UI 和数据库允许改，可以把 HITL 做到 v1，而不是只保留 assisted rerun。
@@ -409,12 +522,16 @@ frontend/src/components/runtime/
 
 产出：
 
+- 初始化 shadcn-vue，如果 `components.json` 不存在。
+- 安装 Runtime Workbench 所需 shadcn-vue 基础组件。
 - Runtime components。
 - Run Detail 主视图改为 runtime timeline/current step/evidence/evaluation/handoff。
 - Raw tabs 降级。
 
 验收：
 
+- `npm run build` 通过。
+- 新增 UI 组件优先复用 `frontend/src/components/ui`。
 - 用户不用打开 raw logs 也能理解 Agent 当前状态。
 - waiting_for_human 有清晰入口。
 - API/UI raw results 仍可展开排查。
@@ -448,6 +565,8 @@ frontend/src/components/runtime/
 8. 每个 runtime event 都要 redaction。
 9. 每个 failure_type 都能映射到 retryable、human_required、report_category。
 10. UI 主视图必须能展示 Action、Observation、Evaluation 三件事。
+11. shadcn-vue 已初始化，`frontend/components.json`、`frontend/src/components/ui`、`frontend/src/lib/utils.ts` 存在。
+12. `cd frontend && npm run build` 通过。
 
 ## 9. What Can Be Removed Later, Not Now
 
@@ -477,6 +596,9 @@ frontend/src/components/runtime/
 - 这次允许修改 UI。
 - 这次允许新增数据库模型和 Alembic migration。
 - 但必须保持旧字段兼容，不能删除 legacy API/UI result。
+- 前端必须标准化到 shadcn-vue。当前项目是 Vue3，不要使用 React 版 shadcn/ui。
+- 当前 frontend 有 package-lock.json，项目依赖命令优先使用 npm/npx，不要无故切换包管理器。
+- shadcn-vue Skill 和 MCP 是 Codex 环境增强；能安装就安装，不能安装要继续完成项目代码并在最终回复说明。
 
 必须阅读：
 - app/agent/action_runtime.py
@@ -494,6 +616,10 @@ frontend/src/components/runtime/
 - app/api/v1/runs.py
 - app/models/run_artifacts.py
 - alembic/versions/0006_run_operational_tables.py
+- frontend/package.json
+- frontend/vite.config.ts
+- frontend/tsconfig.json
+- frontend/src/styles/main.css
 - frontend/src/pages/RunDetailPage.vue
 - frontend/src/components/agent/
 - tests/test_agent_tooling.py
@@ -502,20 +628,27 @@ frontend/src/components/runtime/
 - tests/test_run_detail_frontend_source.py
 
 实现要求：
-1. 新增 app/agent/runtime/，包含 models、runtime、tool_executor、event_store、failure_taxonomy、policies。
-2. 新增 Alembic migration 0007_agent_runtime_v1.py，增加 run_agent_actions、run_agent_observations、run_agent_evaluations，或给出更好的等价 schema，但必须支持 action/observation/evaluation 查询和 timeline。
-3. 运行时以 AgentRuntime 为主入口，执行 Action -> ToolCall -> Observation -> Evidence -> Evaluation。
-4. API runner 和 UI runner 必须接入 AgentRuntime，旧 api_execution_result/ui_execution_result 保持兼容。
-5. UI planner 默认输出 structured ui_actions，playwright_commands 只做 legacy fallback。
-6. Playwright CLI 作为受限 skill/tool 执行，默认禁止任意 run-code/eval。
-7. failure taxonomy 集中定义，并被 runtime、API/UI adapter、Evaluator、Reporter 共用。
-8. Evaluator 基于 runtime observations/evidence 输出 retry/replan/ask_human/report。
-9. Run Detail 改为 Runtime Workbench，主视图展示 current action、timeline、observation、evidence、evaluation、human handoff。raw API/UI 结果降级为详情。
-10. Memory candidate 必须引用 evaluation/observation/evidence ids，并只把高置信度、目标相关事实喂给 planner。
-11. SSE 或 run detail 查询必须能读取 runtime events；Task.execution_log 继续保留兼容快照。
-12. 添加或更新 Golden Tasks failure matrix，覆盖 API、UI、HITL、Memory 的主要失败类型。
-13. 添加数据库 migration tests 和前端 source tests。
-14. 全程 redaction，不能把 token/cookie/header secret 写入 observation/evidence/memory。
+1. 先检查并安装 shadcn-vue：如果 frontend/components.json 不存在，执行 `cd frontend && npx shadcn-vue@latest init`。
+2. shadcn-vue 初始化参数必须匹配本项目：Vite、TypeScript、Tailwind CSS file=`src/styles/main.css`、UI path=`src/components/ui`、utils path=`src/lib/utils`、base color=`neutral` 或 `zinc`、CSS variables=yes。
+3. 如果 `@` alias 缺失，补齐 `frontend/vite.config.ts` 的 `resolve.alias` 和 `frontend/tsconfig.json` 的 `baseUrl/paths`。
+4. 安装基础 UI 组件：`cd frontend && npx shadcn-vue@latest add button card badge input textarea select tabs dialog sheet tooltip table scroll-area separator skeleton dropdown-menu alert`。
+5. 尝试安装 shadcn-vue Skill：`pnpm dlx skills add unovue/shadcn-vue`。如果环境不支持，不要阻塞主任务，最终回复说明。
+6. 如环境允许，配置 Codex MCP 到 `~/.codex/config.toml`，追加 `[mcp_servers.shadcn]`、`command = "npx"`、`args = ["shadcn-vue@latest", "mcp"]`。配置后说明需要重启 Codex；不要假设当前会话立刻有 MCP 工具。
+7. 新增 app/agent/runtime/，包含 models、runtime、tool_executor、event_store、failure_taxonomy、policies。
+8. 新增 Alembic migration 0007_agent_runtime_v1.py，增加 run_agent_actions、run_agent_observations、run_agent_evaluations，或给出更好的等价 schema，但必须支持 action/observation/evaluation 查询和 timeline。
+9. 运行时以 AgentRuntime 为主入口，执行 Action -> ToolCall -> Observation -> Evidence -> Evaluation。
+10. API runner 和 UI runner 必须接入 AgentRuntime，旧 api_execution_result/ui_execution_result 保持兼容。
+11. UI planner 默认输出 structured ui_actions，playwright_commands 只做 legacy fallback。
+12. Playwright CLI 作为受限 skill/tool 执行，默认禁止任意 run-code/eval。
+13. failure taxonomy 集中定义，并被 runtime、API/UI adapter、Evaluator、Reporter 共用。
+14. Evaluator 基于 runtime observations/evidence 输出 retry/replan/ask_human/report。
+15. Run Detail 改为 Runtime Workbench，主视图展示 current action、timeline、observation、evidence、evaluation、human handoff。raw API/UI 结果降级为详情。
+16. Runtime Workbench 新增 UI 必须优先使用 `frontend/src/components/ui` 的 shadcn-vue 组件；业务组件放 `frontend/src/components/runtime/`。
+17. Memory candidate 必须引用 evaluation/observation/evidence ids，并只把高置信度、目标相关事实喂给 planner。
+18. SSE 或 run detail 查询必须能读取 runtime events；Task.execution_log 继续保留兼容快照。
+19. 添加或更新 Golden Tasks failure matrix，覆盖 API、UI、HITL、Memory 的主要失败类型。
+20. 添加数据库 migration tests 和前端 source tests。
+21. 全程 redaction，不能把 token/cookie/header secret 写入 observation/evidence/memory。
 
 不要做：
 - 不要删除 legacy 字段。
@@ -523,12 +656,18 @@ frontend/src/components/runtime/
 - 不要把 RAG 当成主要智能来源。
 - 不要只修一个 golden case。
 - 不要提交未通过测试的中间状态。
+- 不要把 React 版 shadcn/ui 组件复制进 Vue 项目。
+- 不要把业务组件写进 `frontend/src/components/ui`。
+- 不要引入另一个大型 UI 框架来和 shadcn-vue 混用。
 
 验收：
 - uv run pytest 全量通过。
+- cd frontend && npm run build 通过。
 - 新 migration tests 通过。
 - Golden Tasks 能证明 runtime v1 的 Action -> ToolCall -> Observation -> Evaluation 闭环。
 - Run Detail 页面源码测试证明 UI 使用 runtime events。
+- Run Detail 页面源码测试证明 Runtime Workbench 使用 shadcn-vue `components/ui` 基础组件。
+- frontend/components.json 存在，并且基础组件已生成到 frontend/src/components/ui。
 - 最终提交一次或多次 commit，并在最终回复中列出 commit hash、迁移文件、主要修改文件、测试结果和当前 git status。
 ```
 
