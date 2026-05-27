@@ -4317,9 +4317,9 @@ def test_api_runner_crud_body_prefix_keeps_schema_numeric_code_fields() -> None:
 
     assert "dictCode" not in body
     assert "createTime" not in body
+    assert "params" not in body
     assert body["dictLabel"] == "TestClaw_data_1"
     assert body["dictSort"] == 1
-    assert body["params"]["key"] == "TestClaw_data_1"
 
 
 @pytest.mark.asyncio
@@ -4351,15 +4351,15 @@ async def test_api_runner_synthesizes_safe_crud_actions_when_model_falls_back_to
         async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
             calls.append({"method": method, "url": url, **kwargs})
             if method == "POST":
-                assert kwargs["json"]["name"].startswith("TestClaw_brands_")
+                assert kwargs["json"]["name"].startswith("TC_brands_")
                 return FakeResponse({"code": 200, "data": {"id": 91, "name": kwargs["json"]["name"]}})
             if url.endswith("/brands/list"):
-                return FakeResponse({"code": 200, "rows": [{"id": 91, "name": "TestClaw_brands_1"}]})
+                return FakeResponse({"code": 200, "rows": [{"id": 91, "name": "TC_brands_1"}]})
             if method == "GET" and url.endswith("/brands/91"):
-                return FakeResponse({"code": 200, "data": {"id": 91, "name": "TestClaw_brands_1"}})
+                return FakeResponse({"code": 200, "data": {"id": 91, "name": "TC_brands_1"}})
             if method == "PUT":
                 assert kwargs["json"]["id"] == "91"
-                assert kwargs["json"]["name"].startswith("TestClaw_brands_")
+                assert kwargs["json"]["name"].startswith("TC_brands_")
                 return FakeResponse({"code": 200, "data": kwargs["json"]})
             if method == "DELETE" and url.endswith("/brands/91"):
                 return FakeResponse({"code": 200, "data": None})

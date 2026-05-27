@@ -246,13 +246,15 @@ _CRUD_TEXT_FIELD_RE = re.compile(
     re.I,
 )
 _CRUD_ID_FIELD_RE = re.compile(r"(^id$|id$|Id$|ID$|Code$|code$)")
-_CRUD_SERVER_MANAGED_FIELD_RE = re.compile(
-    r"(^id$|id$|Id$|ID$|Code$|code$|"
-    r"createBy|createdBy|createTime|createdAt|createDept|"
+_CRUD_CREATE_ID_FIELD_RE = re.compile(r"(^id$|id$|Id$|ID$)")
+_CRUD_OPTIONAL_CODE_FIELD_RE = re.compile(r"(^code$|Code$|code$)")
+_CRUD_SERVER_METADATA_FIELD_RE = re.compile(
+    r"^(createBy|createdBy|createTime|createdAt|createDept|"
     r"updateBy|updatedBy|updateTime|updatedAt|"
     r"deleted|delFlag|version)$",
     re.I,
 )
+_CRUD_EXTENSION_METADATA_FIELD_RE = re.compile(r"^(params|searchValue)$", re.I)
 
 
 def _max_executed_requests() -> int | None:
@@ -1302,7 +1304,20 @@ def _objective_requests_crud_action_chain(state: AgentState, strategy: dict) -> 
 
 def _unique_prefix(resource: str) -> str:
     safe_resource = re.sub(r"[^A-Za-z0-9]+", "_", resource).strip("_") or "resource"
-    return f"TestClaw_{safe_resource}_{int(time.time() * 1000)}"
+    safe_resource = safe_resource[:10].strip("_") or "resource"
+    token = _base36_token(int(time.time() * 1000), width=6)
+    return f"TC_{safe_resource}_{token}"
+
+
+def _base36_token(value: int, *, width: int = 6) -> str:
+    alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+    value = abs(int(value))
+    chars: list[str] = []
+    while value:
+        value, remainder = divmod(value, 36)
+        chars.append(alphabet[remainder])
+    token = "".join(reversed(chars or ["0"]))
+    return token[-width:].rjust(width, "0")
 
 
 def _schema_type_name(schema: dict | None) -> str | None:
@@ -1342,23 +1357,56 @@ def _is_schema_id_like_scalar(schema: dict | None) -> bool:
     return schema_type in {"integer", "number", "boolean"}
 
 
-def _strip_create_only_server_fields(body: dict, schema: dict | None, *, method: str) -> dict:
-    if str(method or "").upper() != "POST" or not isinstance(schema, dict):
+def _strip_crud_server_fields(body: dict, schema: dict | None, *, method: str) -> dict:
+    if str(method or "").upper() not in {"POST", "PUT", "PATCH"} or not isinstance(schema, dict):
         return body
     required = set(_body_required_fields({"request_body_schema": schema}))
     cleaned = dict(body)
     for key, value in list(cleaned.items()):
         prop_schema = _schema_child_property(schema, key)
-        if str(key) in required:
-            continue
-        if not _CRUD_SERVER_MANAGED_FIELD_RE.search(str(key)):
-            continue
-        if isinstance(value, (dict, list)):
-            continue
+        key_text = str(key)
         if prop_schema and prop_schema.get("writeOnly") is True:
+            continue
+
+        is_extension_metadata = (
+            _CRUD_EXTENSION_METADATA_FIELD_RE.search(key_text)
+            and isinstance(value, (dict, list))
+            and not _body_required_fields({"request_body_schema": prop_schema or {}})
+        )
+        is_server_metadata = bool(_CRUD_SERVER_METADATA_FIELD_RE.search(key_text))
+        is_create_id = (
+            str(method or "").upper() == "POST"
+            and _CRUD_CREATE_ID_FIELD_RE.search(key_text)
+        )
+        is_optional_code = (
+            str(method or "").upper() == "POST"
+            and key_text not in required
+            and _CRUD_OPTIONAL_CODE_FIELD_RE.search(key_text)
+        )
+        if not (is_extension_metadata or is_server_metadata or is_create_id or is_optional_code):
             continue
         cleaned.pop(key, None)
     return cleaned
+
+
+def _fit_crud_prefix(prefix: str, schema: dict | None) -> str:
+    max_length = None
+    min_length = None
+    if isinstance(schema, dict):
+        try:
+            max_length = int(schema.get("maxLength")) if schema.get("maxLength") is not None else None
+        except (TypeError, ValueError):
+            max_length = None
+        try:
+            min_length = int(schema.get("minLength")) if schema.get("minLength") is not None else None
+        except (TypeError, ValueError):
+            min_length = None
+    value = prefix
+    if max_length and max_length > 0 and len(value) > max_length:
+        value = value[:max_length]
+    if min_length and len(value) < min_length:
+        value = value + ("x" * (min_length - len(value)))
+    return value
 
 
 def _inject_unique_prefix(value, prefix: str, schema: dict | None = None):
@@ -1378,7 +1426,7 @@ def _inject_unique_prefix(value, prefix: str, schema: dict | None = None):
                 and (not prop_schema or _is_schema_string_field(prop_schema) or isinstance(item, str))
             )
             if can_prefix_field:
-                updated[key] = prefix if not prefix_applied else f"{prefix}_{str(key)}"
+                updated[key] = _fit_crud_prefix(prefix, prop_schema)
                 prefix_applied = True
             else:
                 updated[key] = _inject_unique_prefix(item, prefix, prop_schema)
@@ -1401,7 +1449,7 @@ def _body_for_crud_endpoint(endpoint: dict, *, method: str, resource: str, prefi
     )
     if isinstance(body, dict):
         schema = endpoint.get("request_body_schema") if isinstance(endpoint.get("request_body_schema"), dict) else None
-        body = _strip_create_only_server_fields(body, schema, method=method)
+        body = _strip_crud_server_fields(body, schema, method=method)
         body = _inject_unique_prefix(body, prefix, schema)
         if method in {"PUT", "PATCH"}:
             for key in list(body.keys()):
