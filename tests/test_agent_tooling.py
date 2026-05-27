@@ -117,6 +117,47 @@ def test_status_assertion_one_of_does_not_fallback_to_200() -> None:
     assert api_runner._status_matches("not-a-status", 200, {}) is False
 
 
+def test_api_runner_defers_path_param_details_until_list_ids_exist() -> None:
+    schema = [
+        {"method": "GET", "path": "/wms/warehouse/{id}", "path_params": [{"name": "id", "schema": {"type": "integer"}}]},
+        {"method": "GET", "path": "/wms/warehouse/list"},
+    ]
+
+    requests = api_runner._build_test_requests(
+        schema,
+        "https://wms.example.test/api",
+        {"Authorization": "Bearer token"},
+        "safe_read_only",
+    )
+    selected, _ = api_runner._select_requests_for_execution(
+        requests,
+        None,
+        source="test",
+    )
+
+    assert selected[0]["schema_path"] == "/wms/warehouse/list"
+    detail = next(request for request in selected if request["schema_path"] == "/wms/warehouse/{id}")
+    assert detail["url"] == "https://wms.example.test/api/wms/warehouse/{{warehouseId}}"
+    assert detail["depends_on"] == ["warehouseId"]
+    assert api_runner._missing_dependencies(detail, {}) == ["warehouseId"]
+    assert api_runner._missing_dependencies(detail, {"warehouseId": 7}) == []
+    assert api_runner._substitute_context(detail["url"], {"warehouseId": 7}).endswith("/wms/warehouse/7")
+
+
+def test_api_runner_extracts_resource_scoped_ids_from_list_response() -> None:
+    req = {
+        "label": "SMOKE GET /wms/warehouse/list",
+        "schema_path": "/wms/warehouse/list",
+    }
+    payload = {"code": 200, "rows": [{"id": 42, "warehouseName": "A"}], "total": 1}
+
+    updates = api_runner._dependency_context_updates_from_response(req, payload)
+
+    assert updates["id"] == 42
+    assert updates["warehouse.id"] == 42
+    assert updates["warehouseId"] == 42
+
+
 def test_mock_json_body_generation_uses_spring_datetime_strings() -> None:
     body = generate_mock_json_body(
         {
@@ -1840,6 +1881,124 @@ async def test_api_runner_extracts_and_injects_dependencies_with_tool_calls(monk
     assert api_result["failed"] == 0
     assert calls[1]["headers"]["Authorization"] == "Bearer chain-token"
     assert {"api.http_request", "api.extract_value", "api.inject_dependency", "api.schema_assert"} <= tool_names
+
+
+@pytest.mark.asyncio
+async def test_api_runner_derives_schema_path_param_from_prior_collection_response(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+            self.status_code = 200
+            self.text = json.dumps(payload)
+            self.headers = {"content-type": "application/json"}
+            self.content = self.text.encode()
+
+        def json(self) -> dict:
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            if url.endswith("/orders"):
+                return FakeResponse({"rows": [{"id": 42, "name": "SO-42"}]})
+            return FakeResponse({"id": 42, "name": "SO-42"})
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "api_execution_policy": "safe_read_only",
+            "parsed_api_schema": [
+                {
+                    "method": "GET",
+                    "path": "/orders/{id}",
+                    "path_params": [{"name": "id", "schema": {"type": "integer"}}],
+                    "response_status": "200",
+                },
+                {"method": "GET", "path": "/orders", "response_status": "200"},
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+    tool_names = {call["tool"] for call in result["tool_calls"]}
+
+    assert [call["url"] for call in calls] == [
+        "https://api.example.test/orders",
+        "https://api.example.test/orders/42",
+    ]
+    assert api_result["executed"] == 2
+    assert api_result["skipped"] == 0
+    assert api_result["passed"] == 2
+    assert "https://api.example.test/orders/1" not in [call["url"] for call in calls]
+    assert {"api.extract_value", "api.inject_dependency"} <= tool_names
+
+
+@pytest.mark.asyncio
+async def test_api_runner_skips_schema_path_param_when_no_prior_value(monkeypatch) -> None:
+    calls = []
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs):
+            calls.append({"method": method, "url": url, **kwargs})
+            raise AssertionError("path-param endpoint should be skipped before HTTP execution")
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "api_execution_policy": "safe_read_only",
+            "parsed_api_schema": [
+                {
+                    "method": "GET",
+                    "path": "/orders/{id}",
+                    "path_params": [{"name": "id", "schema": {"type": "integer"}}],
+                    "response_status": "200",
+                }
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+    skipped = api_result["results"][0]
+
+    assert calls == []
+    assert api_result["total"] == 1
+    assert api_result["executed"] == 0
+    assert api_result["skipped"] == 1
+    assert api_result["failed"] == 0
+    assert api_result["http_executed"] == 0
+    assert skipped["skip_type"] == api_runner.PATH_PARAM_UNRESOLVED_SKIP_TYPE
+    assert "合成占位值" in skipped["skip_reason"]
+    assert "/orders/1" not in skipped["url"]
 
 
 @pytest.mark.asyncio

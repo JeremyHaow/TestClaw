@@ -55,6 +55,7 @@ API_EXECUTION_POLICIES = {
 }
 BINARY_RESPONSE_PREVIEW = "Binary or non-text response omitted from execution log"
 SAFE_WRITE_BLOCK_SKIP_TYPE = "safe_write_gate_blocked"
+PATH_PARAM_UNRESOLVED_SKIP_TYPE = "path_param_unresolved"
 SAFE_WRITE_BLOCK_REASON = (
     "write_allowed 策略仍需通过安全写入闸门；当前请求看起来会修改业务数据，"
     "且没有被识别为登录、验证码、导出/下载或鉴权负向探测，因此未执行。"
@@ -468,20 +469,92 @@ def _mark_assertions_advisory(assertion_results: list[dict], reason: str) -> Non
         assertion_result["reason"] = reason
 
 
-def _resolve_path_params(url: str, endpoint: dict) -> str:
+def _path_param_names(url: str, endpoint: dict) -> list[str]:
+    names: list[str] = []
+    for param in endpoint.get("path_params") or []:
+        if isinstance(param, dict) and param.get("name"):
+            names.append(str(param["name"]))
+    for match in _OPENAPI_PATH_PARAM_RE.finditer(url or ""):
+        name = match.group(1)
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def _path_param_def(endpoint: dict, name: str) -> dict:
+    for param in endpoint.get("path_params") or []:
+        if isinstance(param, dict) and str(param.get("name") or "") == name:
+            return param
+    return {}
+
+
+def _identifier_tokens(value: str) -> list[str]:
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(value or ""))
+    spaced = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", spaced)
+    return [token.lower() for token in re.split(r"[^A-Za-z0-9]+", spaced) if token]
+
+
+def _camel_identifier(tokens: list[str]) -> str:
+    if not tokens:
+        return ""
+    return tokens[0] + "".join(token[:1].upper() + token[1:] for token in tokens[1:])
+
+
+def _singular_token(token: str) -> str:
+    if len(token) > 3 and token.endswith("ies"):
+        return f"{token[:-3]}y"
+    if len(token) > 1 and token.endswith("s"):
+        return token[:-1]
+    return token
+
+
+def _path_param_schema_value(param: dict):
+    for key in ("example", "default"):
+        if key in param and param.get(key) is not None:
+            return param.get(key)
+    enum_values = param.get("enum")
+    if not enum_values and isinstance(param.get("schema"), dict):
+        enum_values = param["schema"].get("enum")
+    if isinstance(enum_values, list) and enum_values:
+        return enum_values[0]
+    return None
+
+
+def _path_param_context_key(path: str, name: str) -> str:
+    if name.lower() != "id":
+        return name
+    prefix = (path or "").split(f"{{{name}}}", 1)[0].rstrip("/")
+    resource = prefix.rsplit("/", 1)[-1] if prefix else ""
+    if not resource:
+        return name
+    return f"{resource}Id"
+
+
+def _path_param_dependency_keys(path: str, endpoint: dict) -> list[str]:
+    keys: list[str] = []
+    for name in _path_param_names(path, endpoint):
+        if _path_param_schema_value(_path_param_def(endpoint, name)) is not None:
+            continue
+        key = _path_param_context_key(path, name)
+        if key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _resolve_path_params(url: str, endpoint: dict, *, unresolved_as_dependency: bool = False) -> str:
     """Replace {param} placeholders in URL with example values from schema."""
-    import re
-    path_params = endpoint.get("path_params", [])
-    if not path_params:
-        # Fallback: replace any {param} with a generic value
-        return re.sub(r"\{(\w+)\}", "1", url)
-    for param in path_params:
-        name = param.get("name", "")
+    for name in _path_param_names(url, endpoint):
         if not name:
             continue
-        # Use example value if available, otherwise generate from type
-        example = param.get("example")
+        # Execution callers pass unresolved_as_dependency=True so detail endpoints
+        # are blocked until a real upstream value is available.
+        param = _path_param_def(endpoint, name)
+        example = _path_param_schema_value(param)
         if example is None:
+            if unresolved_as_dependency:
+                example = f"{{{{{_path_param_context_key(url, name)}}}}}"
+                url = url.replace(f"{{{name}}}", str(example))
+                continue
             schema_type = param.get("schema", {}).get("type") or param.get("type", "string")
             if schema_type in ("integer", "int"):
                 example = 1
@@ -493,7 +566,13 @@ def _resolve_path_params(url: str, endpoint: dict) -> str:
                 example = "1"
         url = url.replace(f"{{{name}}}", str(example))
     # Catch any remaining unresolved params
-    url = re.sub(r"\{(\w+)\}", "1", url)
+    if unresolved_as_dependency:
+        url = _OPENAPI_PATH_PARAM_RE.sub(
+            lambda match: f"{{{{{_path_param_context_key(url, match.group(1))}}}}}",
+            url,
+        )
+    else:
+        url = _OPENAPI_PATH_PARAM_RE.sub("1", url)
     return url
 
 
@@ -729,6 +808,12 @@ def _status_matches(expected_status, http_status: int, payload) -> bool:
 
 _JSON_PATH_TOKEN_RE = re.compile(r"([A-Za-z0-9_\-]+)|\[(\d+)\]")
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z0-9_.\-]+)\s*\}\}")
+_OPENAPI_PATH_PARAM_RE = re.compile(r"(?<!\{)\{([A-Za-z0-9_\-]+)\}(?!\})")
+_ID_FIELD_RE = re.compile(r"(^id$|id$|uuid$)", re.I)
+_SENSITIVE_DEPENDENCY_FIELD_RE = re.compile(
+    r"(authorization|auth|api[_-]?key|captcha|cookie|csrf|mfa|otp|passwd|password|pwd|secret|session|token|xsrf)",
+    re.I,
+)
 
 
 def _json_path_get(payload, path_expr: str):
@@ -794,11 +879,170 @@ def _extract_specs(value) -> list[dict]:
     return []
 
 
+def _merge_depends_on(existing, required: list[str]) -> list[str]:
+    values: list[str] = []
+    if isinstance(existing, str):
+        values.append(existing)
+    elif isinstance(existing, list):
+        values.extend(str(item) for item in existing if item)
+    for item in required:
+        if item and item not in values:
+            values.append(item)
+    return values
+
+
+def _add_path_dependency_metadata(request: dict, dependencies: list[str]) -> dict:
+    if not dependencies:
+        return request
+    request["depends_on"] = _merge_depends_on(request.get("depends_on"), dependencies)
+    request["path_param_dependencies"] = list(dependencies)
+    return request
+
+
 def _missing_dependencies(req: dict, context: dict[str, object]) -> list[str]:
     depends_on = req.get("depends_on") or []
     if isinstance(depends_on, str):
         depends_on = [depends_on]
-    return [str(name) for name in depends_on if str(name) not in context]
+    path_dependencies = req.get("path_param_dependencies") or []
+    if isinstance(path_dependencies, str):
+        path_dependencies = [path_dependencies]
+    required = [str(name) for name in [*depends_on, *path_dependencies] if str(name)]
+    missing: list[str] = []
+    for name in required:
+        if name not in context and name not in missing:
+            missing.append(name)
+    return missing
+
+
+def _missing_dependency_skip(req: dict, missing: list[str]) -> tuple[str, str | None]:
+    path_dependencies = req.get("path_param_dependencies") or []
+    if isinstance(path_dependencies, str):
+        path_dependencies = [path_dependencies]
+    path_missing = [name for name in missing if name in {str(item) for item in path_dependencies}]
+    if path_missing:
+        return (
+            "缺少可用于路径参数 "
+            f"{', '.join(path_missing)} 的上游列表/搜索响应值，未发送合成占位值。",
+            PATH_PARAM_UNRESOLVED_SKIP_TYPE,
+        )
+    return f"缺少上游提取变量：{', '.join(missing)}", None
+
+
+def _scalar_dependency_value(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _iter_dependency_objects(payload, *, max_items: int = 80):
+    stack = [payload]
+    seen = 0
+    while stack and seen < max_items:
+        current = stack.pop(0)
+        seen += 1
+        if isinstance(current, dict):
+            yield current
+            preferred_children = []
+            other_children = []
+            for key, value in current.items():
+                if key in {"rows", "records", "list", "items", "data"}:
+                    preferred_children.append(value)
+                elif isinstance(value, (dict, list)):
+                    other_children.append(value)
+            stack = preferred_children + other_children + stack
+        elif isinstance(current, list):
+            stack = list(current[:max_items]) + stack
+
+
+def _resource_key_from_path(path: str) -> str | None:
+    collection_markers = {
+        "all",
+        "find",
+        "index",
+        "list",
+        "lookup",
+        "options",
+        "page",
+        "pages",
+        "query",
+        "search",
+        "select",
+        "tree",
+    }
+    segments = [
+        segment
+        for segment in (path or "").split("/")
+        if segment and not segment.startswith("{") and segment.lower() not in collection_markers | {"detail", "details"}
+    ]
+    if not segments:
+        return None
+    return segments[-1]
+
+
+def _resource_id_aliases(resource: str, key: str) -> list[str]:
+    aliases = [f"{resource}.{key}"]
+    if key.lower() != "id":
+        return aliases
+
+    tokens = _identifier_tokens(resource)
+    resource_alias = _camel_identifier(tokens)
+    for alias in (
+        f"{resource}Id",
+        f"{resource_alias}Id" if resource_alias else "",
+        f"{tokens[-1]}Id" if tokens else "",
+        f"{_singular_token(tokens[-1])}Id" if tokens else "",
+    ):
+        if alias and alias not in aliases:
+            aliases.append(alias)
+    return aliases
+
+
+def _dependency_context_updates_from_response(req: dict, payload) -> dict[str, object]:
+    updates: dict[str, object] = {}
+    path = str(req.get("schema_path") or req.get("url") or "")
+    resource = _resource_key_from_path(path)
+    for obj in _iter_dependency_objects(payload):
+        for key, value in obj.items():
+            if _SENSITIVE_DEPENDENCY_FIELD_RE.search(str(key)):
+                continue
+            scalar = _scalar_dependency_value(value)
+            if scalar is None or not _ID_FIELD_RE.search(str(key)):
+                continue
+            updates.setdefault(str(key), scalar)
+            if resource:
+                for alias in _resource_id_aliases(resource, str(key)):
+                    updates.setdefault(alias, scalar)
+        if updates:
+            break
+    return updates
+
+
+def _record_dependency_context_from_response(
+    state: AgentState,
+    req: dict,
+    payload,
+    context: dict[str, object],
+) -> None:
+    updates = {
+        key: value
+        for key, value in _dependency_context_updates_from_response(req, payload).items()
+        if key not in context
+    }
+    if not updates:
+        return
+    context.update(updates)
+    record_tool_call(
+        state,
+        tool_name="api.extract_value",
+        layer="api",
+        status="success",
+        input_summary={"label": req.get("label"), "source": "response_dependency_context"},
+        output_summary={"names": sorted(updates.keys())},
+    )
 
 
 def _evaluate_status_assertion(assertion: dict, resp_status: int, payload) -> dict:
@@ -1158,9 +1402,11 @@ def _build_case_test_requests(
         if not tmpl:
             continue
         method = str(tmpl.get("method", "GET")).upper()
-        url = tmpl.get("url") or tmpl.get("path") or tmpl.get("endpoint") or ""
-        url = _build_request_url(base_url, url)
-        url = _resolve_path_params(url, {"path_params": tmpl.get("path_params", [])})
+        raw_url = tmpl.get("url") or tmpl.get("path") or tmpl.get("endpoint") or ""
+        path_endpoint = {"path_params": tmpl.get("path_params", [])}
+        path_dependencies = _path_param_dependency_keys(raw_url, path_endpoint)
+        url = _build_request_url(base_url, raw_url)
+        url = _resolve_path_params(url, path_endpoint, unresolved_as_dependency=True)
         if not url:
             continue
         if method in WRITE_API_METHODS and not write_allowed:
@@ -1247,6 +1493,7 @@ def _build_case_test_requests(
             "assertions": case.get("assertions") or tmpl.get("assertions") or [],
             "request_body_source": "faker_json_schema" if body_generation else "case_template",
         }
+        _add_path_dependency_metadata(request, path_dependencies)
         if _is_auth_negative_probe(request):
             request["headers"] = _strip_auth_like_headers(request_headers)
         if body_generation:
@@ -1288,6 +1535,41 @@ def _safe_schema_subset(api_schema: list[dict], limit: int | None) -> list[dict]
     return subset
 
 
+def _request_execution_priority(request: dict) -> tuple[int, int]:
+    if request.get("skip_reason"):
+        return (4, 0)
+    path = str(request.get("schema_path") or request.get("url") or "").lower()
+    if request.get("depends_on") or request.get("path_param_dependencies"):
+        return (3, 0)
+    if request.get("extract"):
+        return (0, 0)
+    if any(
+        marker in path
+        for marker in (
+            "/all",
+            "/find",
+            "/index",
+            "/list",
+            "/lookup",
+            "/options",
+            "/page",
+            "/pages",
+            "/query",
+            "/search",
+            "/select",
+            "/tree",
+        )
+    ):
+        return (0, 0)
+    if str(request.get("method") or "").upper() in SAFE_API_METHODS:
+        return (1, 0)
+    return (2, 0)
+
+
+def _order_requests_for_dependencies(requests: list[dict]) -> list[dict]:
+    return [request for _, request in sorted(enumerate(requests), key=lambda item: (_request_execution_priority(item[1]), item[0]))]
+
+
 def _select_requests_for_execution(
     requests: list[dict],
     execution_budget: int | None,
@@ -1296,6 +1578,7 @@ def _select_requests_for_execution(
     fallback_reason: str | None = None,
     coverage_metadata: dict | None = None,
 ) -> tuple[list[dict], dict]:
+    requests = _order_requests_for_dependencies(requests)
     candidate_total = len(requests)
     if execution_budget is None or candidate_total <= execution_budget:
         selected = list(requests)
@@ -1429,22 +1712,28 @@ def _build_test_requests(
     write_allowed = _policy_allows_write(policy)
 
     for endpoint in api_schema:
-        path = endpoint.get("path", "")
+        raw_path = endpoint.get("path", "")
         method = endpoint.get("method", "GET").upper()
-        path = _resolve_path_params(path, endpoint)
+        path_dependencies = _path_param_dependency_keys(raw_path, endpoint)
+        path = _resolve_path_params(raw_path, endpoint, unresolved_as_dependency=True)
         full_url = _build_request_url(base_url, path)
         if not full_url:
             continue
+
+        def append_request(request: dict) -> None:
+            _add_path_dependency_metadata(request, path_dependencies)
+            requests.append(request)
+
         is_safe_method = method in SAFE_API_METHODS
         auth_required = _is_endpoint_auth_required(endpoint)
 
         if method in WRITE_API_METHODS and not write_allowed:
-            requests.append({
+            append_request({
                 "label": f"SKIPPED_WRITE {method} {path}",
                 "method": method,
                 "url": full_url,
                 "schema_method": method,
-                "schema_path": path,
+                "schema_path": raw_path,
                 "headers": {},
                 "body": None,
                 "expected_status": None,
@@ -1462,12 +1751,12 @@ def _build_test_requests(
                 expected_status=_parse_status(endpoint.get("response_status", "200"), default=200),
             )
             if safe_write_reason:
-                requests.append({
+                append_request({
                     "label": f"BLOCKED_WRITE {method} {path}",
                     "method": method,
                     "url": full_url,
                     "schema_method": method,
-                    "schema_path": path,
+                    "schema_path": raw_path,
                     "headers": {},
                     "body": None,
                     "expected_status": None,
@@ -1485,12 +1774,12 @@ def _build_test_requests(
         # Skip file upload endpoints entirely (can't test without real files)
         is_upload = "multipart" in content_type.lower() or "form-data" in content_type.lower()
         if is_upload:
-            requests.append({
+            append_request({
                 "label": f"SKIPPED_UPLOAD {method} {path}",
                 "method": method,
                 "url": full_url,
                 "schema_method": method,
-                "schema_path": path,
+                "schema_path": raw_path,
                 "headers": {},
                 "body": None,
                 "expected_status": None,
@@ -1507,13 +1796,15 @@ def _build_test_requests(
         )
 
         if auth_required and not auth_available:
+            auth_probe_path = _resolve_path_params(raw_path, endpoint)
+            auth_probe_url = _build_request_url(base_url, auth_probe_path) or full_url
             if is_safe_method:
                 requests.append({
-                    "label": f"UNAUTHORIZED {method} {path}",
+                    "label": f"UNAUTHORIZED {method} {auth_probe_path}",
                     "method": method,
-                    "url": full_url,
+                    "url": auth_probe_url,
                     "schema_method": method,
-                    "schema_path": path,
+                    "schema_path": raw_path,
                     "headers": {},
                     "body": None,
                     "query_params": query_params,
@@ -1521,11 +1812,11 @@ def _build_test_requests(
                     "category": "AUTH",
                 })
             requests.append({
-                "label": f"SKIPPED_AUTH {method} {path}",
+                "label": f"SKIPPED_AUTH {method} {auth_probe_path}",
                 "method": method,
-                "url": full_url,
+                "url": auth_probe_url,
                 "schema_method": method,
-                "schema_path": path,
+                "schema_path": raw_path,
                 "headers": {},
                 "body": None,
                 "expected_status": None,
@@ -1543,7 +1834,7 @@ def _build_test_requests(
             "method": method,
             "url": full_url,
             "schema_method": method,
-            "schema_path": path,
+            "schema_path": raw_path,
             "headers": smoke_headers,
             "body": req_body if not is_upload else None,
             "query_params": query_params,
@@ -1556,7 +1847,7 @@ def _build_test_requests(
         }
         if body_generation:
             smoke_request["mock_body_generation"] = body_generation
-        requests.append(smoke_request)
+        append_request(smoke_request)
 
         # 2. Missing required fields (POST/PUT/PATCH only)
         if (
@@ -1567,12 +1858,12 @@ def _build_test_requests(
         ):
             for field in required_fields[:3]:
                 broken_body = {k: v for k, v in req_body.items() if k != field}
-                requests.append({
+                append_request({
                     "label": f"MISSING_FIELD {method} {path} (no {field})",
                     "method": method,
                     "url": full_url,
                     "schema_method": method,
-                    "schema_path": path,
+                    "schema_path": raw_path,
                     "headers": {**default_headers, "Content-Type": content_type},
                     "body": broken_body,
                     "expected_status": [400, 422],
@@ -1582,12 +1873,12 @@ def _build_test_requests(
 
         # 3. Empty body for POST/PUT/PATCH
         if method in ("POST", "PUT", "PATCH"):
-            requests.append({
+            append_request({
                 "label": f"EMPTY_BODY {method} {path}",
                 "method": method,
                 "url": full_url,
                 "schema_method": method,
-                "schema_path": path,
+                "schema_path": raw_path,
                 "headers": {**default_headers, "Content-Type": "application/json"},
                 "body": {},
                 "expected_status": [400, 422],
@@ -1597,12 +1888,12 @@ def _build_test_requests(
 
         # 4. Unauthorized test
         if auth_required:
-            requests.append({
+            append_request({
                 "label": f"UNAUTHORIZED {method} {path}",
                 "method": method,
                 "url": full_url,
                 "schema_method": method,
-                "schema_path": path,
+                "schema_path": raw_path,
                 "headers": {"Content-Type": "application/json"} if req_body is not None else {},
                 "body": req_body,
                 "query_params": query_params,
@@ -1628,12 +1919,12 @@ def _build_test_requests(
                 else:
                     bad_body[k] = v
             if bad_body != req_body:
-                requests.append({
+                append_request({
                     "label": f"INVALID_TYPE {method} {path}",
                     "method": method,
                     "url": full_url,
                     "schema_method": method,
-                    "schema_path": path,
+                    "schema_path": raw_path,
                     "headers": {**default_headers, "Content-Type": content_type},
                     "body": bad_body,
                     "expected_status": [400, 422],
@@ -1977,7 +2268,10 @@ async def run(state: AgentState) -> AgentState:
                 continue
             missing_dependencies = _missing_dependencies(req, dependency_context)
             if missing_dependencies:
-                reason = f"缺少上游提取变量：{', '.join(missing_dependencies)}"
+                reason, skip_type = _missing_dependency_skip(req, missing_dependencies)
+                skipped_req = dict(req)
+                if skip_type:
+                    skipped_req["skip_type"] = skip_type
                 record_tool_call(
                     state,
                     tool_name="api.inject_dependency",
@@ -1990,7 +2284,7 @@ async def run(state: AgentState) -> AgentState:
                     },
                     output_summary={"reason": reason},
                 )
-                results.append(_make_skipped_result(req, reason))
+                results.append(_make_skipped_result(skipped_req, reason))
                 _update_api_execution_state(
                     state,
                     results,
@@ -2196,6 +2490,18 @@ async def run(state: AgentState) -> AgentState:
 
                 expected_status = req.get("expected_status", 200)
                 category = req.get("category", "SMOKE")
+                payload_status = _payload_status_code(payload)
+                if (
+                    category == "SMOKE"
+                    and 200 <= resp.status_code < 300
+                    and (payload_status is None or 200 <= payload_status < 300)
+                ):
+                    _record_dependency_context_from_response(
+                        state,
+                        req,
+                        payload,
+                        dependency_context,
+                    )
 
                 # Determine pass/fail
                 if category == "SMOKE":
