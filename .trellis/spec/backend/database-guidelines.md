@@ -170,6 +170,7 @@ await db.commit()
 - Provider create/update and `/providers/{id}/set-default` must keep at most one active default model per role (`planner`, `coder`, `vision`). Duplicate role defaults can break runtime model lookup and make UI defaults misleading.
 - Provider connection tests must redact both success payload summaries and error details before returning them to the UI. Upstream provider errors may echo API keys, bearer tokens, passwords, or request bodies.
 - Asset pages may hand off document, environment, test-case, and quality-memory context to Agent Plan through route query parameters only after frontend redaction. Agent Plan must consume those query fields once, submit them through the normal planner path, and clear the consumed query keys. Environment handoff may include variable keys but never variable values.
+- Deleting a `TestCase` must also remove its id from every `TestSuite.test_case_ids` array that referenced it. Suite consistency is a single-transaction contract: read all suites, prune the deleted id from each `test_case_ids`, then delete the `TestCase` row. Leaving a stale id in `test_case_ids` makes subsequent suite execution try to load a missing case and silently underreport coverage.
 - UI actions must not display fake capabilities: do not show arbitrary headers for providers if the backend cannot store them, do not show a global environment run action without a base URL, and do not label knowledge as vector-ready unless `embedding_available=true`.
 
 ### 4. Validation & Error Matrix
@@ -181,6 +182,7 @@ await db.commit()
 - `PUT /environments/{id}` with `variables.TOKEN` equal to the masked value returned by `GET /environments` -> keep the existing encrypted secret.
 - `/providers/{id}/test` upstream response contains `Bearer raw-token`, `api_key=raw-key`, or `password=raw-pass` -> response `model_response` / `detail` contains only redacted values.
 - Asset handoff query contains `from=asset`, `context=...`, and optional target/source metadata -> Agent Plan creates a normal session/turn, then removes those query keys.
+- `DELETE /test-cases/{id}` -> the deleted id is removed from every `TestSuite.test_case_ids` before the case row is deleted; subsequent `GET /test-cases/suites/{suite_id}` returns the remaining ids only.
 
 ### 5. Good/Base/Bad Cases
 
@@ -203,6 +205,7 @@ await db.commit()
 - Regression: provider create/update with a role default clears conflicting defaults for that role.
 - Regression: provider connection-test responses redact provider error text and model response text.
 - Regression: asset handoff redacts secret-looking context, omits environment variable values, and Agent Plan consumes query context only once.
+- Regression: `tests/test_management_api.py::test_deleting_test_case_removes_it_from_suites` deletes a TestCase referenced by at least one suite and asserts the id disappears from every suite's `test_case_ids`.
 - Frontend build/type-check: provider, environment, case asset, and knowledge pages compile against the real API contracts.
 
 ### 7. Wrong vs Correct
@@ -615,6 +618,8 @@ rows = await db.execute(select(sampled.c.id, sampled.c.target_url, sampled.c.sta
 - Generated visibility pseudo-commands `assert_visible`, `assert-visible`, `assertvisible`, and `ui.assert_visible` become snapshot executions plus in-process accessibility text checks. `text=...` and `/regex-like/` wrappers are unwrapped. Simple selector targets must be mapped to accessible snapshot terms when possible (`h1`-`h6` -> `heading`, `a` -> `link`, `input`/`textarea` -> `textbox`, `select` -> `combobox`); class/id/attribute selectors that cannot be proven from the accessibility snapshot become snapshot evidence instead of blocking product failures.
 - `run-code` must be executable in the `playwright-cli` dialect. Bare JavaScript snippets are wrapped as `async page => { ... }`; `async ({ page }) =>` is normalized to `async page =>`. Diagnostic snippets that only log information and reference transient snapshot refs such as `page.locator('[ref=e6]')` are converted to snapshot evidence, because playwright-cli refs are not stable Playwright JS selectors.
 - Semantic `click`, `fill`, and `select` commands may resolve model-friendly text targets to current snapshot refs. If a `click "label"` target does not text-match but the current snapshot has exactly one clickable `link` or `button`, resolve to that single ref; if multiple clickable targets exist, do not guess.
+- Structured `click_text` / `fill_text` actions are the primary text-target UI command form. `app/tools/playwright_skill.py` compiles them into semantic playwright-cli `click`/`fill` invocations with `normalization` evidence; `click_text` requires `text` and rejects empty/invalid payloads, `fill_text` requires both `text` and `value`. `app/agent/prompts.py` instructs the model to prefer `click_text`/`fill_text` (or text-form `click "label"`/`fill "label" "value"`) over raw `[ref=...]` so that stale snapshot refs from prior turns do not leak into new commands. `run-code`, `evaluate`, `eval`, `wait`, `sleep`, `assert`, and `expect` remain forbidden in UI replanning.
+- `ui_runner.py` must merge tool result outputs with the raw tool payload before exposing them downstream: `{**tool_result.outputs, **tool_result.raw}` when `tool_result.raw` is a dict, otherwise `tool_result.outputs`. Without this merge, runs against tools whose `raw` payload omits `status`/`stdout`/`stderr` lose their command evidence and the case fails for reasons unrelated to the product.
 - Auto runs must execute API first when an API schema, API cases, or `base_url_override` is available, then continue to UI when a UI URL is available.
 - The reporter must build result counts from `api_execution_result` and `ui_execution_result`, not from draft plans or LLM-generated summaries.
 
@@ -626,6 +631,9 @@ rows = await db.execute(select(sampled.c.id, sampled.c.target_url, sampled.c.sta
 - Generated `run-code "console.log('x');"` -> normalize to `run-code "async page => { console.log('x'); }"`.
 - Generated diagnostic `run-code "const link = await page.locator('[ref=e6]'); console.log(...);"` -> convert to snapshot evidence; do not execute invalid transient-ref JavaScript.
 - Generated `click "More information..."` on a page whose snapshot has a single clickable link `Learn more [ref=e6]` -> resolve to `click e6`; the same command on a page with multiple clickable targets remains unresolved and may fail/replan.
+- Structured `{"type": "click_text", "text": "提交"}` with empty `text` -> blocked with `risk="invalid"`; same shape with non-empty text -> compiled to semantic `click "提交"` with `normalization` recorded.
+- Structured `{"type": "fill_text", "text": "用户名", "value": "alice"}` -> compiled to semantic `fill "用户名" "alice"`; missing `value` -> blocked with `risk="invalid"`.
+- Tool result with `raw={"stdout": "..."}` and `outputs={"status": 0}` -> downstream consumers see merged `{status: 0, stdout: "..."}`; tool result with `raw=None` -> downstream sees `outputs` only and does not crash.
 - Generated `assert snapshot contains "Dashboard"` -> execute `snapshot`, fail only if actual snapshot text is missing `Dashboard`.
 - Generated `screenshot shared.png` -> save to the runner-owned case evidence path.
 - API schema/base URL available but no API execution -> final report recommendation: verify schema/base URL.
@@ -642,6 +650,8 @@ rows = await db.execute(select(sampled.c.id, sampled.c.target_url, sampled.c.sta
 - Unit: command normalizer converts `wait`, `assert snapshot contains`, and `screenshot <name>`.
 - Unit: auto graph routing sends URL + `base_url_override` runs through API before UI.
 - Async unit: UI runner writes different screenshot paths for different cases.
+- Unit: `playwright_skill.compile(...)` returns blocked specs for invalid `click_text`/`fill_text` payloads and semantic playwright-cli text-form commands for valid ones; regression coverage lives in `tests/test_e2e_polish_regressions.py`.
+- Async unit: `ui_runner` merges `tool_result.outputs` with `tool_result.raw` when `raw` is a dict so the resulting evidence still has `status`/`stdout`/`stderr` even when one of the two payloads omits them.
 - Unit: reporter uses actual API/UI execution counts and does not report draft-only API plans as execution.
 - Frontend build: run detail page compiles with UI case/count fields.
 
@@ -832,6 +842,71 @@ run_agent_task.delay(
 )
 ```
 
+## Scenario: Frontend Sensitive Text Redaction URL Boundary
+
+### 1. Scope / Trigger
+
+- Trigger: asset pages (Documents, Environments, Test Cases, Quality Memory) redact their handoff payload on the frontend before pushing context into Agent Plan or a run payload.
+- Why code-spec depth is required: a too-greedy URL regex in the redactor silently corrupts the run target URL — the user sees a successful plan creation but the agent run targets a broken host.
+- Applies to `frontend/src/lib/assetHandoff.ts`, `frontend/src/pages/QualityMemoryPage.vue`, `frontend/src/pages/AgentPlanPage.vue`, `frontend/src/pages/DocumentsPage.vue`, `frontend/src/pages/EnvironmentsPage.vue`, and any future page that hands off raw OpenAPI / quality-memory / environment text into a plan or run.
+
+### 2. Signatures
+
+- Shared exports:
+  ```ts
+  export const REDACTED_VALUE = '[REDACTED]'
+  export function redactSensitiveText(value: unknown, limit = 1400): string
+  ```
+- URL match pattern (must allow JSON/punctuation boundaries):
+  ```ts
+  const URL_CANDIDATE_PATTERN = /https?:\/\/[^\s"'`<>\[\]{}),，。;；]+/gi
+  ```
+
+### 3. Contracts
+
+- `redactSensitiveText` and any per-page wrapper must use the shared `URL_CANDIDATE_PATTERN`. URL matching must stop before whitespace, ASCII or full-width quotes, backticks, angle brackets, square brackets, curly braces, parentheses, ASCII or full-width commas, ASCII or full-width semicolons, and the full-width period `。`.
+- Pages handing off content into Agent Plan or a run payload must import the shared `redactSensitiveText` from `frontend/src/lib/assetHandoff.ts`. Duplicating a local URL regex is forbidden because it will drift from the shared boundary contract.
+- `redactUrl(value)` may only modify URL components it can parse with `new URL(value)`. If parsing fails, the original token must be returned unchanged. Redaction must never re-encode delimiters that belong to the surrounding JSON/text.
+- For raw OpenAPI handoff (`source = document.raw_content`), the boundary contract is what protects nested server URLs such as `"url":"http://127.0.0.1:18081/api"` from becoming `http://127.0.0.1:18081/api%22%7D`.
+
+### 4. Validation & Error Matrix
+
+- Input `Server is "http://127.0.0.1:18081/api"` -> URL token is `http://127.0.0.1:18081/api`; the trailing `"` is preserved.
+- Input `{"servers":[{"url":"http://127.0.0.1:18081/api"}]}` -> URL token is `http://127.0.0.1:18081/api`; trailing `"}]` characters are preserved so the surrounding JSON remains parseable.
+- Input with a full-width punctuation boundary `请访问 http://127.0.0.1:18081/api。` -> URL token stops before `。`.
+- Input with a sensitive query `https://api/example?token=abc` -> redacted as `https://api/example?token=[REDACTED]`; non-URL bytes around the URL are untouched.
+- Input that cannot be parsed by `new URL(...)` -> returned unchanged; never percent-encode quotes or braces.
+
+### 5. Good/Base/Bad Cases
+
+- Good: Documents handoff of raw OpenAPI JSON produces an Agent Plan whose `current_run_payload.source` still parses to JSON and whose server URL still points at `http://127.0.0.1:18081/api`.
+- Base: Quality Memory page wraps `redactSensitiveText` to apply a stricter character limit but reuses the shared implementation, so URL boundaries stay consistent.
+- Bad: a page copies the URL regex locally and uses `/https?:\/\/\S+/` -> URL match consumes `",` or `"}` and `redactUrl` percent-encodes those bytes, producing `api%22%7D`-style corrupted run targets.
+
+### 6. Tests Required
+
+- Unit: `tests/test_assets_frontend_source.py` asserts the `assetHandoff.ts` source uses the shared URL boundary pattern with the documented delimiter set.
+- Unit: `tests/test_quality_memory_frontend_source.py` asserts `QualityMemoryPage.vue` imports `redactSensitiveText` from `assetHandoff.ts` and does not declare a local URL regex.
+- Regression (Node-evaluated): redacting raw OpenAPI JSON containing `"url":"http://127.0.0.1:18081/api"` produces the same URL without `%22%7D` percent-encoded delimiters.
+- Frontend build: pages using the shared helper continue to compile and type-check.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```ts
+const URL_PATTERN = /https?:\/\/\S+/gi
+text = text.replace(URL_PATTERN, (url) => redactUrl(url))
+```
+
+#### Correct
+
+```ts
+import { redactSensitiveText } from '@/lib/assetHandoff'
+
+const safe = redactSensitiveText(rawDocumentText, CONTEXT_LIMIT)
+```
+
 ## Scenario: Authenticated UI Login Verification, Modality Gating, and Honest Run Progress
 
 ### 1. Scope / Trigger
@@ -1003,6 +1078,7 @@ progress = derive_from(workflow_steps, progress_events, current_step)
 - Suite dispatch must preserve selected `api_cases` and `ui_cases`; `tc_generator.py` must not replace them with generated cases.
 - Suite UI cases must carry a UI seed URL or equivalent `input_type="url"` metadata so `_after_api_runner(...)` can continue to the UI path.
 - Rerun must rebuild worker kwargs from `execution_log`, not only from the task row, because the task row does not store selected cases, setup/login instructions, safe custom headers, or URL role metadata.
+- Rerun dispatch must wrap `run_agent_task.delay(...)` in a try/except and fall back to a synchronous in-process run when Celery dispatch raises (broker down, worker offline, etc.). The fallback path must use the same `rerun_context` payload as the async dispatch so the rerun never gets stuck in `queued` because of a transient infrastructure failure.
 - Rerun header rehydration must drop sensitive header names and `[REDACTED]` placeholder values. It may preserve non-sensitive plain headers such as `X-Tenant` or `X-Trace-ID`, but must never replay `Authorization`, `Cookie`, `X-API-Key`, token-like headers, or redacted placeholders from stored logs.
 - Persisted `source_input` for pasted OpenAPI JSON must remain structurally parseable after redaction. Redact secret-bearing scalar values, but do not corrupt OpenAPI metadata such as `security: [{"Authorization": []}]` or `components.securitySchemes.Authorization`; rerun and preflight depend on parsing that stored source.
 
@@ -1016,6 +1092,7 @@ progress = derive_from(workflow_steps, progress_events, current_step)
 - Rerun with stored `api_cases`/`ui_cases` -> new worker task receives those exact cases.
 - Missing stored `source_input` but stored `ui_seed_url` -> rerun uses `ui_seed_url` as the source input fallback.
 - Rerun with stored `auth_headers.Authorization="[REDACTED]"` or old unredacted sensitive headers -> worker kwargs omit those headers.
+- Celery broker unavailable on `/runs/{id}/rerun` -> `run_agent_task.delay(...)` raises; the route logs `Celery dispatch failed on rerun: ..., running synchronously` and calls `_run_rerun_synchronously(db, new_task, rerun_context=rerun_context)`; the new task transitions out of `queued` without manual intervention. Regression: `tests/test_runs_detail_triage.py::test_rerun_runs_synchronously_when_celery_dispatch_fails`.
 - Stored OpenAPI `source_input` with `security: [{"Authorization": []}]` and a redacted auth header -> persisted `source_input` is still valid JSON and can be parsed for endpoints; the runtime auth header value remains redacted.
 
 ### 5. Good/Base/Bad Cases
@@ -1145,6 +1222,7 @@ payload = redact_sensitive_data({"source_input": source_input})
 - `use_prepared_context=true` means the runner restores browser state and opens the post-setup URL before executing the case.
 - `strip_preparation_steps=true` means generated `open entry`, form fill, submit, and setup screenshots are removed so the case starts from the prepared business context.
 - Login/setup validation cases must remain fresh-entry cases so negative login, empty credential, forgotten-password, captcha, or unauthorized checks still exercise the entry flow.
+- Public no-login UI targets must generate snapshot-derived business cases, not passive page-load or visit cases. `ui_test_planner.py` exposes `_build_public_business_cases(snapshot)`: when login is not required, the planner must populate business cases from the explored snapshot (clickable actions, controls, data regions, deep flow), filtering navigation-only links such as `Back to ...` from business-entry discovery. Stale snapshot refs from previous turns must be reset by emitting `goto` plus semantic `click_text`/`fill_text` actions and resolving refs from `target_action.text` against the current snapshot.
 - Suite-selected UI cases preserve user intent unless the case explicitly requests prepared context.
 - `playwright-cli` subprocess timeouts must kill the subprocess and drain output before returning a timeout result.
 - Tool calls must record context analysis and browser execution so Run Detail can show selected skills, tool counts, and per-case tool history.
@@ -1153,6 +1231,7 @@ payload = redact_sensitive_data({"source_input": source_input})
 
 - Verified setup + generated business case with repeated setup commands -> restore setup state, strip repeated setup, execute business action.
 - Verified setup + login failure validation case -> do not restore setup state; execute from entry page.
+- Public no-login target with explored snapshot containing both `Back to shop` and product action links -> `_build_public_business_cases(...)` skips the `Back to ...` return link and emits business cases for the substantive actions; cases start with `goto` plus semantic `click_text`/`fill_text` so prior-turn refs are reset.
 - Suite-selected UI case without explicit prepared context -> keep original command semantics.
 - LLM context analysis unavailable -> fallback to generic metadata-only rules and record a failed `planner.analyze_ui_execution_context` tool call.
 - `playwright-cli` command exceeds `PLAYWRIGHT_CLI_TIMEOUT_SECONDS` -> kill process, return `status_code=-1`, and continue/fail the case without leaving orphan node/chrome processes.
@@ -1169,6 +1248,7 @@ payload = redact_sensitive_data({"source_input": source_input})
 - Unit: tool registry does not include API chain skills for UI-only setup runs.
 - Unit: UI runner keeps login validation cases on the entry page even when setup context exists.
 - Unit: UI runner strips repeated setup commands for authenticated business cases.
+- Unit: `_build_public_business_cases(snapshot)` for a public no-login snapshot returns substantive business cases (not passive page-load) and excludes return navigation links such as `Back to ...`.
 - Integration: historical UI rerun records `ui_execution_context_plan`, `tool_summary`, screenshots, and succeeds when all executed cases pass.
 - Regression: `run_playwright_cli_command` timeout behavior must not leave long-lived command processes.
 

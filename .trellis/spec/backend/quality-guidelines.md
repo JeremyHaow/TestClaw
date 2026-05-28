@@ -1598,6 +1598,7 @@ export = await _build_run_triage_export(db, task, parsed, triage)
 - Supplemental instructions are appended to both `setup_instructions` and `login_instructions` for the new worker dispatch.
 - Active queued/running source runs require `cancel_current=true`; otherwise return `400` with a clear message.
 - When `cancel_current=true`, cancel the source run through the normal cancellation helper before creating the new queued run.
+- Assisted intervention dispatch must wrap `run_agent_task.delay(...)` in a try/except and fall back to a synchronous in-process run via `_run_rerun_synchronously(...)` when Celery dispatch raises. Reuse the same `rerun_context` payload (with appended setup/login instructions) so a broker outage cannot leave the new run stuck in `queued`.
 - Sensitive/redacted headers from stored execution logs must not be replayed. Supplemental instructions may contain credentials for the worker, but returned `TaskRead`, run detail, SSE, and persisted execution logs must pass through existing redaction helpers.
 - Header rehydration must skip any stored header whose name is sensitive, whose value contains `[REDACTED]`, or whose value would change under `redact_sensitive_text(...)`; only safe custom headers survive.
 - Redaction must cover Playwright-style `fill`/`type` commands targeting password/auth/session/captcha/MFA/OTP fields, because those commands may appear in login evidence, case assets, SSE snapshots, or legacy logs.
@@ -1610,6 +1611,7 @@ export = await _build_run_triage_export(db, task, parsed, triage)
 - Blank `supplemental_instructions` after trimming -> `400 supplemental_instructions is required`.
 - Source status `queued`/`running` and `cancel_current=false` -> `400` explaining that the run is still active and must be cancelled before assisted rerun.
 - Source status `queued`/`running` and `cancel_current=true` -> cancel the source run, preserve cancellation log keys, then create a queued assisted rerun.
+- Celery broker unavailable on `/runs/{id}/interventions` -> `run_agent_task.delay(...)` raises; the route logs `Celery dispatch failed on assisted intervention rerun: ..., running synchronously` and calls `_run_rerun_synchronously(db, new_task, rerun_context=rerun_context)`. Regression: `tests/test_runs_interventions.py::test_assisted_intervention_runs_synchronously_when_dispatch_fails`.
 - Source status not in `failed|bug_found|cancelled|queued|running` -> `400` explaining supported source states.
 - Stored `Authorization`, `Cookie`, token-like, API-key, or `[REDACTED]` headers -> omitted from worker header rehydration.
 - Supplemental text containing `password=...`, `captcha=...`, `otp=...`, bearer/basic tokens, cookies, sessions, or API keys -> raw value may be passed to the worker but must not appear in returned JSON or persisted/rendered execution logs.
@@ -1632,6 +1634,7 @@ export = await _build_run_triage_export(db, task, parsed, triage)
 - Detail: API auth skipped/401/403 blockers produce an API auth intervention reason.
 - Endpoint: assisted rerun creates a queued task and dispatches worker kwargs with appended setup/login instructions.
 - Endpoint: active run without `cancel_current` returns `400`; active run with `cancel_current=true` cancels then dispatches the assisted rerun.
+- Regression: assisted intervention path falls back to a synchronous in-process run when `run_agent_task.delay(...)` raises and still applies the appended setup/login context.
 - Regression: submitted supplemental secrets do not appear in endpoint responses or run-detail execution-log rendering.
 - Regression: redacted or secret-looking stored custom header values are not replayed to the worker; safe custom headers still survive.
 - Regression: captcha/MFA/OTP keys and Playwright `fill`/`type` command values are redacted in `redact_json_text(...)` and durable case assets.
