@@ -110,6 +110,10 @@ async def count_default_planners(db: Any) -> int:
     return int(result.scalar_one())
 
 
+def environment_default_model_available() -> bool:
+    return bool(settings.DEFAULT_OPENAI_API_KEY.strip())
+
+
 async def best_effort_endpoint_count(source: str, input_type: str) -> int | None:
     if input_type == "url":
         return None
@@ -387,6 +391,8 @@ def preflight_auth_readiness(
 ) -> str:
     header_name = auth_resolution.header_name or "Authorization"
     if auth_required_count:
+        if supplied_auth and auth_resolution.strategy == "manual_header":
+            return f"手动 Token/Header 已通过；运行时会注入 {header_name}，预览不展示值。"
         if auth_resolution.ok:
             return f"自动获取 Token 已通过；运行时会注入 {header_name}，预览不展示值。"
         if supplied_auth:
@@ -1076,6 +1082,9 @@ async def build_run_preflight_response(
     target_url = resolve_run_target_url(source, input_type, payload.base_url)
     provider_count = await count_rows(db, LLMProvider)
     planner_count = await count_default_planners(db)
+    fallback_model_available = environment_default_model_available()
+    any_model_available = bool(provider_count or fallback_model_available)
+    planner_available = bool(planner_count or fallback_model_available)
     environment_count = await count_rows(db, Environment)
     api_profile = await best_effort_api_profile(source, input_type, api_execution_policy)
     endpoint_count = api_profile["endpoint_count"]
@@ -1131,18 +1140,26 @@ async def build_run_preflight_response(
         RunPreflightCheck(
             key="provider",
             label="模型配置",
-            status="ready" if provider_count else "missing",
-            detail="已配置可用模型" if provider_count else "尚未配置 LLM Provider",
-            action=None if provider_count else "前往模型与 Agent 配置模型",
+            status="ready" if any_model_available else "missing",
+            detail="已配置可用模型"
+            if provider_count
+            else "已检测到环境变量默认 OpenAI 兼容模型"
+            if fallback_model_available
+            else "尚未配置 LLM Provider；Agent 无法进行模型驱动的规划、评估和重规划",
+            action=None
+            if any_model_available
+            else "在模型与 Agent 中添加可用模型并设置默认 Planner",
         ),
         RunPreflightCheck(
             key="planner",
             label="规划模型",
-            status="ready" if planner_count else "warning",
+            status="ready" if planner_available else "missing",
             detail="已有默认 Planner 模型"
             if planner_count
-            else "未设置默认 Planner，系统将按现有回退逻辑尝试运行",
-            action=None if planner_count else "在模型与 Agent 中设置默认 Planner",
+            else "将使用环境变量 DEFAULT_MODEL_PLANNER 作为默认 Planner"
+            if fallback_model_available
+            else "未设置默认 Planner，不能启动 Agent Run，避免退化为固定规则执行",
+            action=None if planner_available else "在模型与 Agent 中设置默认 Planner",
         ),
         RunPreflightCheck(
             key="worker",

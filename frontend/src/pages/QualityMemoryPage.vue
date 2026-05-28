@@ -7,6 +7,7 @@ import type {
   TrendChartOption,
 } from '../lib/qualityTrendChart'
 import api from '../lib/api'
+import { redactSensitiveText as redactAssetSensitiveText } from '../lib/assetHandoff'
 import { useToast } from '../composables/useToast'
 import TcButton from '../components/ui/TcButton.vue'
 import {
@@ -64,6 +65,9 @@ type AffectedTarget = {
   failed_count: number
   bug_count: number
   last_seen?: string | null
+  last_issue_seen?: string | null
+  resolved_by_success?: boolean
+  resolved_at?: string | null
 }
 
 type AffectedSurface = {
@@ -72,6 +76,8 @@ type AffectedSurface = {
   issue_count: number
   last_seen?: string | null
   detail?: string | null
+  resolved_by_success?: boolean
+  resolved_at?: string | null
 }
 
 type RecurringTheme = {
@@ -83,6 +89,8 @@ type RecurringTheme = {
   examples?: string[]
   last_seen?: string | null
   recommended_action?: string
+  resolved_by_success?: boolean
+  resolved_at?: string | null
 }
 
 type EvidenceSummary = {
@@ -146,8 +154,6 @@ const trendSegments = [
   { key: 'bug_found', label: '缺陷', tooltipLabel: '缺陷', color: '#f43f5e' },
   { key: 'active', label: '进行中', tooltipLabel: '进行中', color: '#60a5fa' },
 ] as const
-
-const REDACTED_VALUE = '[REDACTED]'
 
 const router = useRouter()
 const toast = useToast()
@@ -381,35 +387,8 @@ function limitText(value: string, maxLength = 900) {
   return `${text.slice(0, maxLength - 3).trim()}...`
 }
 
-function isSensitiveParam(key: string) {
-  return /(^|[_-])(password|passwd|pwd|token|secret|api[_-]?key|authorization|auth|cookie|session|captcha|mfa|otp|csrf|xsrf|jwt)([_-]|$)/i.test(key)
-}
-
-function redactUrl(value: string) {
-  try {
-    const url = new URL(value)
-    if (url.username) url.username = REDACTED_VALUE
-    if (url.password) url.password = REDACTED_VALUE
-    url.searchParams.forEach((_paramValue, key) => {
-      if (isSensitiveParam(key)) {
-        url.searchParams.set(key, REDACTED_VALUE)
-      }
-    })
-    return url.toString()
-  } catch (_err) {
-    return value
-  }
-}
-
 function redactSensitiveText(value: unknown) {
-  let text = String(value ?? '')
-  text = text.replace(/https?:\/\/[^\s,，。)]+/gi, (url) => redactUrl(url))
-  text = text.replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*/gi, `$1 ${REDACTED_VALUE}`)
-  text = text.replace(
-    /\b(password|passwd|pwd|token|secret|api[_-]?key|authorization|cookie|session|captcha|mfa|otp|csrf|xsrf|jwt)\s*[:=]\s*[^,\n;，。)]+/gi,
-    (_match, key) => `${key}=${REDACTED_VALUE}`,
-  )
-  return limitText(text.replace(/\n{3,}/g, '\n\n'))
+  return redactAssetSensitiveText(value, 900)
 }
 
 function safeTargetLabel(value: string) {
@@ -456,6 +435,7 @@ function recentIssueSummary(memory?: AffectedTarget | null) {
 function recommendedStrategy(memory?: AffectedTarget | null) {
   const themeAction = highFrequencyThemes.value[0]?.recommended_action
   if (themeAction) return themeAction
+  if (memory?.resolved_by_success) return '历史阻塞点已有后续通过运行覆盖；复用成功路径并继续监控关键断言。'
   if (memory && memory.issue_run_count > 0) return '先回归历史阻塞点，再补充只读接口和关键 UI 路径。'
   return nextActions.value[0] || '先运行鉴权预检，再执行安全只读的核心路径回归。'
 }
@@ -536,10 +516,9 @@ function buildTrendChartOption(buckets: TrendBucket[]): TrendChartOption {
     },
     grid: {
       top: 34,
-      right: 8,
+      right: 16,
       bottom: 28,
-      left: 8,
-      containLabel: true,
+      left: 36,
     },
     xAxis: {
       type: 'category',
@@ -835,8 +814,11 @@ watch(trendBuckets, () => {
                       历史运行：{{ memory.run_count }} 次 / 问题运行：{{ memory.issue_run_count }} 次
                     </p>
                   </div>
-                  <span class="rounded-full bg-rose-50 px-2 py-1 text-[11px] font-bold text-rose-700">
-                    {{ memory.failed_count + memory.bug_count }} 个阻塞
+                  <span
+                    class="rounded-full px-2 py-1 text-[11px] font-bold"
+                    :class="memory.resolved_by_success ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'"
+                  >
+                    {{ memory.resolved_by_success ? '已回归通过' : `${memory.failed_count + memory.bug_count} 个阻塞` }}
                   </span>
                 </div>
 
@@ -850,7 +832,9 @@ watch(trendBuckets, () => {
                   <p class="line-clamp-2">
                     <span class="font-semibold text-gray-800">建议策略：</span>{{ recommendedStrategy(memory) }}
                   </p>
-                  <p class="text-[11px] text-gray-400">最近记录：{{ formatTime(memory.last_seen) }}</p>
+                  <p class="text-[11px] text-gray-400">
+                    {{ memory.resolved_by_success ? `最近通过：${formatTime(memory.resolved_at)}` : `最近问题：${formatTime(memory.last_issue_seen || memory.last_seen)}` }}
+                  </p>
                 </div>
 
                 <div class="mt-4 flex flex-wrap gap-2">
@@ -1173,8 +1157,10 @@ watch(trendBuckets, () => {
               <p class="mt-1 text-lg font-semibold text-gray-950">{{ selectedMemory.issue_run_count }}</p>
             </div>
             <div class="rounded-lg border border-gray-200 p-3">
-              <p class="text-xs text-gray-500">最近记录</p>
-              <p class="mt-1 truncate text-sm font-semibold text-gray-950">{{ formatTime(selectedMemory.last_seen) }}</p>
+              <p class="text-xs text-gray-500">{{ selectedMemory.resolved_by_success ? '最近通过' : '最近问题' }}</p>
+              <p class="mt-1 truncate text-sm font-semibold text-gray-950">
+                {{ formatTime(selectedMemory.resolved_by_success ? selectedMemory.resolved_at : selectedMemory.last_issue_seen || selectedMemory.last_seen) }}
+              </p>
             </div>
           </section>
         </div>

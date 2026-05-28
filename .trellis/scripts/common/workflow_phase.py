@@ -65,7 +65,10 @@ def get_phase_index() -> str:
     Matches what the SessionStart hook injects into the `<workflow>` block:
     starts at `## Phase Index`, continues through `## Phase 1: Plan`,
     `## Phase 2: Execute`, `## Phase 3: Finish`, stops at
-    `## Workflow State Breadcrumbs` (consumed by UserPromptSubmit hook).
+    `## Customizing Trellis (for forks)` (the docs-for-forks footer).
+    `[workflow-state:STATUS]` tag blocks (now embedded in Phase Index since
+    v0.5.0-rc.0) are consumed by the UserPromptSubmit hook so they're
+    stripped from this output.
     """
     text = _read_workflow()
     lines = text.splitlines()
@@ -77,7 +80,7 @@ def get_phase_index() -> str:
         if start is None and stripped == _PHASE_INDEX_HEADING:
             start = i
             continue
-        if start is not None and stripped == "## Workflow State Breadcrumbs":
+        if start is not None and stripped == "## Customizing Trellis (for forks)":
             end = i
             break
 
@@ -85,7 +88,16 @@ def get_phase_index() -> str:
         return ""
     if end is None:
         end = len(lines)
-    return "\n".join(lines[start:end]).rstrip() + "\n"
+
+    section = "\n".join(lines[start:end]).rstrip()
+    # Strip [workflow-state:STATUS]...[/workflow-state:STATUS] blocks since
+    # they're injected separately by inject-workflow-state.py per-turn.
+    import re as _re
+    tag_re = _re.compile(
+        r"\[workflow-state:([A-Za-z0-9_-]+)\]\s*\n.*?\n\s*\[/workflow-state:\1\]\n?",
+        _re.DOTALL,
+    )
+    return tag_re.sub("", section).rstrip() + "\n"
 
 
 def get_step(step_id: str) -> str:
@@ -130,6 +142,33 @@ def _platform_matches(platform: str, block_names: list[str]) -> bool:
         if needle == hay:
             return True
     return False
+
+
+def resolve_effective_platform(platform: str, config: dict) -> str:
+    """Map ``codex`` to a dispatch-mode-namespaced virtual platform name.
+
+    When ``--platform codex`` is passed, return ``"codex-inline"`` (default)
+    or ``"codex-sub-agent"`` based on ``.trellis/config.yaml`` ``codex.dispatch_mode``.
+    ``filter_platform`` then surfaces blocks whose marker lists include the
+    namespaced name (e.g. ``[codex-sub-agent, ...]`` or ``[codex-inline, Kilo,
+    Antigravity, Windsurf]``).
+
+    Default is ``inline`` because Codex sub-agents run with ``fork_turns="none"``
+    isolation and can't inherit the parent session's task context — inline
+    keeps the main agent in charge so context isn't lost. Invalid / missing
+    values also fall back to inline.
+
+    Other platforms are returned unchanged.
+    """
+    if platform == "codex":
+        mode = "inline"
+        codex_cfg = config.get("codex") if isinstance(config, dict) else None
+        if isinstance(codex_cfg, dict):
+            cfg_mode = codex_cfg.get("dispatch_mode")
+            if cfg_mode in ("inline", "sub-agent"):
+                mode = cfg_mode
+        return f"codex-{mode}"
+    return platform
 
 
 def filter_platform(content: str, platform: str) -> str:

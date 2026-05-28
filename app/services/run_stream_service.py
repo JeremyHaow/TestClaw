@@ -155,6 +155,15 @@ async def stream_run_events(
                 log_data = json.loads(current_log)
                 if not isinstance(log_data, dict):
                     log_data = {"raw_log": log_data}
+                try:
+                    from app.agent.runtime.event_store import load_runtime_detail
+
+                    async with AsyncSessionLocal() as runtime_db:
+                        runtime_detail = await load_runtime_detail(runtime_db, run_id)
+                    if runtime_detail:
+                        log_data.update({key: value for key, value in runtime_detail.items() if value})
+                except Exception as exc:
+                    logger.debug("Unable to load runtime detail for stream: %s", exc)
                 log_data = redact_sensitive_data(log_data)
                 triage_summary = build_triage_summary(current_status, log_data)
                 log_data["triage_summary"] = triage_summary

@@ -59,6 +59,17 @@ def test_run_detail_labels_remain_visible_after_extraction() -> None:
     assert "人工干预" in source or "补充上下文" in source
 
 
+def test_run_detail_only_labels_real_failures_as_current_blockers() -> None:
+    page_source = _source(RUN_DETAIL_PAGE)
+    summary_source = _source(AGENT_COMPONENT_DIR / "AgentRunSummary.vue")
+
+    assert "evaluation.sufficient_evidence === false" in page_source
+    assert "['blocked', 'failed', 'needs_human', 'insufficient'].includes(evaluationOutcome)" in page_source
+    assert "['failed', 'blocked'].includes(observationStatus)" in page_source
+    assert "blockerLabel" in summary_source
+    assert "当前状态：" in summary_source
+
+
 def test_run_detail_sse_and_intervention_hooks_remain_in_page() -> None:
     source = _source(RUN_DETAIL_PAGE)
 
@@ -105,10 +116,13 @@ def test_run_detail_wires_agent_protocol_records_into_cockpit() -> None:
         "agent_observations",
         "agent_evidence",
         "agent_protocol_evaluations",
+        "run_findings",
         "agent_protocol_summary",
         "runtime_events",
         "agent_retry_counts",
         "agent_retry_feedback",
+        "agent_runtime_status",
+        "agent_continuation_run_id",
         "agent_human_question",
     ]:
         assert f"'{key}'" in source
@@ -165,6 +179,38 @@ def test_run_detail_uses_runtime_workbench_and_shadcn_vue_components() -> None:
         "Next action",
     ]:
         assert marker in source or marker in runtime_sources
+
+
+def test_runtime_workbench_does_not_pair_unrelated_action_and_observation() -> None:
+    page_source = _source(RUN_DETAIL_PAGE)
+    current_step_source = _source(RUNTIME_COMPONENT_DIR / "RuntimeCurrentStep.vue")
+
+    for symbol in [
+        "latestDisplayObservation",
+        "isSkippedProtocolObservation",
+        ':observation="latestDisplayObservation"',
+        "if (!isActiveRun.value && latestProtocolEvaluation.value)",
+    ]:
+        assert symbol in page_source
+
+    for symbol in [
+        "pairedObservation",
+        "observationActionId",
+        "props.observation?.tool_name === props.action.tool_name",
+        "displayTitle",
+    ]:
+        assert symbol in current_step_source
+
+
+def test_runtime_handoff_can_cancel_active_source_run_for_continuation() -> None:
+    source = _source(RUN_DETAIL_PAGE)
+    handoff_source = _source(RUNTIME_COMPONENT_DIR / "RuntimeHumanHandoff.vue")
+
+    assert 'v-model:cancel-current="interventionCancelCurrent"' in source
+    assert ':can-cancel-current="isActiveRun"' in source
+    assert "cancel_current: interventionCancelCurrent.value" in source
+    assert "update:cancelCurrent" in handoff_source
+    assert "取消当前等待中的运行" in handoff_source
 
 
 def test_runtime_workbench_uses_only_runtime_plan_color_tokens() -> None:

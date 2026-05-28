@@ -19,9 +19,25 @@ const props = withDefaults(
   },
 )
 
-const actionInputs = computed(() => props.action?.inputs || props.observation?.inputs || {})
+const pairedObservation = computed(() => {
+  if (!props.action) return props.observation
+  const actionId = String(props.action.action_id || '')
+  const observationActionId = String(props.observation?.action_id || '')
+  if (actionId && observationActionId && actionId === observationActionId) return props.observation
+  if (!observationActionId && props.observation?.tool_name === props.action.tool_name) return props.observation
+  return null
+})
+const displayTitle = computed(() => {
+  if (props.action?.tool_name) return props.action.tool_name
+  if (pairedObservation.value?.tool_name) return pairedObservation.value.tool_name
+  if (props.evaluation?.next_action || props.evaluation?.stage) {
+    return `Evaluation · ${props.evaluation.next_action || props.evaluation.stage}`
+  }
+  return 'Waiting for action'
+})
+const actionInputs = computed(() => props.action?.inputs || pairedObservation.value?.inputs || {})
 const expectedObservation = computed(() => props.action?.expected_observation || props.action?.output?.expected_observation || '')
-const actualObservation = computed(() => props.observation?.summary || props.observation?.observation || '')
+const actualObservation = computed(() => pairedObservation.value?.summary || pairedObservation.value?.observation || '')
 </script>
 
 <template>
@@ -31,9 +47,9 @@ const actualObservation = computed(() => props.observation?.summary || props.obs
         <CardTitle class="flex items-center justify-between gap-3 text-sm text-[#0F172A]">
           <span class="flex min-w-0 items-center gap-2">
             <Target :size="16" class="shrink-0 text-[#2563EB]" />
-            <span class="truncate">{{ action?.tool_name || observation?.tool_name || 'Waiting for action' }}</span>
+            <span class="truncate">{{ displayTitle }}</span>
           </span>
-          <RuntimeFailureBadge :failure-type="observation?.failure_type" :status="observation?.status || action?.status" />
+          <RuntimeFailureBadge :failure-type="pairedObservation?.failure_type" :status="pairedObservation?.status || action?.status || evaluation?.outcome" />
         </CardTitle>
       </CardHeader>
       <CardContent class="space-y-4">

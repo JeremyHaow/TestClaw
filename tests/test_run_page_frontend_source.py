@@ -64,7 +64,7 @@ def test_run_page_api_hooks_and_behaviors_remain_in_page() -> None:
         "async function runPreflight",
         "async function submit",
         "api.post('/runs/preflight', buildRunPayload())",
-        "api.post('/runs', buildRunPayload())",
+        "api.post('/runs', buildRunPayload({ forCreate: true }))",
         "sourceReady",
         "canRun",
         "applyRoutePrefill",
@@ -73,6 +73,16 @@ def test_run_page_api_hooks_and_behaviors_remain_in_page() -> None:
         "auth_preflight_id",
     ]:
         assert hook in source
+
+
+def test_run_page_keeps_public_ui_safety_text_out_of_login_setup_on_create() -> None:
+    source = _source(RUN_PAGE)
+
+    assert "function shouldTreatSetupAsObjectiveContext(forCreate: boolean)" in source
+    assert "forCreate && form.test_type === 'ui' && form.auth_mode === 'none_confirmed'" in source
+    assert "const safetyContext = `安全边界：${setupInstructions}`" in source
+    assert "payload.setup_instructions = setupInstructions" in source
+    assert "buildRunPayload({ forCreate: true })" in source
 
 
 def test_run_selectors_use_model_update_contract() -> None:

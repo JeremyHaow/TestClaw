@@ -199,6 +199,74 @@ def test_run_history_insights_summarizes_quality_memory_without_secrets() -> Non
         assert secret not in serialized
 
 
+def test_run_history_insights_resolves_old_recurring_theme_after_later_success() -> None:
+    now = datetime.utcnow()
+    repeated_title = "Checkout API returns 500 on GET https://api.example.test/checkout"
+    with TestClient(app) as client:
+        token = _token(client)
+        asyncio.run(
+            _replace_tasks(
+                [
+                    {
+                        "objective": "checkout regression one",
+                        "target_url": "https://api.example.test/checkout",
+                        "status": TaskStatus.BUG_FOUND,
+                        "created_at": now - timedelta(days=2),
+                        "execution_log": _api_failure_log(repeated_title, "api-secret-one"),
+                    },
+                    {
+                        "objective": "checkout regression two",
+                        "target_url": "https://api.example.test/checkout",
+                        "status": TaskStatus.BUG_FOUND,
+                        "created_at": now - timedelta(days=1),
+                        "execution_log": _api_failure_log(repeated_title, "api-secret-two"),
+                    },
+                    {
+                        "objective": "checkout fixed verification",
+                        "target_url": "https://api.example.test/checkout",
+                        "status": TaskStatus.SUCCEEDED,
+                        "created_at": now,
+                        "execution_log": {
+                            "api_execution_result": {
+                                "total": 1,
+                                "executed": 1,
+                                "passed": 1,
+                                "failed": 0,
+                                "results": [
+                                    {
+                                        "label": "GET checkout fixed",
+                                        "method": "GET",
+                                        "url": "https://api.example.test/checkout",
+                                        "status_code": 200,
+                                        "passed": True,
+                                    }
+                                ],
+                            },
+                            "final_report": {
+                                "overall_verdict": "PASS",
+                                "summary": "Checkout endpoint passed after the fix.",
+                                "bugs_found": [],
+                            },
+                        },
+                    },
+                ]
+            )
+        )
+        response = client.get(
+            "/api/v1/runs/insights?days=30&limit=20",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["recurring_themes"] == []
+    assert body["affected_surfaces"] == []
+    assert body["resolved_themes"][0]["resolved_by_success"] is True
+    assert body["resolved_themes"][0]["resolved_at"]
+    assert body["affected_targets"][0]["resolved_by_success"] is True
+    assert "历史失败主题已有后续通过运行覆盖" in body["recommended_next_actions"][0]
+
+
 def test_run_history_insights_handles_empty_history() -> None:
     with TestClient(app) as client:
         token = _token(client)

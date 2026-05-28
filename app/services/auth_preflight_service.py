@@ -523,6 +523,35 @@ async def run_auth_preflight(
     direct_candidates = direct_url_validation_candidates(input_type, target_url)
     captcha_context: CaptchaContextResolution | None = None
 
+    configured_auto = coerce_auth_config(payload.auth_config)
+    if (
+        auth_mode == "auto"
+        and auth_required_count == 0
+        and not configured_auto.get("enabled")
+        and not has_login_credentials(payload)
+        and not has_auth_like_header(headers)
+    ):
+        steps.append(
+            RunAuthPreflightStep(
+                key="auth_requirement",
+                label="鉴权声明",
+                status="passed",
+                detail="OpenAPI 未声明需要鉴权的接口；本次按无需鉴权启动。",
+            )
+        )
+        auth_preflight = auth_preflight_response(
+            auth_mode=auth_mode,
+            captcha_mode=captcha_mode,
+            test_type=test_type,
+            status="passed",
+            strategy="no_auth_declared",
+            plan="OpenAPI 未声明鉴权要求，运行时不会注入 Token/Header。",
+            captcha_handling="无验证码。",
+            steps=steps,
+            next_action=None,
+        )
+        return auth_preflight, {}, None, auth_resolution
+
     if auth_mode == "none_confirmed":
         candidates = protected_candidates or any_read_candidates or direct_candidates
         if not candidates:
@@ -668,7 +697,6 @@ async def run_auth_preflight(
         )
 
     if not has_login_credentials(payload):
-        configured_auto = coerce_auth_config(payload.auth_config)
         if configured_auto.get("enabled"):
             auth_resolution = await resolve_auto_auth_headers(
                 configured_auto,

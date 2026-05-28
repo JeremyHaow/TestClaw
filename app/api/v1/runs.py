@@ -30,6 +30,7 @@ from app.core.redaction import (
     redact_sensitive_text,
 )
 from app.models.task import Task, TaskStatus
+from app.models.run_artifacts import RunIntervention
 from app.models.test_case import TestCase, TestSuite
 from app.schemas.task import TaskListItemRead, TaskRead, parse_task_detail
 from app.services.api_auth import AuthResolution, CaptchaContextResolution
@@ -343,6 +344,9 @@ class RunHistoryAffectedTarget(BaseModel):
     failed_count: int
     bug_count: int
     last_seen: str | None = None
+    last_issue_seen: str | None = None
+    resolved_by_success: bool = False
+    resolved_at: str | None = None
 
 
 class RunHistoryAffectedSurface(BaseModel):
@@ -351,6 +355,8 @@ class RunHistoryAffectedSurface(BaseModel):
     issue_count: int
     last_seen: str | None = None
     detail: str | None = None
+    resolved_by_success: bool = False
+    resolved_at: str | None = None
 
 
 class RunHistoryRecurringTheme(BaseModel):
@@ -362,6 +368,8 @@ class RunHistoryRecurringTheme(BaseModel):
     examples: list[str] = Field(default_factory=list)
     last_seen: str | None = None
     recommended_action: str
+    resolved_by_success: bool = False
+    resolved_at: str | None = None
 
 
 class RunHistoryEvidenceSummary(BaseModel):
@@ -386,6 +394,7 @@ class RunHistoryInsightsResponse(BaseModel):
     affected_targets: list[RunHistoryAffectedTarget] = Field(default_factory=list)
     affected_surfaces: list[RunHistoryAffectedSurface] = Field(default_factory=list)
     recurring_themes: list[RunHistoryRecurringTheme] = Field(default_factory=list)
+    resolved_themes: list[RunHistoryRecurringTheme] = Field(default_factory=list)
     evidence_reproduction: RunHistoryEvidenceSummary
     recommended_next_actions: list[str] = Field(default_factory=list)
 
@@ -1004,6 +1013,28 @@ def _redact_case_url_or_path(value: Any) -> str:
         return text
 
 
+def _safe_case_asset_base_url(value: Any) -> str:
+    text = _redact_case_url_or_path(value)
+    if not text:
+        return ""
+    try:
+        parsed = urlsplit(text)
+    except Exception:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    path = (parsed.path or "").rstrip("/")
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def _case_asset_template_needs_base_url(template: dict[str, Any]) -> bool:
+    raw_url = template.get("url") or template.get("path") or template.get("endpoint")
+    if raw_url is None:
+        return False
+    text = str(raw_url).strip()
+    return bool(text) and not text.startswith(("http://", "https://"))
+
+
 def _safe_case_asset_headers(headers: Any) -> dict[str, Any]:
     if not isinstance(headers, dict):
         return {}
@@ -1016,7 +1047,21 @@ def _safe_case_asset_headers(headers: Any) -> dict[str, Any]:
     return safe_headers
 
 
-def _safe_case_asset_request_template(case: dict[str, Any]) -> dict[str, Any]:
+def _safe_case_asset_assertions(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    assertions: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, dict):
+            assertions.append(redact_sensitive_data(item))
+    return assertions
+
+
+def _safe_case_asset_request_template(
+    case: dict[str, Any],
+    *,
+    source_base_url: str | None = None,
+) -> dict[str, Any]:
     template = _extract_request_template(case)
     if not template:
         return {}
@@ -1031,6 +1076,10 @@ def _safe_case_asset_request_template(case: dict[str, Any]) -> dict[str, Any]:
         else:
             safe[key] = redact_sensitive_text(str(value))
 
+    safe_source_base_url = _safe_case_asset_base_url(source_base_url)
+    if safe_source_base_url and "base_url" not in safe and _case_asset_template_needs_base_url(template):
+        safe["base_url"] = safe_source_base_url
+
     headers = _safe_case_asset_headers(template.get("headers"))
     if headers:
         safe["headers"] = headers
@@ -1038,6 +1087,17 @@ def _safe_case_asset_request_template(case: dict[str, Any]) -> dict[str, Any]:
     for key in ("query_params", "params", "body", "json"):
         if key in template:
             safe[key] = redact_sensitive_data(template.get(key))
+
+    assertions = _safe_case_asset_assertions(
+        case.get("assertions") or template.get("assertions")
+    )
+    if assertions:
+        safe["assertions"] = assertions
+        if "expected_status" not in safe:
+            for assertion in assertions:
+                if assertion.get("type") == "status_code" and assertion.get("expected") is not None:
+                    safe["expected_status"] = assertion["expected"]
+                    break
 
     return safe
 
@@ -1106,6 +1166,7 @@ def _safe_case_asset_test_data(
     run_id: str,
     source: str,
     source_index: int,
+    source_base_url: str | None = None,
 ) -> dict[str, Any]:
     test_data: dict[str, Any] = {
         "case_asset": {
@@ -1117,9 +1178,13 @@ def _safe_case_asset_test_data(
         }
     }
 
-    request_template = _safe_case_asset_request_template(case)
+    request_template = _safe_case_asset_request_template(case, source_base_url=source_base_url)
     if request_template:
         test_data["request_template"] = request_template
+
+    safe_source_base_url = _safe_case_asset_base_url(source_base_url)
+    if case_type == "api" and safe_source_base_url:
+        test_data.setdefault("base_url", safe_source_base_url)
 
     playwright_commands = _safe_case_asset_playwright_commands(case)
     if playwright_commands:
@@ -1146,6 +1211,7 @@ def _normalize_case_asset_for_save(
     run_id: str,
     source: str,
     source_index: int,
+    source_base_url: str | None = None,
 ) -> dict[str, Any]:
     case_type = _case_asset_kind(source, case)
     title = _case_asset_text(
@@ -1173,6 +1239,7 @@ def _normalize_case_asset_for_save(
             run_id=run_id,
             source=source,
             source_index=source_index,
+            source_base_url=source_base_url,
         ),
         "source": f"run_case_asset:{run_id}:{source}:{source_index}"[:100],
         "case_type": case_type,
@@ -2822,7 +2889,7 @@ async def _load_run_history_insight_tasks(
 
 def _history_status(task: Any) -> str:
     status = getattr(task, "status", "")
-    return status.value if hasattr(status, "value") else str(status)
+    return _effective_status_value(status, _history_task_execution_log(task))
 
 
 def _history_created_at(task: Any, fallback: datetime) -> datetime:
@@ -3006,6 +3073,37 @@ def _history_theme_action(category: str, severity: str, theme: str) -> str:
     return "整理缺陷证据和复现步骤，归并同类问题后逐项关闭。"
 
 
+_TERMINAL_WORKFLOW_NODES = {"reporter", "knowledge_sink"}
+_TERMINAL_WORKFLOW_STATUSES = {"done", "failed", "cancelled"}
+
+
+def _execution_log_has_terminal_marker(parsed: dict[str, Any]) -> bool:
+    if parsed.get("cancelled") or parsed.get("final_report"):
+        return True
+    current_step = _triage_dict(parsed.get("current_step"))
+    if (
+        str(current_step.get("node") or "") in _TERMINAL_WORKFLOW_NODES
+        and str(current_step.get("status") or "").lower() in _TERMINAL_WORKFLOW_STATUSES
+    ):
+        return True
+    for step in _triage_list(parsed.get("workflow_steps")):
+        if not isinstance(step, dict):
+            continue
+        if (
+            str(step.get("node") or "") in _TERMINAL_WORKFLOW_NODES
+            and str(step.get("status") or "").lower() in _TERMINAL_WORKFLOW_STATUSES
+        ):
+            return True
+    return False
+
+
+def _effective_status_value(status: Any, parsed: dict[str, Any] | None = None) -> str:
+    normalized = _status_value(status)
+    if normalized in _HISTORY_ACTIVE_STATUSES and parsed and _execution_log_has_terminal_marker(parsed):
+        return determine_final_status(parsed).value
+    return normalized
+
+
 def _history_add_last_seen(current: datetime | None, candidate: datetime) -> datetime:
     if current is None or candidate > current:
         return candidate
@@ -3019,6 +3117,7 @@ def _build_history_recommendations(
     themes: list[dict[str, Any]],
     affected_surfaces: list[dict[str, Any]],
     evidence: dict[str, Any],
+    has_resolved_issues: bool = False,
 ) -> list[str]:
     actions: list[str] = []
     if counts["total"] == 0:
@@ -3030,7 +3129,10 @@ def _build_history_recommendations(
     if themes:
         actions.append(f"优先处理反复出现的「{themes[0]['theme']}」，避免继续消耗回归时间。")
     elif counts["failed"] or counts["bug_found"]:
-        actions.append("已有失败或缺陷运行；把失败项归并成可复用回归用例。")
+        if has_resolved_issues and not affected_surfaces:
+            actions.append("历史失败主题已有后续通过运行覆盖；保留回归证据并继续监控。")
+        else:
+            actions.append("已有失败或缺陷运行；把失败项归并成可复用回归用例。")
     if affected_surfaces:
         actions.append(f"重点复核 {affected_surfaces[0]['name']}，它是近期最常受影响的测试面。")
     if counts["completed"] and evidence["runs_with_evidence"] < counts["completed"]:
@@ -3055,6 +3157,7 @@ def _build_run_history_insights(
     target_stats: dict[str, dict[str, Any]] = {}
     surface_stats: dict[tuple[str, str], dict[str, Any]] = {}
     theme_stats: dict[str, dict[str, Any]] = {}
+    surface_success_last_seen: dict[str, datetime] = {}
     evidence = {
         "runs_with_evidence": 0,
         "runs_with_api_evidence": 0,
@@ -3083,6 +3186,8 @@ def _build_run_history_insights(
                 "failed_count": 0,
                 "bug_count": 0,
                 "last_seen_dt": None,
+                "last_issue_seen_dt": None,
+                "last_success_seen_dt": None,
             },
         )
         target_entry["run_count"] += 1
@@ -3091,10 +3196,27 @@ def _build_run_history_insights(
         )
         if issue_run:
             target_entry["issue_run_count"] += 1
+            target_entry["last_issue_seen_dt"] = _history_add_last_seen(
+                target_entry["last_issue_seen_dt"], created_at
+            )
+        elif status == "succeeded":
+            target_entry["last_success_seen_dt"] = _history_add_last_seen(
+                target_entry["last_success_seen_dt"], created_at
+            )
         if status == "failed":
             target_entry["failed_count"] += 1
         if status == "bug_found":
             target_entry["bug_count"] += 1
+
+        api_result = _triage_dict(parsed.get("api_execution_result"))
+        for result in _triage_list(api_result.get("results")):
+            if not isinstance(result, dict) or result.get("skipped") or result.get("passed") is not True:
+                continue
+            surface_name = _triage_api_surface(result)
+            surface_success_last_seen[surface_name] = _history_add_last_seen(
+                surface_success_last_seen.get(surface_name),
+                created_at,
+            )
 
         evidence_info = _triage_dict(triage.get("evidence"))
         reproduction = _triage_dict(triage.get("reproduction"))
@@ -3136,10 +3258,12 @@ def _build_run_history_insights(
                     "issue_count": 0,
                     "last_seen_dt": None,
                     "detail": None,
+                    "targets": set(),
                 },
             )
             entry["issue_count"] += 1
             entry["last_seen_dt"] = _history_add_last_seen(entry["last_seen_dt"], created_at)
+            entry["targets"].add(target)
             if not entry.get("detail") and surface.get("detail"):
                 entry["detail"] = _triage_text(surface.get("detail"), 180)
 
@@ -3161,12 +3285,14 @@ def _build_run_history_insights(
                     "severity": severity,
                     "severity_rank": _triage_severity_rank(severity),
                     "surfaces": set(),
+                    "targets": set(),
                     "examples": [],
                     "last_seen_dt": None,
                 },
             )
             entry["count"] += 1
             entry["last_seen_dt"] = _history_add_last_seen(entry["last_seen_dt"], created_at)
+            entry["targets"].add(target)
             if _triage_severity_rank(severity) > entry["severity_rank"]:
                 entry["severity"] = severity
                 entry["severity_rank"] = _triage_severity_rank(severity)
@@ -3176,20 +3302,33 @@ def _build_run_history_insights(
             if title not in entry["examples"] and len(entry["examples"]) < 3:
                 entry["examples"].append(title)
 
-    affected_targets = [
-        {
-            "target": item["target"],
-            "run_count": item["run_count"],
-            "issue_run_count": item["issue_run_count"],
-            "failed_count": item["failed_count"],
-            "bug_count": item["bug_count"],
-            "last_seen": _history_iso(item["last_seen_dt"]),
-        }
-        for item in target_stats.values()
-        if item["issue_run_count"] > 0
-    ]
+    affected_targets = []
+    for item in target_stats.values():
+        if item["issue_run_count"] <= 0:
+            continue
+        resolved_at = item.get("last_success_seen_dt")
+        last_issue_seen = item.get("last_issue_seen_dt")
+        resolved_by_success = bool(
+            isinstance(resolved_at, datetime)
+            and isinstance(last_issue_seen, datetime)
+            and resolved_at > last_issue_seen
+        )
+        affected_targets.append(
+            {
+                "target": item["target"],
+                "run_count": item["run_count"],
+                "issue_run_count": item["issue_run_count"],
+                "failed_count": item["failed_count"],
+                "bug_count": item["bug_count"],
+                "last_seen": _history_iso(item["last_seen_dt"]),
+                "last_issue_seen": _history_iso(last_issue_seen),
+                "resolved_by_success": resolved_by_success,
+                "resolved_at": _history_iso(resolved_at) if resolved_by_success else None,
+            }
+        )
     affected_targets.sort(
         key=lambda item: (
+            not item.get("resolved_by_success"),
             item["issue_run_count"],
             item["bug_count"],
             item["failed_count"],
@@ -3198,28 +3337,74 @@ def _build_run_history_insights(
         reverse=True,
     )
 
-    affected_surfaces = [
-        {
+    affected_surfaces = []
+    resolved_surfaces = []
+    for item in surface_stats.values():
+        resolved_dates = [
+            resolved_at
+            for resolved_at in [surface_success_last_seen.get(item["name"])]
+            if isinstance(resolved_at, datetime)
+        ]
+        resolved_dates.extend(
+            resolved_at
+            for target_name in item.get("targets", set())
+            if isinstance(
+                (resolved_at := target_stats.get(target_name, {}).get("last_success_seen_dt")),
+                datetime,
+            )
+        )
+        resolved_at = max(resolved_dates) if resolved_dates else None
+        resolved_by_success = bool(
+            isinstance(resolved_at, datetime)
+            and isinstance(item.get("last_seen_dt"), datetime)
+            and resolved_at > item["last_seen_dt"]
+        )
+        payload = {
             "type": item["type"],
             "name": item["name"],
             "issue_count": item["issue_count"],
             "last_seen": _history_iso(item["last_seen_dt"]),
             "detail": item.get("detail"),
+            "resolved_by_success": resolved_by_success,
+            "resolved_at": _history_iso(resolved_at) if resolved_by_success else None,
         }
-        for item in surface_stats.values()
-    ]
+        if resolved_by_success:
+            resolved_surfaces.append(payload)
+        else:
+            affected_surfaces.append(payload)
     affected_surfaces.sort(
         key=lambda item: (item["issue_count"], item["last_seen"] or ""),
         reverse=True,
     )
 
-    recurring_themes = [
-        {
+    recurring_themes = []
+    resolved_themes = []
+    for item in theme_stats.values():
+        if item["count"] <= 1:
+            continue
+        surfaces = sorted(item["surfaces"])[:5]
+        resolved_dates = [
+            resolved_at
+            for surface in surfaces
+            if isinstance((resolved_at := surface_success_last_seen.get(surface)), datetime)
+            and resolved_at > item["last_seen_dt"]
+        ]
+        resolved_dates.extend(
+            resolved_at
+            for target_name in item.get("targets", set())
+            if isinstance(
+                (resolved_at := target_stats.get(target_name, {}).get("last_success_seen_dt")),
+                datetime,
+            )
+            and resolved_at > item["last_seen_dt"]
+        )
+        resolved_at = max(resolved_dates) if resolved_dates else None
+        payload = {
             "theme": item["theme"],
             "category": item["category"],
             "count": item["count"],
             "severity": item["severity"],
-            "surfaces": sorted(item["surfaces"])[:5],
+            "surfaces": surfaces,
             "examples": item["examples"][:3],
             "last_seen": _history_iso(item["last_seen_dt"]),
             "recommended_action": _history_theme_action(
@@ -3227,15 +3412,26 @@ def _build_run_history_insights(
                 item["severity"],
                 item["theme"],
             ),
+            "resolved_by_success": bool(resolved_at),
+            "resolved_at": _history_iso(resolved_at),
         }
-        for item in theme_stats.values()
-        if item["count"] > 1
-    ]
+        if resolved_at:
+            resolved_themes.append(payload)
+        else:
+            recurring_themes.append(payload)
     recurring_themes.sort(
         key=lambda item: (
             item["count"],
             _triage_severity_rank(item["severity"]),
             item["last_seen"] or "",
+        ),
+        reverse=True,
+    )
+    resolved_themes.sort(
+        key=lambda item: (
+            item["count"],
+            _triage_severity_rank(item["severity"]),
+            item["resolved_at"] or "",
         ),
         reverse=True,
     )
@@ -3251,6 +3447,7 @@ def _build_run_history_insights(
         themes=recurring_themes,
         affected_surfaces=affected_surfaces,
         evidence=evidence,
+        has_resolved_issues=bool(resolved_themes or resolved_surfaces),
     )
 
     return {
@@ -3264,8 +3461,58 @@ def _build_run_history_insights(
         "affected_targets": affected_targets[:6],
         "affected_surfaces": affected_surfaces[:8],
         "recurring_themes": recurring_themes[:6],
+        "resolved_themes": resolved_themes[:6],
         "evidence_reproduction": evidence,
         "recommended_next_actions": recommended_actions,
+    }
+
+
+def _build_run_list_projection(dialect_name: str) -> Any:
+    if dialect_name == "postgresql":
+        return _postgres_history_projection(cast(Task.execution_log, JSONB)).label("list_log")
+    projection = _build_history_insight_projection(dialect_name)
+    if projection is not None:
+        return projection.label("list_log")
+    return Task.execution_log.label("list_log")
+
+
+def _decode_run_list_log(value: Any) -> dict[str, Any]:
+    parsed = _decode_history_insight_projection(value)
+    redacted = redact_sensitive_data(parsed)
+    return redacted if isinstance(redacted, dict) else {}
+
+
+def _build_run_list_triage(status: str, parsed: dict[str, Any]) -> dict[str, Any]:
+    triage = _build_run_triage_summary(status, parsed)
+    return {
+        "summary": _triage_text(triage.get("summary"), 240),
+        "release_risk": _triage_dict(triage.get("release_risk")),
+        "blocking_count": _triage_int(triage.get("blocking_count")),
+        "evidence": _triage_dict(triage.get("evidence")),
+        "confidence": _triage_dict(triage.get("confidence")),
+    }
+
+
+def _build_run_list_counts(
+    status: str, parsed: dict[str, Any], triage: dict[str, Any]
+) -> dict[str, int]:
+    final_report = _triage_dict(parsed.get("final_report"))
+    report_bugs = [
+        item for item in _triage_list(final_report.get("bugs_found")) if isinstance(item, dict)
+    ]
+    blocking_count = _triage_int(triage.get("blocking_count"))
+    issue_count = blocking_count
+    if issue_count == 0 and status in _HISTORY_ISSUE_STATUSES:
+        issue_count = 1
+    bug_count = len(report_bugs)
+    if bug_count == 0 and status == "bug_found":
+        bug_count = max(1, blocking_count)
+    evidence = _triage_dict(triage.get("evidence"))
+    return {
+        "issue_count": issue_count,
+        "finding_count": blocking_count,
+        "bug_count": bug_count,
+        "evidence_count": _triage_int(evidence.get("count")),
     }
 
 
@@ -3368,7 +3615,9 @@ async def _seed_intervention_execution_log(
             "applied": True,
             "detail": "Human supplemental context was applied to this assisted rerun. Secret-bearing values are redacted in persisted logs.",
             "created_at": datetime.utcnow().isoformat(),
-        }
+        },
+        "agent_source_run_id": source_run_id,
+        "agent_runtime_status": "continuation_running",
     }
     for key in (
         "source_input",
@@ -3390,6 +3639,69 @@ async def _seed_intervention_execution_log(
     )
     await db.commit()
     await db.refresh(task)
+
+
+async def _run_rerun_synchronously(
+    db: DbSession,
+    task: Task,
+    *,
+    rerun_context: dict[str, Any],
+) -> None:
+    context = dict(rerun_context)
+    auth_headers = context.pop("auth_headers", None)
+    custom_headers = context.pop("custom_headers", None)
+    auth_config = context.pop("auth_config", None)
+    base_url_override = context.pop("base_url_override", None)
+    api_execution_policy = context.pop("api_execution_policy", None)
+    setup_instructions = context.pop("setup_instructions", None)
+    login_instructions = context.pop("login_instructions", None)
+
+    for protected_key in (
+        "task_id",
+        "objective",
+        "target_url",
+        "test_type",
+        "retry_count",
+        "messages",
+        "workflow_steps",
+        "db_session",
+    ):
+        context.pop(protected_key, None)
+
+    state: dict[str, Any] = {
+        **context,
+        "task_id": task.id,
+        "objective": task.objective,
+        "target_url": task.target_url,
+        "test_type": normalize_agent_test_type(task.test_type, default="auto"),
+        "retry_count": 0,
+        "messages": [],
+        "workflow_steps": [],
+        "db_session": db,
+    }
+
+    merged_headers: dict[str, Any] = {}
+    if isinstance(custom_headers, dict):
+        merged_headers.update(custom_headers)
+        state["custom_headers"] = custom_headers
+    if isinstance(auth_headers, dict):
+        merged_headers.update(auth_headers)
+    if isinstance(auth_config, dict) and auth_config.get("enabled"):
+        state["auth_config"] = auth_config
+    if merged_headers:
+        state["auth_headers"] = merged_headers
+    if base_url_override:
+        state["base_url_override"] = base_url_override
+    if api_execution_policy:
+        state["api_execution_policy"] = api_execution_policy
+
+    setup_value = setup_instructions or login_instructions
+    if setup_value:
+        state["setup_instructions"] = setup_value
+        state["login_instructions"] = setup_value
+
+    final_state = await run_graph_with_progress(state)
+    await _persist_state(db, task, final_state)
 
 
 def _revoke_worker_task(run_id: str) -> None:
@@ -3425,6 +3737,15 @@ async def create_run(payload: RunCreate, db: DbSession, _: CurrentUser):
     db_test_type = normalize_test_type(agent_test_type)
 
     input_type = classify_input(source)
+
+    if (
+        not await _count_default_planners(db)
+        and not preflight_service.environment_default_model_available()
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="未设置默认 Planner 模型，不能启动 Agent Run。请先在模型与 Agent 中配置可用模型并设为默认 Planner。",
+        )
 
     target_url = _resolve_run_target_url(source, input_type, payload.base_url)
 
@@ -3618,6 +3939,9 @@ async def list_runs(
     total = int((await db.execute(count_stmt)).scalar_one())
 
     offset = (page - 1) * page_size
+    bind = db.get_bind()
+    dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+    list_log = _build_run_list_projection(dialect_name)
     stmt = select(
         Task.id,
         Task.target_url,
@@ -3626,24 +3950,51 @@ async def list_runs(
         Task.test_type,
         Task.created_at,
         Task.updated_at,
+        list_log,
     )
     if filters:
         stmt = stmt.where(*filters)
     stmt = stmt.order_by(Task.created_at.desc()).offset(offset).limit(page_size)
 
-    result = await db.execute(stmt)
-    items = [
-        TaskListItemRead(
-            id=row.id,
-            target_url=row.target_url,
-            objective=row.objective,
-            status=_status_value(row.status),
-            test_type=_status_value(row.test_type),
-            created_at=row.created_at,
-            updated_at=row.updated_at,
-        ).model_dump(mode="json")
-        for row in result
-    ]
+    try:
+        result = await db.execute(stmt)
+    except SQLAlchemyError as exc:
+        logger.warning("Falling back to full run list logs: %s", exc)
+        await db.rollback()
+        fallback_stmt = select(
+            Task.id,
+            Task.target_url,
+            Task.objective,
+            Task.status,
+            Task.test_type,
+            Task.created_at,
+            Task.updated_at,
+            Task.execution_log.label("list_log"),
+        )
+        if filters:
+            fallback_stmt = fallback_stmt.where(*filters)
+        fallback_stmt = fallback_stmt.order_by(Task.created_at.desc()).offset(offset).limit(page_size)
+        result = await db.execute(fallback_stmt)
+
+    items = []
+    for row in result:
+        parsed = _decode_run_list_log(row.list_log)
+        status_value = _effective_status_value(row.status, parsed)
+        triage = _build_run_list_triage(status_value, parsed)
+        counts = _build_run_list_counts(status_value, parsed, triage)
+        items.append(
+            TaskListItemRead(
+                id=row.id,
+                target_url=row.target_url,
+                objective=row.objective,
+                status=status_value,
+                test_type=_status_value(row.test_type),
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+                triage_summary=triage,
+                **counts,
+            ).model_dump(mode="json")
+        )
     return JSONResponse(
         content=items,
         headers={"X-Total-Count": str(total)},
@@ -3711,6 +4062,7 @@ async def get_run_detail(run_id: str, db: DbSession, _: CurrentUser):
         parsed = {**parsed, **{key: value for key, value in runtime_detail.items() if value}}
     if log_str:
         detail["execution_log"] = redact_json_text(log_str)
+    detail["status"] = _effective_status_value(detail.get("status"), parsed)
 
     detail["api_plan"] = parsed.get("api_plan")
     detail["ui_plan"] = parsed.get("ui_plan")
@@ -3735,6 +4087,7 @@ async def get_run_detail(run_id: str, db: DbSession, _: CurrentUser):
     detail["agent_observations"] = parsed.get("agent_observations")
     detail["agent_evidence"] = parsed.get("agent_evidence")
     detail["agent_protocol_evaluations"] = parsed.get("agent_protocol_evaluations")
+    detail["run_findings"] = parsed.get("run_findings")
     detail["agent_protocol_summary"] = parsed.get("agent_protocol_summary")
     detail["runtime_events"] = parsed.get("runtime_events", [])
     detail["evidence_evaluation"] = parsed.get("evidence_evaluation")
@@ -3744,6 +4097,9 @@ async def get_run_detail(run_id: str, db: DbSession, _: CurrentUser):
     detail["agent_replan_feedback"] = parsed.get("agent_replan_feedback")
     detail["agent_retry_counts"] = parsed.get("agent_retry_counts")
     detail["agent_retry_feedback"] = parsed.get("agent_retry_feedback")
+    detail["agent_runtime_status"] = parsed.get("agent_runtime_status")
+    detail["agent_continuation_run_id"] = parsed.get("agent_continuation_run_id")
+    detail["agent_source_run_id"] = parsed.get("agent_source_run_id")
     detail["agent_human_question"] = parsed.get("agent_human_question")
     detail["agent_strategy_decision"] = parsed.get("agent_strategy_decision")
     detail["agent_tool_plan"] = parsed.get("agent_tool_plan")
@@ -3858,6 +4214,7 @@ async def save_run_case_assets(
             run_id=run_id,
             source=selection.source,
             source_index=selection.index,
+            source_base_url=task.target_url,
         )
         case_type = normalized.pop("case_type")
         test_case = TestCase(**normalized)
@@ -4036,7 +4393,8 @@ async def rerun_run(run_id: str, db: DbSession, _: CurrentUser):
             **rerun_context,
         )
     except Exception as e:
-        logger.warning("Celery dispatch failed on rerun: %s", e)
+        logger.warning("Celery dispatch failed on rerun: %s, running synchronously", e)
+        await _run_rerun_synchronously(db, new_task, rerun_context=rerun_context)
     return new_task
 
 
@@ -4045,7 +4403,7 @@ async def create_run_intervention(
     run_id: str,
     payload: RunInterventionCreate,
     db: DbSession,
-    _: CurrentUser,
+    user: CurrentUser,
 ):
     """Create an assisted rerun with human-supplied setup/intervention context."""
     task = await task_service.get(db, run_id)
@@ -4088,6 +4446,22 @@ async def create_run_intervention(
         test_type=task.test_type,
         status=TaskStatus.QUEUED,
     )
+    source_log = _parse_execution_log_dict(task.execution_log)
+    source_log["agent_runtime_status"] = "continued"
+    source_log["agent_continuation_run_id"] = new_task.id
+    task.execution_log = json.dumps(redact_sensitive_data(source_log), ensure_ascii=False, default=str)
+    db.add(
+        RunIntervention(
+            run_id=run_id,
+            user_id=getattr(user, "id", None),
+            supplemental_instructions=redact_sensitive_text(supplemental),
+            scope="continuation_run",
+            cancel_current=payload.cancel_current,
+            replan=True,
+            status="applied",
+            applied_at=datetime.utcnow(),
+        )
+    )
     await _seed_intervention_execution_log(
         db,
         new_task,
@@ -4104,7 +4478,11 @@ async def create_run_intervention(
             **rerun_context,
         )
     except Exception as e:
-        logger.warning("Celery dispatch failed on assisted intervention rerun: %s", e)
+        logger.warning(
+            "Celery dispatch failed on assisted intervention rerun: %s, running synchronously",
+            e,
+        )
+        await _run_rerun_synchronously(db, new_task, rerun_context=rerun_context)
     return new_task
 
 

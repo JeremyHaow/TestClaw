@@ -11,6 +11,7 @@ import StyledSelect from '../components/StyledSelect.vue'
 import SearchInput from '../components/SearchInput.vue'
 import TcButton from '../components/ui/TcButton.vue'
 import { useToast } from '../composables/useToast'
+import { formatServerDateTime, serverDateTimeMs } from '../lib/dateTime'
 import { BarChart3, Bug, Clock3, Download, Eye, Filter, RotateCcw, ShieldCheck, Target, Trash2 } from 'lucide-vue-next'
 
 type RunItem = {
@@ -69,10 +70,7 @@ const rerunningId = ref<string | null>(null)
 const exportingId = ref<string | null>(null)
 
 function formatTime(value: string | null | undefined) {
-  if (!value) return ''
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return ''
-  return date.toLocaleString('zh-CN')
+  return formatServerDateTime(value)
 }
 
 function formatQueryDateTime(date: Date) {
@@ -128,9 +126,9 @@ function numberValue(...values: unknown[]) {
 
 function durationMs(run: RunItem) {
   if (!run.created_at || !run.updated_at) return null
-  const start = new Date(run.created_at).getTime()
-  const end = new Date(run.updated_at).getTime()
-  if (Number.isNaN(start) || Number.isNaN(end) || end <= start) return null
+  const start = serverDateTimeMs(run.created_at)
+  const end = serverDateTimeMs(run.updated_at)
+  if (start === null || end === null || end <= start) return null
   return end - start
 }
 

@@ -9,7 +9,9 @@ PLAYWRIGHT_UI_ACTION_TYPES = {
     "open",
     "goto",
     "click_ref",
+    "click_text",
     "fill_ref",
+    "fill_text",
     "snapshot",
     "screenshot",
     "assert_visible",
@@ -132,6 +134,17 @@ def compile_playwright_ui_action(
             normalization="Compiled structured click_ref action to playwright-cli click.",
         )
 
+    if action_type == "click_text":
+        text = _text(action.get("text") or action.get("label") or action.get("target"), limit=200)
+        if not text:
+            return _blocked_spec(action, action_type, "click_text requires text.", risk="invalid")
+        return _base_spec(
+            action=action,
+            action_type=action_type,
+            command=f"click {_quote(text)}",
+            normalization="Compiled structured click_text action to semantic playwright-cli click.",
+        )
+
     if action_type == "fill_ref":
         ref = _ref(action)
         if not ref:
@@ -145,6 +158,21 @@ def compile_playwright_ui_action(
             action_type=action_type,
             command=f"fill {ref} {_quote(value)}{submit}",
             normalization="Compiled structured fill_ref action to playwright-cli fill.",
+        )
+
+    if action_type == "fill_text":
+        text = _text(action.get("text") or action.get("label") or action.get("target"), limit=200)
+        if not text:
+            return _blocked_spec(action, action_type, "fill_text requires text.", risk="invalid")
+        value = action.get("value")
+        if value is None:
+            return _blocked_spec(action, action_type, "fill_text requires value.", risk="invalid")
+        submit = " --submit" if action.get("submit") else ""
+        return _base_spec(
+            action=action,
+            action_type=action_type,
+            command=f"fill {_quote(text)} {_quote(value)}{submit}",
+            normalization="Compiled structured fill_text action to semantic playwright-cli fill.",
         )
 
     if action_type == "snapshot":

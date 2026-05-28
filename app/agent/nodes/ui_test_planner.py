@@ -30,7 +30,6 @@ _UPDATE_WORDS = ("edit", "update", "modify", "setting", "config", "编辑", "修
 _DELETE_WORDS = ("delete", "remove", "clear", "删除", "移除", "清空")
 _EXPORT_WORDS = ("export", "download", "导出", "下载")
 _REFRESH_WORDS = ("refresh", "reload", "刷新", "同步")
-_SUBMIT_WORDS = ("save", "submit", "confirm", "ok", "保存", "提交", "确定", "确认")
 _CANCEL_WORDS = ("cancel", "close", "back", "return", "取消", "关闭", "返回")
 _DETAIL_WORDS = ("detail", "view", "open", "详情", "查看", "打开")
 _LOGIN_CASE_WORDS = (
@@ -86,6 +85,8 @@ def _extract_actionable_items(snapshot: str, limit: int = 24) -> list[dict]:
         text = _extract_quoted_text(line)
         text_norm = text.lower()
         if not text or len(text) > 40:
+            continue
+        if _contains_any(text, _CANCEL_WORDS):
             continue
         if re.fullmatch(r"[\W_]+", text):
             continue
@@ -179,85 +180,28 @@ def _action_type(item: dict) -> str:
     return "navigation"
 
 
-def _run_code_command(script: str) -> str:
-    return f"run-code {_shell_quote(script)}"
+def _semantic_click_command(item: dict) -> str:
+    text = str(item.get("text") or "").strip()
+    if text:
+        return f"click {_shell_quote(text)}"
+    ref = item.get("ref")
+    return f"click {ref}" if ref else "snapshot"
 
 
-def _conditional_click_labels_command(labels: tuple[str, ...], roles: tuple[str, ...] = ("button", "link")) -> str:
-    labels_json = json.dumps(list(labels), ensure_ascii=False)
-    roles_json = json.dumps(list(roles), ensure_ascii=False)
-    script = (
-        "async page => { "
-        f"const labels = {labels_json}; const roles = {roles_json}; "
-        "let lastError = ''; "
-        "async function clickIfReady(locator, marker) { "
-        "const count = await locator.count().catch(() => 0); "
-        "if (!count) return false; "
-        "const candidate = locator.first(); "
-        "const visible = await candidate.isVisible({ timeout: 500 }).catch(() => false); "
-        "if (!visible) return false; "
-        "try { await candidate.click({ timeout: 1200 }); return `clicked ${marker}`; } "
-        "catch (error) { lastError = `${marker}: ${String(error.message || error).slice(0, 120)}`; return false; } "
-        "} "
-        "for (const label of labels) { "
-        "for (const role of roles) { "
-        "const locator = page.getByRole(role, { name: new RegExp(label, 'i') }).first(); "
-        "const clicked = await clickIfReady(locator, `${role}:${label}`); "
-        "if (clicked) return clicked; "
-        "} "
-        "const textLocator = page.getByText(new RegExp(label, 'i')).first(); "
-        "const clicked = await clickIfReady(textLocator, `text:${label}`); "
-        "if (clicked) return clicked; "
-        "} "
-        "return lastError ? `no safe matching action: ${lastError}` : 'no matching action'; "
-        "}"
-    )
-    return _run_code_command(script)
+def _semantic_fill_command(control: dict, value: str) -> str:
+    text = str(control.get("text") or "").strip()
+    if text and text != str(control.get("role") or ""):
+        return f"fill {_shell_quote(text)} {_shell_quote(value)}"
+    ref = control.get("ref")
+    return f"fill {ref} {_shell_quote(value)}" if ref else "snapshot"
 
 
-def _conditional_required_submit_command() -> str:
-    labels_json = json.dumps(list(_SUBMIT_WORDS), ensure_ascii=False)
-    script = (
-        "async page => { "
-        "const required = page.locator('input[required], textarea[required], select[required], "
-        "[aria-required=\"true\"]'); "
-        "if (await required.count() === 0) return 'skip submit: no required empty fields'; "
-        f"const labels = {labels_json}; "
-        "for (const label of labels) { "
-        "const button = page.getByRole('button', { name: new RegExp(label, 'i') }).first(); "
-        "if (await button.count().catch(() => 0)) { "
-        "const visible = await button.isVisible({ timeout: 500 }).catch(() => false); "
-        "if (!visible) continue; "
-        "try { await button.click({ timeout: 1200 }); return `submitted empty form:${label}`; } "
-        "catch (error) { return `skip submit: ${String(error.message || error).slice(0, 120)}`; } "
-        "} "
-        "} "
-        "return 'skip submit: no safe submit button'; "
-        "}"
-    )
-    return _run_code_command(script)
-
-
-def _conditional_open_first_record_command() -> str:
-    script = (
-        "async page => { "
-        "const selectors = ["
-        "'table a', '[role=\"table\"] a', '[role=\"grid\"] a', '[role=\"row\"] a', "
-        "'[role=\"listitem\"] a'"
-        "]; "
-        "for (const selector of selectors) { "
-        "const locator = page.locator(selector).first(); "
-        "if (await locator.count().catch(() => 0)) { "
-        "const visible = await locator.isVisible({ timeout: 500 }).catch(() => false); "
-        "if (!visible) continue; "
-        "try { await locator.click({ timeout: 1200 }); return `opened record via ${selector}`; } "
-        "catch (error) { return `skip record open: ${String(error.message || error).slice(0, 120)}`; } "
-        "} "
-        "} "
-        "return 'no linked record available'; "
-        "}"
-    )
-    return _run_code_command(script)
+def _semantic_control_click_command(control: dict) -> str:
+    text = str(control.get("text") or "").strip()
+    if text and text != str(control.get("role") or ""):
+        return f"click {_shell_quote(text)}"
+    ref = control.get("ref")
+    return f"click {ref}" if ref else "snapshot"
 
 
 def _is_low_value_case(case: dict, prepared_context: bool) -> bool:
@@ -285,9 +229,8 @@ def _is_low_value_case(case: dict, prepared_context: bool) -> bool:
 
 def _business_case_for_action(item: dict, index: int) -> dict:
     text = item["text"]
-    ref = item.get("ref")
     action_type = _action_type(item)
-    click_command = f"click {ref}" if ref else f"click {_shell_quote(text)}"
+    click_command = _semantic_click_command(item)
     if action_type == "create":
         title = f"新增/创建流程入口检查：{text}"
         expected = [
@@ -386,9 +329,9 @@ def _control_case(control: dict, actions: list[dict], index: int) -> dict:
     operation_type = "input"
     if role in {"textbox", "searchbox", "spinbutton"}:
         value = "TestClaw-Auto"
-        commands.append(f"fill {ref} {_shell_quote(value)}")
-        if search_action and search_action.get("ref"):
-            commands.append(f"click {search_action['ref']}")
+        commands.append(_semantic_fill_command(control, value))
+        if search_action:
+            commands.append(_semantic_click_command(search_action))
             operation_type = "search"
         commands.extend(["snapshot", "screenshot", "snapshot", "screenshot"])
     elif role in {"checkbox", "radio"}:
@@ -437,16 +380,16 @@ def _search_flow_case(controls: list[dict], actions: list[dict], index: int) -> 
     search_action = next((item for item in actions if _action_type(item) == "search"), None)
     commands = ["snapshot"]
     if control.get("role") in {"textbox", "searchbox"}:
-        commands.append(f"fill {control['ref']} {_shell_quote('TestClaw-Auto')}")
+        commands.append(_semantic_fill_command(control, "TestClaw-Auto"))
     else:
-        commands.append(f"click {control['ref']}")
-    if search_action and search_action.get("ref"):
-        commands.append(f"click {search_action['ref']}")
+        commands.append(_semantic_control_click_command(control))
+    if search_action:
+        commands.append(_semantic_click_command(search_action))
     commands.extend(["snapshot", "screenshot"])
     if control.get("role") in {"textbox", "searchbox"}:
-        commands.append(f"fill {control['ref']} {_shell_quote('')}")
-        if search_action and search_action.get("ref"):
-            commands.append(f"click {search_action['ref']}")
+        commands.append(_semantic_fill_command(control, ""))
+        if search_action:
+            commands.append(_semantic_click_command(search_action))
         commands.extend(["snapshot", "screenshot"])
 
     return {
@@ -481,7 +424,7 @@ def _safe_form_validation_flow_case(actions: list[dict], index: int) -> dict | N
         return None
 
     text = str(entry.get("text") or "表单入口")
-    click_command = f"click {entry['ref']}" if entry.get("ref") else f"click {_shell_quote(text)}"
+    click_command = _semantic_click_command(entry)
     return {
         "title": f"表单打开、必填校验与取消路径检查：{text}",
         "category": "FORM",
@@ -494,23 +437,16 @@ def _safe_form_validation_flow_case(actions: list[dict], index: int) -> dict | N
         "steps": [
             f"从当前业务上下文打开“{text}”对应的新增、编辑或配置表单",
             "采集表单字段、默认值和操作按钮截图",
-            "仅在页面存在 HTML 必填字段时尝试空提交，验证前端/后端必填校验",
-            "通过取消、关闭或返回路径退出表单，避免产生真实写入",
+            "不执行保存、提交或确认写入动作，仅记录可见字段和安全提示",
         ],
         "expected": [
             "表单或配置页面能够打开",
-            "必填字段为空提交时展示校验反馈，或安全跳过提交动作",
-            "取消/关闭后页面回到业务上下文且没有误创建、误修改数据",
+            "页面展示可填写字段、保存/取消入口或明确的业务提示",
+            "测试过程中没有触发真实创建、修改或删除动作",
         ],
         "playwright_commands": [
             "snapshot",
             click_command,
-            "snapshot",
-            "screenshot",
-            _conditional_required_submit_command(),
-            "snapshot",
-            "screenshot",
-            _conditional_click_labels_command(_CANCEL_WORDS),
             "snapshot",
             "screenshot",
         ],
@@ -529,19 +465,13 @@ def _record_drilldown_flow_case(data_regions: list[dict], actions: list[dict], i
         None,
     )
     commands = ["snapshot"]
-    if detail_action and detail_action.get("ref"):
-        commands.append(f"click {detail_action['ref']}")
-    else:
-        commands.append(_conditional_open_first_record_command())
-    commands.extend(
-        [
-            "snapshot",
-            "screenshot",
-            _conditional_click_labels_command((*_CANCEL_WORDS, "list", "列表")),
-            "snapshot",
-            "screenshot",
-        ]
-    )
+    opened_detail = False
+    if detail_action:
+        commands.append(_semantic_click_command(detail_action))
+        opened_detail = True
+    commands.extend(["snapshot", "screenshot"])
+    if opened_detail:
+        commands.extend(["go-back", "snapshot", "screenshot"])
 
     return {
         "title": "列表/表格记录详情链路检查",
@@ -554,14 +484,14 @@ def _record_drilldown_flow_case(data_regions: list[dict], actions: list[dict], i
         "operation_type": "record_drilldown_flow",
         "steps": [
             "识别当前页面的数据列表、表格、网格或记录区域",
-            "优先打开可见详情/查看入口；没有明确入口时尝试打开第一条安全链接记录",
-            "采集详情或记录页面证据",
-            "返回列表并验证上下文可恢复",
+            "优先打开可见详情、查看或打开入口；没有明确入口时只采集列表证据",
+            "采集详情、记录页面或列表区域证据",
+            "如果已进入详情页面，则使用浏览器返回恢复列表上下文",
         ],
         "expected": [
-            "数据区域可见且存在可探索的记录入口，或安全跳过无入口场景",
-            "详情/记录页面打开后没有阻断性错误",
-            "返回后列表上下文保持可用",
+            "数据区域可见，且没有明确详情入口时不会执行任意脚本探测",
+            "详情/记录页面或列表区域没有阻断性错误",
+            "返回后或留在列表时上下文保持可用",
         ],
         "playwright_commands": commands,
     }
@@ -648,6 +578,31 @@ def _build_authenticated_business_cases(
     if len(cases) > max_cases:
         return cases[:max_cases]
 
+    return cases
+
+
+def _build_public_business_cases(snapshot: str) -> list[dict]:
+    cases = _build_authenticated_business_cases(snapshot)
+    for case in cases:
+        case["requires_authenticated_context"] = False
+        if case.get("source") == "authenticated_snapshot":
+            case["source"] = "public_snapshot"
+        if case.get("title") == "前置准备后页面状态与核心入口检查":
+            case["title"] = "公开页面状态与核心入口检查"
+        case["steps"] = [
+            str(step)
+            .replace("前置准备后的", "公开页面的")
+            .replace("前置准备后", "公开页面")
+            .replace("准备后的", "公开页面的")
+            for step in case.get("steps") or []
+        ]
+        case["expected"] = [
+            str(item)
+            .replace("准备前的阻塞页面", "登录或鉴权阻塞页面")
+            .replace("准备后的状态", "公开访问状态")
+            .replace("退回到准备前状态", "进入登录或鉴权阻塞状态")
+            for item in case.get("expected") or []
+        ]
     return cases
 
 
@@ -742,10 +697,16 @@ def _structured_ui_actions_from_commands(commands: list[str]) -> list[dict]:
         elif name == "screenshot":
             actions.append({"type": "screenshot", "reason": "Capture visual evidence."})
         elif name == "click" and arg:
-            actions.append({"type": "click_ref", "ref": arg, "reason": "Click a bounded page reference."})
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", arg) and any(char.isdigit() for char in arg):
+                actions.append({"type": "click_ref", "ref": arg, "reason": "Click a bounded page reference."})
+            else:
+                actions.append({"type": "click_text", "text": arg, "reason": "Click a semantic page target."})
         elif name in {"fill", "type"} and arg:
             value = parts[2] if len(parts) > 2 else ""
-            actions.append({"type": "fill_ref", "ref": arg, "value": value, "reason": "Fill a bounded page reference."})
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", arg) and any(char.isdigit() for char in arg):
+                actions.append({"type": "fill_ref", "ref": arg, "value": value, "reason": "Fill a bounded page reference."})
+            else:
+                actions.append({"type": "fill_text", "text": arg, "value": value, "reason": "Fill a semantic page target."})
         elif name in {"run-code", "eval", "evaluate"}:
             actions.append({"type": "run_code", "reason": "Legacy arbitrary code command converted to blocked structured action."})
     return actions
@@ -844,7 +805,6 @@ async def run(state: AgentState) -> AgentState:
     """Generate comprehensive UI test cases using LLM + page snapshot."""
     target_url = state.get("ui_seed_url") or state.get("target_url", "")
     existing_ui_cases = list(state.get("ui_cases") or [])
-    preserve_existing_ui_cases = str(state.get("source_input") or "").strip().lower() == "suite"
     setup_instructions = state.get("setup_instructions") or state.get("login_instructions")
     setup_required = bool((setup_instructions or "").strip())
     login_verified = state.get("login_verified")
@@ -853,6 +813,10 @@ async def run(state: AgentState) -> AgentState:
     login_commands = state.get("login_playwright_commands") or []
     task_id = state.get("task_id", "unknown")
     db = state.get("db_session")
+    preserve_existing_ui_cases = (
+        str(state.get("source_input") or "").strip().lower() == "suite"
+        or bool(existing_ui_cases and db is None)
+    )
     replan_feedback = (state.get("agent_replan_feedback") or "").strip()
     previous_ui_result = state.get("ui_execution_result") or {}
     previous_snapshots = [
@@ -885,15 +849,20 @@ async def run(state: AgentState) -> AgentState:
     explore_commands = []
     explored_snapshot = login_snapshot
     business_cases: list[dict] = []
-    if login_snapshot and state.get("login_playwright_commands"):
+    public_context_available = bool(login_snapshot and not setup_required)
+    if login_snapshot and (state.get("login_playwright_commands") or public_context_available):
         try:
             post_setup_url = (state.get("authenticated_ui_context") or {}).get("post_login_url")
             explore_commands, explored_snapshot = await _explore_after_login(
                 target_url,
                 task_id,
-                reset_url=post_setup_url,
+                reset_url=post_setup_url if not public_context_available else None,
             )
-            business_cases = _build_authenticated_business_cases(explored_snapshot)
+            business_cases = (
+                _build_public_business_cases(explored_snapshot)
+                if public_context_available
+                else _build_authenticated_business_cases(explored_snapshot)
+            )
             logger.info("Exploration discovered %d extra commands", len(explore_commands))
         except Exception as e:
             logger.warning("Exploration failed: %s", e)
@@ -955,14 +924,25 @@ async def run(state: AgentState) -> AgentState:
         ui_cases = _build_fallback_ui_cases(target_url, [], None)
         ui_cases = [_normalize_case(c) for c in ui_cases]
 
-    if not preserve_existing_ui_cases and setup_required and login_verified is True:
+    prepared_context_available = setup_required and login_verified is True
+    if not preserve_existing_ui_cases and (prepared_context_available or public_context_available):
         if not business_cases:
-            business_cases = _build_authenticated_business_cases(explored_snapshot)
-        ui_cases = _merge_or_replace_low_value_cases(ui_cases, business_cases, prepared_context=True)
+            business_cases = (
+                _build_authenticated_business_cases(explored_snapshot)
+                if prepared_context_available
+                else _build_public_business_cases(explored_snapshot)
+            )
+        ui_cases = _merge_or_replace_low_value_cases(
+            ui_cases,
+            business_cases,
+            prepared_context=prepared_context_available,
+        )
         discovered_actions = [case.get("target_action") for case in business_cases if case.get("target_action")]
         auth_context = state.get("authenticated_ui_context") or {}
         auth_context["discovered_ui_actions"] = discovered_actions
         auth_context["business_case_count"] = len(business_cases)
+        if public_context_available:
+            auth_context["public_context"] = True
         state["authenticated_ui_context"] = auth_context
 
     ui_cases = [_normalize_case(case) for case in ui_cases]

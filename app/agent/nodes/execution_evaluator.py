@@ -254,6 +254,15 @@ def _latest_failure_type(observations: list[dict[str, Any]]) -> str | None:
 
 
 def _stage_failure_type(stage_summary: dict[str, Any]) -> str | None:
+    failure_types = stage_summary.get("failure_types")
+    if isinstance(failure_types, dict):
+        human_failures = [
+            str(failure_type)
+            for failure_type, count in failure_types.items()
+            if count and failure_requires_human(failure_type)
+        ]
+        if human_failures:
+            return max(human_failures, key=lambda item: int(failure_types.get(item) or 0))
     return (
         stage_summary.get("latest_failure_type")
         or stage_summary.get("dominant_failure_type")
@@ -436,6 +445,8 @@ def _api_needs_replan(state: AgentState, summary: dict[str, Any]) -> tuple[bool,
     dominant_failure = _stage_failure_type(protocol if isinstance(protocol, dict) else {})
     if not api["requested"]:
         return False, "API stage is not requested for this run.", []
+    if str(state.get("source_input") or "").strip().lower() == "suite":
+        return False, "Selected suite cases preserve user-provided execution semantics.", []
     if _api_has_completed_strategy_coverage(state, summary):
         return False, "Validated agent strategy coverage reached a reportable stopping point.", []
     if api["all_passed"] and api["executed"] > 0:
@@ -1024,6 +1035,7 @@ def _apply_decision(state: AgentState, stage: str, decision: dict[str, Any], sum
         state["test_cases"] = list(_safe_list(state.get("ui_cases")))
         state["agent_replan_feedback"] = decision.get("replan_instructions") or decision.get("reason")
         state["agent_retry_feedback"] = None
+        state["agent_runtime_status"] = None
         state["agent_human_question"] = None
     elif action == _REPLAN_UI:
         _append_attempt_history(state, "ui", summary, attempt_kind="replan")
@@ -1032,6 +1044,7 @@ def _apply_decision(state: AgentState, stage: str, decision: dict[str, Any], sum
         state["test_cases"] = list(_safe_list(state.get("api_cases")))
         state["agent_replan_feedback"] = decision.get("replan_instructions") or decision.get("reason")
         state["agent_retry_feedback"] = None
+        state["agent_runtime_status"] = None
         state["agent_human_question"] = None
     elif action == _RETRY_SAME_ACTION:
         _append_attempt_history(state, stage, summary, attempt_kind="retry")
@@ -1042,10 +1055,12 @@ def _apply_decision(state: AgentState, stage: str, decision: dict[str, Any], sum
             or decision.get("replan_hint")
             or decision.get("reason")
         )
+        state["agent_runtime_status"] = None
         state["agent_human_question"] = None
     elif action == _ASK_HUMAN:
         state["agent_replan_feedback"] = None
         state["agent_retry_feedback"] = None
+        state["agent_runtime_status"] = "waiting_for_human"
         state["agent_human_question"] = (
             decision.get("human_question")
             or (decision.get("missing_evidence") or [None])[0]
@@ -1054,6 +1069,7 @@ def _apply_decision(state: AgentState, stage: str, decision: dict[str, Any], sum
     elif action in {_CONTINUE_TO_UI, _CONTINUE, _REPORT}:
         state["agent_replan_feedback"] = None
         state["agent_retry_feedback"] = None
+        state["agent_runtime_status"] = None
         state["agent_human_question"] = None
 
     if action == _RETRY_SAME_ACTION:

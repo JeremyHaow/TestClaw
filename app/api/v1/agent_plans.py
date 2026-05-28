@@ -274,6 +274,14 @@ async def _load_or_create_structured_plan(
     return plan
 
 
+async def _load_structured_plan(
+    db: DbSession,
+    session: AgentPlanningSession,
+) -> AgentPlan | None:
+    result = await db.execute(select(AgentPlan).where(AgentPlan.session_id == session.id))
+    return result.scalars().first()
+
+
 def _structured_step_payload(payload: AgentPlanIntakeRequest) -> dict[str, Any]:
     action = str(payload.action or "continue").strip().lower() or "continue"
     step = _canonical_intake_step(payload.current_step) or "target_kind"
@@ -1054,7 +1062,24 @@ async def intake_agent_plan_session_alias(
             raise HTTPException(status_code=400, detail="current_step cannot be skipped")
         if action == "continue" and payload.selected_option is None and not str(payload.message or "").strip():
             raise HTTPException(status_code=400, detail="message is required")
-        plan = await _load_or_create_structured_plan(db, session)
+        plan = await _load_structured_plan(db, session)
+        messages = await agent_planning_service.list_messages(db, session_id=session.id)
+        if plan is None and messages and action == "continue":
+            content = _intake_message_content(payload)
+            if not content:
+                raise HTTPException(status_code=400, detail="message is required")
+            try:
+                session, messages = await agent_planning_service.add_user_message(
+                    db,
+                    session=session,
+                    content=content,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="message is required") from exc
+            return _agent_plan_intake_payload(session, messages)
+
+        if plan is None:
+            plan = await _load_or_create_structured_plan(db, session)
         setattr(plan, STRUCTURED_FIELD_BY_STEP[step], _structured_step_payload(payload))
         plan.updated_at = datetime.utcnow()
         session.updated_at = datetime.utcnow()

@@ -1,5 +1,6 @@
 import json
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, field_validator
 
@@ -55,6 +56,11 @@ class TaskListItemRead(ORMModel):
     created_at: datetime
     updated_at: datetime | None = None
     error_message: str | None = None
+    issue_count: int | None = None
+    finding_count: int | None = None
+    bug_count: int | None = None
+    evidence_count: int | None = None
+    triage_summary: dict[str, Any] | None = None
 
 
 class TaskDetailRead(TaskRead):
@@ -125,6 +131,9 @@ def parse_task_detail(task_orm) -> dict:
         "agent_replan_feedback": parsed.get("agent_replan_feedback"),
         "agent_retry_counts": parsed.get("agent_retry_counts"),
         "agent_retry_feedback": parsed.get("agent_retry_feedback"),
+        "agent_runtime_status": parsed.get("agent_runtime_status"),
+        "agent_continuation_run_id": parsed.get("agent_continuation_run_id"),
+        "agent_source_run_id": parsed.get("agent_source_run_id"),
         "agent_human_question": parsed.get("agent_human_question"),
         "agent_strategy_decision": parsed.get("agent_strategy_decision"),
         "agent_tool_plan": parsed.get("agent_tool_plan"),

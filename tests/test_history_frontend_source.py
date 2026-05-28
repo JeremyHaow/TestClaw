@@ -3,6 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 HISTORY_PAGE = ROOT / "frontend/src/pages/HistoryPage.vue"
+DATE_TIME_LIB = ROOT / "frontend/src/lib/dateTime.ts"
 
 
 def _source(path: Path) -> str:
@@ -48,6 +49,8 @@ def test_history_page_preserves_existing_runs_hooks() -> None:
         "params.search",
         "created_after",
         "created_before",
+        "formatServerDateTime",
+        "serverDateTimeMs",
     ]:
         assert hook in source
 
@@ -74,3 +77,14 @@ def test_history_page_renders_run_cards_from_loaded_runs() -> None:
     assert 'data-testid="history-run-card"' in source
     assert "runSnippets(run)" in source
     assert "<table" not in source.lower()
+
+
+def test_history_page_parses_backend_naive_timestamps_as_utc() -> None:
+    source = _source(DATE_TIME_LIB)
+    history_source = _source(HISTORY_PAGE)
+
+    assert "HAS_TIMEZONE_SUFFIX" in source
+    assert "`${trimmed}Z`" in source
+    assert "formatServerDateTime(value)" in history_source
+    assert "serverDateTimeMs(run.created_at)" in history_source
+    assert "new Date(run.created_at)" not in history_source

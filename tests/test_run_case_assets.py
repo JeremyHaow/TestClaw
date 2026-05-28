@@ -5,6 +5,11 @@ import uuid
 from fastapi.testclient import TestClient
 
 from app.core.redaction import REDACTED_VALUE
+from app.api.v1.test_cases import (
+    _build_suite_case_payloads,
+    _extract_suite_source_run_target_url,
+    _extract_suite_target_url,
+)
 from app.database import AsyncSessionLocal
 from app.main import app
 from app.models.task import Task, TaskStatus, TestType as TaskTestType
@@ -64,6 +69,7 @@ def test_save_run_generated_cases_into_suite() -> None:
                     },
                     "json": {"password": "body-secret", "safe": "value"},
                 },
+                "assertions": [{"type": "status_code", "expected": [200, 204]}],
             }
         ],
         "ui_cases": [
@@ -129,14 +135,23 @@ def test_save_run_generated_cases_into_suite() -> None:
     assert api_case.expected == ["HTTP 200 with a JSON body"]
     assert api_case.test_data["request_template"]["method"] == "GET"
     assert api_case.test_data["request_template"]["path"] == "/health"
+    assert api_case.test_data["request_template"]["base_url"] == "https://api.example.test"
+    assert api_case.test_data["base_url"] == "https://api.example.test"
     assert api_case.test_data["request_template"]["headers"] == {"Content-Type": "application/json"}
     assert api_case.test_data["request_template"]["json"]["password"] == REDACTED_VALUE
+    assert api_case.test_data["request_template"]["expected_status"] == [200, 204]
+    assert api_case.test_data["request_template"]["assertions"] == [
+        {"type": "status_code", "expected": [200, 204]}
+    ]
 
     ui_case = next(case for case in cases if case.category == "ui")
     assert ui_case.title == "Edited dashboard UI"
     assert ui_case.steps == ["Open the dashboard", "Capture a snapshot"]
     assert ui_case.test_data["playwright_commands"][0] == "open https://web.example.test/dashboard"
     assert ui_case.test_data["playwright_commands"][1] == f'fill "Password" "{REDACTED_VALUE}"'
+
+    api_cases, ui_cases = _build_suite_case_payloads(cases)
+    assert _extract_suite_target_url(api_cases, ui_cases) == "https://api.example.test"
 
 
 def test_save_run_generated_cases_rejects_invalid_selection() -> None:
@@ -151,6 +166,37 @@ def test_save_run_generated_cases_rejects_invalid_selection() -> None:
 
     assert response.status_code == 400
     assert "Invalid case selection" in response.json()["detail"]
+
+
+def test_suite_target_recovers_legacy_run_case_asset_base_url() -> None:
+    run_id = asyncio.run(_insert_task({"api_cases": [{"title": "legacy case"}]}))
+
+    async def _insert_and_resolve() -> str:
+        async with AsyncSessionLocal() as session:
+            test_case = ModelTestCase(
+                title="Legacy run case",
+                category="api",
+                priority="P1",
+                steps=["GET /health"],
+                expected=["HTTP 200"],
+                test_data={
+                    "case_asset": {
+                        "version": 1,
+                        "source_run_id": run_id,
+                        "source": "api_cases",
+                        "source_index": 0,
+                        "case_type": "api",
+                    },
+                    "request_template": {"method": "GET", "url": "/health"},
+                },
+                source=f"run_case_asset:{run_id}:api_cases:0",
+            )
+            session.add(test_case)
+            await session.commit()
+            await session.refresh(test_case)
+            return await _extract_suite_source_run_target_url(session, [test_case])
+
+    assert asyncio.run(_insert_and_resolve()) == "https://api.example.test"
 
 
 def test_save_run_generated_cases_does_not_persist_secrets() -> None:

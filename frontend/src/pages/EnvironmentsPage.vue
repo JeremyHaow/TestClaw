@@ -53,6 +53,22 @@ function objectToVariables(obj: Record<string, any>): KeyValue[] {
   return Object.entries(obj).map(([key, value]) => ({ key, value: String(value) }))
 }
 
+function variableKeysToEmptyObject(item: any): Record<string, string> {
+  return Object.fromEntries(Object.keys(item?.variables || {}).map((key) => [key, '']))
+}
+
+function copyNameFor(item: any): string {
+  const sourceName = item?.name || '测试环境'
+  const existingNames = new Set(items.value.map((existing) => existing?.name).filter(Boolean))
+  const firstCopyName = `${sourceName} (副本)`
+  if (!existingNames.has(firstCopyName)) return firstCopyName
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${sourceName} (副本 ${index})`
+    if (!existingNames.has(candidate)) return candidate
+  }
+  return `${sourceName} (副本 ${Date.now()})`
+}
+
 function addVariable() {
   form.variables.push({ key: '', value: '' })
 }
@@ -132,9 +148,9 @@ async function copyEnvironment(item: any) {
   submitting.value = true
   try {
     await api.post('/environments', {
-      name: `${item.name} (副本)`,
+      name: copyNameFor(item),
       base_url: item.base_url || '',
-      variables: {},
+      variables: variableKeysToEmptyObject(item),
       is_production: item.is_production || false,
     })
     toast.success('环境结构已复制，请重新填写变量')

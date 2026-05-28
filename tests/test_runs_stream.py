@@ -5,6 +5,8 @@ import uuid
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app.agent.action_runtime import append_api_result_observations
+from app.agent.runtime.event_store import AgentRuntimeEventStore
 from app.database import AsyncSessionLocal
 from app.main import app
 from app.models.run_event import RunEvent
@@ -39,6 +41,29 @@ async def _load_run_events(run_id: str) -> list[RunEvent]:
             select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.sequence)
         )
         return list(result.scalars())
+
+
+async def _seed_runtime_records(run_id: str) -> None:
+    state: dict = {"task_id": run_id}
+    append_api_result_observations(
+        state,
+        {
+            "results": [
+                {
+                    "label": "GET /runtime-private",
+                    "method": "GET",
+                    "url": "https://api.example.test/runtime-private",
+                    "status_code": 403,
+                    "passed": False,
+                    "failure_type": "auth_failure",
+                    "http_executed": True,
+                }
+            ]
+        },
+        stage="api_runner",
+    )
+    async with AsyncSessionLocal() as session:
+        await AgentRuntimeEventStore(session).flush_state(state, stage="api_runner")
 
 
 def _stream_body(client: TestClient, run_id: str, token: str) -> tuple[str, str]:
@@ -128,6 +153,24 @@ def test_run_stream_persists_redacted_run_events() -> None:
     assert {"run.status", "run.finished"} & event_types
     assert "row-secret" not in serialized
     assert "row-report-secret" not in serialized
+
+
+def test_run_stream_snapshot_includes_runtime_table_records() -> None:
+    execution_log = {
+        "workflow_steps": [{"node": "api_runner", "status": "failed", "detail": "API auth failed"}],
+        "final_report": {"overall_verdict": "FAIL"},
+    }
+
+    with TestClient(app) as client:
+        token = _token(client)
+        run_id = asyncio.run(_insert_task(status=TaskStatus.FAILED, execution_log=execution_log))
+        asyncio.run(_seed_runtime_records(run_id))
+        _, body = _stream_body(client, run_id, token)
+
+    assert '"agent_observations"' in body
+    assert '"runtime_events"' in body
+    assert "runtime-private" in body
+    assert "auth_failure" in body
 
 
 def test_run_stream_returns_404_for_unknown_run() -> None:

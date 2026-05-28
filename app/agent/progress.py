@@ -52,6 +52,9 @@ EXECUTION_LOG_KEYS = (
     "agent_replan_feedback",
     "agent_retry_counts",
     "agent_retry_feedback",
+    "agent_runtime_status",
+    "agent_continuation_run_id",
+    "agent_source_run_id",
     "agent_human_question",
     "agent_strategy_decision",
     "agent_tool_plan",
@@ -92,6 +95,15 @@ EXECUTION_LOG_KEYS = (
     "ui_reproducible_script",
     "ui_execution_context_plan",
 )
+
+CLEARABLE_EXECUTION_LOG_KEYS = {
+    "agent_replan_feedback",
+    "agent_retry_feedback",
+    "agent_runtime_status",
+    "agent_continuation_run_id",
+    "agent_source_run_id",
+    "agent_human_question",
+}
 
 
 def utc_now_iso() -> str:
@@ -147,6 +159,8 @@ def build_execution_log_payload(
             payload[key] = _merge_unique(previous.get(key), state.get(key))
         elif key in state and state.get(key) is not None:
             payload[key] = state.get(key)
+        elif key in state and key in CLEARABLE_EXECUTION_LOG_KEYS:
+            payload[key] = None
         elif key in previous:
             payload[key] = previous.get(key)
 
@@ -173,6 +187,37 @@ def latest_workflow_step(state: dict[str, Any], node: str | None = None) -> dict
     return None
 
 
+def _result_count(result: Any, *keys: str) -> int:
+    if not isinstance(result, dict):
+        return 0
+    for key in keys:
+        value = result.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _result_all_passed(result: Any, ran: bool) -> bool:
+    if not ran or not isinstance(result, dict):
+        return True
+    value = result.get("all_passed")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes"}:
+            return True
+        if lowered in {"false", "0", "no"}:
+            return False
+    if value is not None:
+        return bool(value)
+    return _result_count(result, "failed") == 0
+
+
 def determine_final_status(state: dict[str, Any]) -> TaskStatus:
     if state.get("cancelled"):
         return TaskStatus.CANCELLED
@@ -182,8 +227,8 @@ def determine_final_status(state: dict[str, Any]) -> TaskStatus:
     execution_result = state.get("execution_result")
 
     # Check if anything actually ran
-    api_ran = api_result is not None and api_result.get("completed", 0) > 0
-    ui_ran = ui_result is not None and ui_result.get("completed", 0) > 0
+    api_ran = api_result is not None and _result_count(api_result, "completed", "executed") > 0
+    ui_ran = ui_result is not None and _result_count(ui_result, "completed", "executed") > 0
     legacy_ran = execution_result is not None
 
     nothing_ran = not api_ran and not ui_ran and not legacy_ran
@@ -194,18 +239,18 @@ def determine_final_status(state: dict[str, Any]) -> TaskStatus:
         return TaskStatus.FAILED
 
     # Default: absent result = not applicable (pass)
-    api_passed = (api_result or {}).get("all_passed", True)
-    ui_passed = (ui_result or {}).get("all_passed", True)
+    api_passed = _result_all_passed(api_result, api_ran)
+    ui_passed = _result_all_passed(ui_result, ui_ran)
     legacy_passed = True
     if execution_result is not None:
-        legacy_passed = (execution_result or {}).get("status_code", 0) == 0
+        legacy_passed = _result_count(execution_result, "status_code") == 0
 
     if api_passed and ui_passed and legacy_passed:
         return TaskStatus.SUCCEEDED
 
     # Check if at least some tests passed (partial success = BUG_FOUND, not FAILED)
-    api_any_passed = (api_result or {}).get("passed", 0) > 0
-    ui_any_passed = (ui_result or {}).get("passed", 0) > 0
+    api_any_passed = _result_count(api_result, "passed") > 0
+    ui_any_passed = _result_count(ui_result, "passed") > 0
     any_success = api_any_passed or ui_any_passed
 
     if any_success or state.get("last_error"):

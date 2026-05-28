@@ -218,7 +218,7 @@ RAG 上下文：{rag_context}
     "ui_actions": [
       {{"type": "open", "url": "https://example.com", "reason": "打开目标页面"}},
       {{"type": "snapshot", "reason": "读取页面结构"}},
-      {{"type": "click_ref", "ref": "e12", "reason": "点击当前快照中的按钮"}},
+      {{"type": "click_text", "text": "按钮文本", "reason": "按当前页面文本点击按钮"}},
       {{"type": "screenshot", "reason": "保存证据截图"}}
     ],
     "playwright_commands": [
@@ -362,7 +362,7 @@ EVIDENCE_EVALUATOR_PROMPT = """你是 TestClaw 的测试执行质量评估智能
 6. 如果 failure_type 是 auth_failure、environment_blocked、ui_high_risk_action_blocked 或登录/setup 阻塞，并且缺少用户可提供的信息，应建议 ask_human。
 7. 不要假设固定网站、固定接口、固定截图或固定业务菜单；只依据证据摘要和工具调用。
 8. API 重规划只能在已加载 OpenAPI schema 和执行策略范围内加深已记录 endpoint 的证据；不要建议不存在路径、schema 外路径、鉴权绕过测试或安全策略禁止的方法。
-9. UI 重规划优先输出结构化 ui_actions（open、goto、snapshot、click_ref、fill_ref、screenshot、assert_visible、wait_for）；legacy playwright_commands 只能使用 open、goto、snapshot、click、fill、type、screenshot、resize、go-back、reload、dialog-dismiss。不要建议 run-code、evaluate、eval、wait/sleep/assert/expect。
+9. UI 重规划优先输出结构化 ui_actions（open、goto、snapshot、click_text、click_ref、fill_text、fill_ref、screenshot、assert_visible、wait_for）；legacy playwright_commands 只能使用 open、goto、snapshot、click、fill、type、screenshot、resize、go-back、reload、dialog-dismiss。不要建议 run-code、evaluate、eval、wait/sleep/assert/expect。
 10. 不要输出隐藏推理过程；reason 使用一句可观察的判断依据。
 11. 输出纯 JSON，不要包含 Markdown。
 """
@@ -467,7 +467,7 @@ UI_TEST_PLANNER_PROMPT = """你是资深 UI 测试自动化专家。你正在测
 5. 每个关键操作后都要 screenshot，确保每个测试场景有不同的截图证据
 6. 默认生成 20-40 个高价值用例；如果页面可操作入口较少，可以少于 20 个但必须覆盖所有主要入口
 7. 如果用例依赖前置准备后的上下文，设置 requires_authenticated_context=true，并且不要重新 open 起始入口页
-8. 优先使用页面快照中的 ref 定位；如果快照显示 [ref=e12]，命令写 click e12 或 fill e12 "值"，不要把 [ref=...] 原样写进命令
+8. 优先使用可见文本生成 click_text/fill_text 或 click "文本"/fill "标签" "值"；只有没有稳定文本标签且动作立即基于当前快照执行时才使用 ref。不要把 [ref=...] 原样写进命令
 9. 不要假设固定网站、固定行业、固定菜单名称或固定字段名
 10. 不要只做“打开页面并截图”：必须尽量覆盖真实业务动作，包括查询/筛选、打开新增表单、必填校验、编辑/设置入口、导出/刷新、删除确认或空选择保护
 11. 对写入/删除类操作要优先使用临时测试数据；如果无法保证安全删除，只验证确认弹窗、空选择校验或取消路径，不要误删真实数据
@@ -480,7 +480,7 @@ UI_TEST_PLANNER_PROMPT = """你是资深 UI 测试自动化专家。你正在测
 - priority: P0|P1|P2
 - steps: 测试步骤数组（字符串数组，每个步骤一行）
 - expected: 预期结果数组
-- ui_actions: 结构化动作数组，优先使用 open、goto、snapshot、click_ref、fill_ref、screenshot、assert_visible、wait_for
+- ui_actions: 结构化动作数组，优先使用 open、goto、snapshot、click_text、click_ref、fill_text、fill_ref、screenshot、assert_visible、wait_for
 - playwright_commands: playwright-cli 命令数组，仅作为 legacy fallback 和导出脚本
 
 ## playwright-cli 支持的命令（只使用这些！）

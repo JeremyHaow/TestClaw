@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 from app.agent.action_runtime import (
+    append_agent_evidence,
     append_agent_observation,
+    append_agent_tool_call,
     append_evaluation_protocol,
     record_agent_action_observation,
     validate_agent_action_plan,
@@ -76,6 +78,15 @@ class AgentRuntime:
         context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not action.get("allowed", True):
+            tool_call_id = append_agent_tool_call(
+                self.state,
+                tool_name=str(action.get("tool_name") or "unknown"),
+                layer=str(action.get("layer") or "unknown"),
+                status="blocked",
+                inputs=action.get("inputs") or {},
+                outputs={"diagnostics": action.get("diagnostics") or []},
+                action_id=action.get("action_id"),
+            )
             observation = append_agent_observation(
                 self.state,
                 stage=stage,
@@ -88,16 +99,21 @@ class AgentRuntime:
                 failure_type="safe_write_blocked" if str(action.get("tool_name") or "").startswith("api.") else "ui_action_blocked",
                 inputs=action.get("inputs") or {},
                 outputs={"diagnostics": action.get("diagnostics") or []},
+                tool_call_ids=[tool_call_id],
             )
             append_evaluation_protocol(self.state, self.evaluate_observation(observation).model_dump(mode="json"), stage=stage)
             return observation
 
-        result = await self.executor.execute(
+        result = await self.execute_tool(
             str(action.get("tool_name") or ""),
             action.get("inputs") or {},
             context=context,
+            stage=stage,
+            action_id=action.get("action_id"),
         )
         failure_type = result.outputs.get("failure_type")
+        evidence_ids = [str(item.get("evidence_id")) for item in result.evidence if isinstance(item, dict) and item.get("evidence_id")]
+        tool_call_ids = [str(result.raw.get("runtime_tool_call_id"))] if isinstance(result.raw, dict) and result.raw.get("runtime_tool_call_id") else []
         observation = append_agent_observation(
             self.state,
             stage=stage,
@@ -109,10 +125,58 @@ class AgentRuntime:
             failure_type=str(failure_type) if failure_type else None,
             inputs=result.inputs,
             outputs=result.outputs,
+            evidence_ids=evidence_ids,
+            tool_call_ids=tool_call_ids,
             metadata={"source": "agent_runtime", "evidence": result.evidence},
         )
         append_evaluation_protocol(self.state, self.evaluate_observation(observation).model_dump(mode="json"), stage=stage)
         return observation
+
+    async def execute_tool(
+        self,
+        tool_name: str,
+        inputs: dict[str, Any] | None = None,
+        *,
+        context: dict[str, Any] | None = None,
+        stage: str = "agent_runtime",
+        action_id: str | None = None,
+        case_index: int | None = None,
+        case_title: str | None = None,
+    ) -> ToolExecutionResult:
+        result = await self.executor.execute(tool_name, inputs or {}, context=context)
+        tool_call_id = append_agent_tool_call(
+            self.state,
+            tool_name=result.tool_name,
+            layer=result.layer,
+            status=result.status,
+            inputs=result.inputs,
+            outputs=result.outputs,
+            elapsed_ms=result.elapsed_ms,
+            action_id=action_id,
+            case_index=case_index,
+            case_title=case_title,
+        )
+        evidence_records: list[dict[str, Any]] = []
+        for index, item in enumerate(result.evidence):
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or item.get("evidence_type") or "runtime_evidence")
+            evidence_id = append_agent_evidence(
+                self.state,
+                kind=kind,
+                stage=stage,
+                layer=result.layer,
+                title=str(item.get("title") or item.get("summary") or f"{result.tool_name} evidence {index + 1}"),
+                status=result.status,
+                summary=str(item.get("summary") or ""),
+                uri=item.get("uri") or item.get("url"),
+                data=item,
+            )
+            evidence_records.append({**item, "evidence_id": evidence_id})
+        raw = result.raw
+        if isinstance(raw, dict):
+            raw["runtime_tool_call_id"] = tool_call_id
+        return result.model_copy(update={"raw": raw, "evidence": evidence_records})
 
     def evaluate_observation(self, observation: dict[str, Any]) -> RuntimeDecision:
         failure_type = observation.get("failure_type")

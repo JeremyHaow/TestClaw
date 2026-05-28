@@ -44,6 +44,7 @@ from app.core.llm_gateway import LLMGateway
 from app.core.redaction import REDACTED_VALUE
 from app.models.agent_planning import AgentPlanningMessage
 from app.models.llm_provider import LLMProvider, ProviderType
+from app.models.run_artifacts import RunEvidence, RunToolCall
 from app.models.task import TaskStatus
 from app.services.api_auth import AuthResolution
 from app.services import vector_store
@@ -52,7 +53,7 @@ from app.services.knowledge_service import KnowledgeService
 from app.services.agent_planning import normalize_planner_run_payload
 from app.services.vector_store import DatabaseKnowledgeVectorStore, MilvusKnowledgeVectorStore
 from app.tools.mock_data import generate_mock_json_body
-from app.tools.playwright_skill import compile_playwright_ui_action, compile_playwright_ui_actions
+from app.tools.playwright_skill import compile_playwright_ui_actions
 
 
 def test_tool_registry_selects_api_ui_and_reporting_skills() -> None:
@@ -321,6 +322,8 @@ async def test_agent_runtime_validates_executes_and_evaluates_blocked_action() -
     assert actions[0]["allowed"] is False
     assert observation["outcome"] == "blocked"
     assert observation["failure_type"] == "safe_write_blocked"
+    assert state["agent_tool_calls"][0]["status"] == "blocked"
+    assert observation["tool_call_ids"] == [state["agent_tool_calls"][0]["tool_call_id"]]
     assert state["agent_protocol_evaluations"][0]["next_action"] == "replan_api"
 
 
@@ -373,6 +376,84 @@ async def test_runtime_event_store_persists_protocol_records_to_db() -> None:
     assert detail["agent_observations"][0]["failure_type"] == "auth_failure"
     assert detail["agent_protocol_evaluations"][0]["next_action"] == "ask_human"
     assert detail["runtime_events"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_event_store_deduplicates_repeated_evidence_ids() -> None:
+    from app.database import AsyncSessionLocal, Base, engine
+    from sqlalchemy import select
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    run_id = str(uuid.uuid4())
+    state: dict = {"task_id": run_id}
+    api_result = {
+        "results": [
+            {
+                "label": "GET /health",
+                "method": "GET",
+                "url": "https://api.example.test/health",
+                "status_code": 200,
+                "passed": True,
+                "http_executed": True,
+            }
+        ]
+    }
+    append_api_result_observations(state, api_result, stage="api_runner")
+    append_api_result_observations(state, api_result, stage="api_runner")
+
+    async with AsyncSessionLocal() as db:
+        await AgentRuntimeEventStore(db).flush_state(state, stage="api_runner")
+        result = await db.execute(select(RunEvidence).where(RunEvidence.run_id == run_id))
+        evidence = list(result.scalars())
+
+    assert len(evidence) == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_event_store_allows_same_protocol_evidence_across_runs() -> None:
+    from app.database import AsyncSessionLocal, Base, engine
+    from sqlalchemy import select
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    api_result = {
+        "results": [
+            {
+                "label": "GET /health",
+                "method": "GET",
+                "url": "https://api.example.test/health",
+                "status_code": 200,
+                "passed": True,
+                "http_executed": True,
+            }
+        ]
+    }
+    run_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+    protocol_evidence_id = ""
+    protocol_tool_call_id = ""
+
+    for run_id in run_ids:
+        state: dict = {"task_id": run_id}
+        append_api_result_observations(state, api_result, stage="api_runner")
+        protocol_evidence_id = state["agent_evidence"][0]["evidence_id"]
+        protocol_tool_call_id = state["agent_tool_calls"][0]["tool_call_id"]
+
+        async with AsyncSessionLocal() as db:
+            await AgentRuntimeEventStore(db).flush_state(state, stage="api_runner")
+            detail = await load_runtime_detail(db, run_id)
+
+        assert detail["agent_evidence"][0]["evidence_id"] == protocol_evidence_id
+        assert detail["agent_tool_calls"][0]["tool_call_id"] == protocol_tool_call_id
+
+    async with AsyncSessionLocal() as db:
+        evidence_result = await db.execute(select(RunEvidence).where(RunEvidence.run_id.in_(run_ids)))
+        tool_call_result = await db.execute(select(RunToolCall).where(RunToolCall.run_id.in_(run_ids)))
+
+    assert len(list(evidence_result.scalars())) == 2
+    assert len(list(tool_call_result.scalars())) == 2
 
 
 def test_tool_registry_exposes_actionable_skill_and_tool_contracts() -> None:
@@ -1254,6 +1335,7 @@ async def test_execution_evaluator_asks_human_for_api_auth_observation() -> None
     assert state["evidence_evaluation"]["next_action"] == "ask_human"
     assert state["evidence_evaluation"]["failure_type"] == "auth_failure"
     assert state["evidence_evaluation"]["human_question"]
+    assert state["agent_runtime_status"] == "waiting_for_human"
     assert state["agent_human_question"] == state["evidence_evaluation"]["human_question"]
     assert state["agent_protocol_evaluations"][0]["outcome"] == "needs_human"
     assert state["agent_protocol_evaluations"][0]["failure_type"] == "auth_failure"
@@ -1315,6 +1397,62 @@ async def test_execution_evaluator_replans_api_from_dependency_observation(monke
     assert state["agent_replan_counts"]["api"] == 1
     assert state["agent_attempt_history"][0]["attempt_kind"] == "replan"
     assert state["agent_protocol_evaluations"][0]["failure_type"] == "dependency_missing"
+
+
+@pytest.mark.asyncio
+async def test_execution_evaluator_does_not_replan_selected_suite_api_cases(monkeypatch) -> None:
+    monkeypatch.setattr(execution_evaluator.settings, "AGENT_MAX_REPLAN_ATTEMPTS", 2)
+    initial_state = {
+        "agent_execution_stage": "api",
+        "test_type": "api",
+        "source_input": "suite",
+        "input_type": "url",
+        "objective": "Run selected saved suite",
+        "target_url": "https://api.example.test",
+        "api_cases": [{"title": "selected order detail"}],
+        "api_execution_result": {
+            "total": 1,
+            "executed": 0,
+            "passed": 0,
+            "failed": 1,
+            "skipped": 1,
+            "http_executed": 0,
+            "all_passed": False,
+            "complete": True,
+            "request_selection": {
+                "source": "api_cases",
+                "fallback_reason": "selected_suite_cases",
+            },
+            "results": [
+                {
+                    "label": "GET /orders/{id}",
+                    "method": "GET",
+                    "url": "https://api.example.test/orders/{id}",
+                    "status_code": None,
+                    "elapsed_ms": 0,
+                    "passed": None,
+                    "skipped": True,
+                    "skip_type": api_runner.PATH_PARAM_UNRESOLVED_SKIP_TYPE,
+                    "skip_reason": "缺少可用于路径参数 id 的上游列表响应值。",
+                    "http_executed": False,
+                    "assertion_results": [],
+                }
+            ],
+        },
+        "workflow_steps": [],
+    }
+    append_api_result_observations(
+        initial_state,
+        initial_state["api_execution_result"],
+        stage="api_runner",
+    )
+
+    state = await execution_evaluator.run(initial_state)
+
+    assert state["agent_next_node"] == "reporter"
+    assert state["evidence_evaluation"]["next_action"] == "report"
+    assert state.get("agent_replan_counts") is None
+    assert state["api_cases"] == [{"title": "selected order detail"}]
 
 
 @pytest.mark.asyncio
@@ -1873,6 +2011,25 @@ async def test_generated_root_meta_json_path_assertion_is_advisory_without_schem
     assert reported["final_report"]["overall_verdict"] == "PASS"
     assert reported["final_report"]["bugs_found"] == []
     assert determine_final_status(reported) == TaskStatus.SUCCEEDED
+
+
+def test_determine_final_status_ignores_projected_empty_result_fields() -> None:
+    state = {
+        "api_execution_result": {
+            "completed": 2,
+            "passed": 1,
+            "failed": 1,
+            "all_passed": False,
+        },
+        "ui_execution_result": {
+            "completed": None,
+            "passed": None,
+            "failed": None,
+            "all_passed": None,
+        },
+    }
+
+    assert determine_final_status(state) == TaskStatus.BUG_FOUND
 
 
 @pytest.mark.asyncio
@@ -3069,6 +3226,178 @@ async def test_api_runner_auth_negative_case_assertion_strips_default_auth_heade
 
 
 @pytest.mark.asyncio
+async def test_api_runner_security_auth_negative_case_strips_default_auth_header(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 401
+        text = '{"code": 401, "msg": "unauthorized"}'
+        headers = {"content-type": "application/json"}
+        content = text.encode()
+
+        def json(self) -> dict:
+            return {"code": 401, "msg": "unauthorized"}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "api_execution_policy": "safe_read_only",
+            "auth_headers": {"Authorization": "Bearer real-token"},
+            "api_cases": [
+                {
+                    "title": "UNAUTHORIZED GET /private",
+                    "category": "SECURITY",
+                    "request_template": {
+                        "method": "GET",
+                        "path": "/private",
+                        "response_schema": {
+                            "type": "object",
+                            "required": ["id"],
+                            "properties": {"id": {"type": "string"}},
+                        },
+                    },
+                    "assertions": [
+                        {"type": "status_code", "expected": [401, 403]},
+                        {"type": "schema", "blocking": True},
+                    ],
+                    "response_schema": {
+                        "type": "object",
+                        "required": ["id"],
+                        "properties": {"id": {"type": "string"}},
+                    },
+                }
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    assert calls[0].get("headers") in (None, {})
+    api_result = result["api_execution_result"]
+    assert api_result["passed"] == 1
+    assert api_result["failed"] == 0
+    assert api_result["results"][0]["category"] == "SECURITY"
+    schema_assertion = next(
+        item for item in api_result["results"][0]["assertion_results"] if item["type"] == "schema"
+    )
+    assert schema_assertion["skipped"] is True
+    assert schema_assertion["blocking"] is False
+
+
+@pytest.mark.asyncio
+async def test_api_runner_preserves_schema_write_skip_for_generated_safe_read_cases(
+    monkeypatch,
+) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"status": "ok"}'
+        headers = {"content-type": "application/json"}
+        content = text.encode()
+
+        def json(self) -> dict:
+            return {"status": "ok"}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            if method != "GET":
+                raise AssertionError("safe_read_only must not execute write requests")
+            return FakeResponse()
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "api_execution_policy": "safe_read_only",
+            "api_cases_generated": True,
+            "parsed_api_schema": [
+                {
+                    "method": "GET",
+                    "path": "/health",
+                    "response_status": "200",
+                    "response_schema": {
+                        "type": "object",
+                        "properties": {"status": {"type": "string"}},
+                    },
+                },
+                {
+                    "method": "POST",
+                    "path": "/orders",
+                    "response_status": "201",
+                    "request_body_schema": {
+                        "type": "object",
+                        "required": ["sku"],
+                        "properties": {"sku": {"type": "string"}},
+                    },
+                },
+            ],
+            "api_cases": [
+                {
+                    "title": "SMOKE GET /health",
+                    "category": "SMOKE",
+                    "request_template": {"method": "GET", "path": "/health"},
+                    "assertions": [{"type": "status_code", "expected": 200}],
+                },
+                {
+                    "title": "SMOKE POST /orders",
+                    "category": "SMOKE",
+                    "request_template": {"method": "POST", "path": "/orders"},
+                    "assertions": [{"type": "status_code", "expected": 201}],
+                },
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+    skipped = [item for item in api_result["results"] if item.get("skipped")]
+
+    assert [call["method"] for call in calls] == ["GET"]
+    assert api_result["executed"] == 1
+    assert api_result["skipped"] == 1
+    assert api_result["failed"] == 0
+    assert skipped[0]["method"] == "POST"
+    assert "安全只读" in skipped[0]["skip_reason"] or "safe" in skipped[0]["skip_reason"].lower()
+    skipped_observation = next(
+        observation
+        for observation in result["agent_observations"]
+        if observation["inputs"]["method"] == "POST"
+    )
+    assert skipped_observation["status"] == "skipped"
+    assert skipped_observation.get("failure_type") is None
+    assert skipped_observation["outputs"]["safety_decision"] == "skipped"
+
+
+@pytest.mark.asyncio
 async def test_api_runner_generates_mock_body_for_authenticated_write_schema(monkeypatch) -> None:
     calls = []
 
@@ -4031,14 +4360,69 @@ async def test_api_runner_uses_schema_safe_budget_for_all_get_objective(monkeypa
         "https://api.example.test/schema/2",
     ]
     assert api_result["total"] == 3
-    assert api_result["candidate_total"] == 5
+    assert api_result["candidate_total"] == 6
     assert api_result["request_selection"]["source"] == "all_safe_schema"
     assert api_result["request_selection"]["coverage_goal"] == "schema_driven_all_safe_get"
     assert api_result["request_selection"]["safe_endpoint_total"] == 5
     assert api_result["request_selection"]["selected_safe_endpoint_total"] == 3
     assert api_result["request_selection"]["omitted_safe_endpoint_total"] == 2
     assert api_result["request_selection"]["bounded"] is True
-    assert api_result["budget_skipped"] == 2
+    assert api_result["budget_skipped"] == 3
+
+
+@pytest.mark.asyncio
+async def test_api_runner_all_safe_coverage_preserves_write_policy_skip(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"ok": true}'
+        headers = {"content-type": "application/json"}
+        content = text.encode()
+
+        def json(self) -> dict:
+            return {"ok": True}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "target_url": "https://api.example.test",
+            "objective": "覆盖所有只读接口并确认写入接口被安全策略跳过",
+            "api_execution_policy": "safe_read_only",
+            "parsed_api_schema": [
+                {"method": "GET", "path": "/health", "response_status": "200"},
+                {"method": "POST", "path": "/orders", "response_status": "201"},
+            ],
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+
+    assert [call["method"] for call in calls] == ["GET"]
+    assert [call["url"] for call in calls] == ["https://api.example.test/health"]
+    assert api_result["total"] == 2
+    assert api_result["executed"] == 1
+    assert api_result["skipped"] == 1
+    assert api_result["results"][1].get("skip_type") is None
+    assert "安全只读" in api_result["results"][1]["skip_reason"]
 
 
 @pytest.mark.asyncio
@@ -4250,6 +4634,78 @@ async def test_api_runner_prefers_curated_api_cases_over_schema(monkeypatch) -> 
     assert api_result["candidate_total"] == 1
     assert api_result["request_selection"]["source"] == "api_cases"
     assert api_result["results"][0]["label"] == "curated health"
+
+
+@pytest.mark.asyncio
+async def test_api_runner_preserves_selected_suite_cases_and_case_base_url(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"ok": true}'
+        headers = {"content-type": "application/json"}
+        content = text.encode()
+
+        def json(self) -> dict:
+            return {"ok": True}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
+
+    schema = [{"method": "GET", "path": "/schema-health", "response_status": "200"}]
+    strategy = normalize_agent_strategy_decision(
+        {
+            "intent": "api_read_only_coverage",
+            "coverage_scope": "all_documented_safe_methods",
+            "endpoint_selection": {"source": "schema"},
+        },
+        parsed_api_schema=schema,
+        execution_policy="safe_read_only",
+        test_type="api",
+        source="test",
+    )
+
+    result = await api_runner.run(
+        {
+            "test_type": "api",
+            "source_input": "suite",
+            "target_url": "suite",
+            "agent_strategy_decision": strategy,
+            "api_cases": [
+                {
+                    "title": "suite health",
+                    "request_template": {
+                        "method": "GET",
+                        "base_url": "https://api.example.test",
+                        "path": "/health",
+                    },
+                }
+            ],
+            "parsed_api_schema": schema,
+            "workflow_steps": [],
+        }
+    )
+
+    api_result = result["api_execution_result"]
+
+    assert [call["url"] for call in calls] == ["https://api.example.test/health"]
+    assert api_result["request_selection"]["source"] == "api_cases"
+    assert api_result["request_selection"]["fallback_reason"] == "selected_suite_cases"
+    assert api_result["results"][0]["label"] == "suite health"
 
 
 @pytest.mark.asyncio
@@ -4651,15 +5107,16 @@ async def test_api_runner_auth_negative_401_still_passes(monkeypatch) -> None:
     calls = []
 
     class FakeResponse:
-        text = "{}"
         headers = {"content-type": "application/json"}
-        content = text.encode()
 
-        def __init__(self, status_code: int) -> None:
+        def __init__(self, status_code: int, payload: dict) -> None:
             self.status_code = status_code
+            self._payload = payload
+            self.text = json.dumps(payload)
+            self.content = self.text.encode()
 
         def json(self) -> dict:
-            return {}
+            return self._payload
 
     class FakeAsyncClient:
         def __init__(self, *args, **kwargs) -> None:
@@ -4674,8 +5131,8 @@ async def test_api_runner_auth_negative_401_still_passes(monkeypatch) -> None:
         async def request(self, method: str, url: str, **kwargs) -> FakeResponse:
             calls.append({"method": method, "url": url, **kwargs})
             if (kwargs.get("headers") or {}).get("Authorization"):
-                return FakeResponse(200)
-            return FakeResponse(401)
+                return FakeResponse(200, {"id": "user-1", "email": "qa@example.test"})
+            return FakeResponse(401, {"detail": "missing authorization"})
 
     monkeypatch.setattr(api_runner.httpx, "AsyncClient", FakeAsyncClient)
     monkeypatch.setattr(api_runner.settings, "API_MAX_EXECUTED_REQUESTS", 120)
@@ -4691,6 +5148,14 @@ async def test_api_runner_auth_negative_401_still_passes(monkeypatch) -> None:
                     "path": "/private",
                     "auth_required": True,
                     "response_status": "200",
+                    "response_schema": {
+                        "type": "object",
+                        "required": ["id", "email"],
+                        "properties": {
+                            "id": {"type": "string"},
+                            "email": {"type": "string"},
+                        },
+                    },
                 }
             ],
             "workflow_steps": [],
@@ -4698,12 +5163,18 @@ async def test_api_runner_auth_negative_401_still_passes(monkeypatch) -> None:
     )
 
     api_result = result["api_execution_result"]
+    auth_result = next(item for item in api_result["results"] if item["category"] == "AUTH")
 
     assert len(calls) == 2
     assert api_result["passed"] == 2
     assert api_result["failed"] == 0
     assert api_result["skipped"] == 0
     assert api_result["advisory"] == 0
+    assert auth_result["passed"] is True
+    assert not any(
+        item["type"] == "schema" and item.get("passed") is False
+        for item in auth_result["assertion_results"]
+    )
 
 
 @pytest.mark.asyncio
@@ -5854,3 +6325,67 @@ async def test_reporter_surfaces_backend_validation_contract_failures() -> None:
     bugs = result["final_report"]["bugs_found"]
     assert bugs[0]["title"].startswith("Backend validation contract failure")
     assert any("4xx" in item for item in result["final_report"]["recommendations"])
+
+
+@pytest.mark.asyncio
+async def test_reporter_persists_runtime_findings_to_db() -> None:
+    from app.database import AsyncSessionLocal, Base, engine
+    from app.models.run_artifacts import RunFinding
+    from app.models.task import Task, TestType as TaskTestType
+    from sqlalchemy import select
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    run_id = str(uuid.uuid4())
+    async with AsyncSessionLocal() as db:
+        db.add(
+            Task(
+                id=run_id,
+                objective="persist reporter finding",
+                target_url="https://api.example.test",
+                status=TaskStatus.RUNNING,
+                test_type=TaskTestType.API,
+            )
+        )
+        await db.commit()
+        result = await reporter.run(
+            {
+                "task_id": run_id,
+                "db_session": db,
+                "test_type": "api",
+                "api_execution_result": {
+                    "total": 1,
+                    "executed": 1,
+                    "passed": 0,
+                    "failed": 1,
+                    "skipped": 0,
+                    "results": [
+                        {
+                            "label": "GET /private",
+                            "method": "GET",
+                            "url": "https://api.example.test/private",
+                            "status_code": 403,
+                            "passed": False,
+                            "failure_type": "auth_failure",
+                            "http_executed": True,
+                        }
+                    ],
+                },
+                "agent_observations": [
+                    {
+                        "layer": "api",
+                        "failure_type": "auth_failure",
+                        "evidence_ids": ["evidence-auth-1"],
+                    }
+                ],
+                "workflow_steps": [],
+            }
+        )
+        query = await db.execute(select(RunFinding).where(RunFinding.run_id == run_id))
+        findings = list(query.scalars())
+
+    assert result["final_report"]["bugs_found"][0]["category"] == "authentication"
+    assert len(findings) == 1
+    assert findings[0].category == "authentication"
+    assert findings[0].evidence_ids_json == ["evidence-auth-1"]

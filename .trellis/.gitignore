@@ -11,6 +11,8 @@
 .agents/
 .agent-log
 .session-id
+.runtime/
+.cache/
 
 # Task directory runtime files
 .plan-log

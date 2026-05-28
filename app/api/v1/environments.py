@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.core.dependencies import CurrentUser, DbSession
 from app.core.security import decrypt_value, encrypt_value, mask_secret
@@ -38,6 +39,18 @@ def _encrypted_variables_for_update(environment: Environment, variables: dict[st
     return encrypted
 
 
+async def _environment_name_exists(db: DbSession, name: str, exclude_id: str | None = None) -> bool:
+    stmt = select(Environment.id).where(Environment.name == name)
+    if exclude_id:
+        stmt = stmt.where(Environment.id != exclude_id)
+    result = await db.execute(stmt.limit(1))
+    return result.scalar_one_or_none() is not None
+
+
+def _duplicate_name_error() -> HTTPException:
+    return HTTPException(status_code=409, detail="Environment name already exists")
+
+
 @router.get("", response_model=list[EnvironmentRead])
 async def list_environments(db: DbSession, _: CurrentUser):
     result = await db.execute(select(Environment).order_by(Environment.created_at.desc()))
@@ -46,6 +59,8 @@ async def list_environments(db: DbSession, _: CurrentUser):
 
 @router.post("", response_model=EnvironmentRead)
 async def create_environment(payload: EnvironmentCreate, db: DbSession, _: CurrentUser):
+    if await _environment_name_exists(db, payload.name):
+        raise _duplicate_name_error()
     environment = Environment(
         name=payload.name,
         base_url=payload.base_url,
@@ -53,7 +68,11 @@ async def create_environment(payload: EnvironmentCreate, db: DbSession, _: Curre
         is_production=payload.is_production,
     )
     db.add(environment)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise _duplicate_name_error() from exc
     await db.refresh(environment)
     return _to_schema(environment)
 
@@ -63,11 +82,17 @@ async def update_environment(environment_id: str, payload: EnvironmentCreate, db
     environment = await db.get(Environment, environment_id)
     if environment is None:
         raise HTTPException(status_code=404, detail="Environment not found")
+    if await _environment_name_exists(db, payload.name, exclude_id=environment_id):
+        raise _duplicate_name_error()
     environment.name = payload.name
     environment.base_url = payload.base_url
     environment.variables_encrypted = _encrypted_variables_for_update(environment, payload.variables)
     environment.is_production = payload.is_production
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise _duplicate_name_error() from exc
     await db.refresh(environment)
     return _to_schema(environment)
 

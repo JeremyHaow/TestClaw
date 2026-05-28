@@ -59,6 +59,7 @@ const skippedIntakeSteps = ref<Partial<Record<IntakeStepId, boolean>>>({})
 let streamAbortController: AbortController | null = null
 
 const IMPORTED_PLAN_CONTEXT_LIMIT = 1400
+const IMPORTED_DOCUMENT_SOURCE_LIMIT = 18000
 
 const intakeSteps: IntakeStep[] = [
   { id: 'target_kind', label: '测试目标', icon: Globe2 },
@@ -152,9 +153,31 @@ function importedQualityMemoryPlanContent() {
   ].join('\n')
 }
 
-function importedAssetPlanContent() {
+async function importedDocumentSourceContext(assetId: string) {
+  if (!assetId) return ''
+  try {
+    const { data } = await api.get(`/documents/${assetId}`)
+    const sourceUrl = redactImportedPlanContext(data?.source_url)
+    if (sourceUrl) {
+      return `可执行来源：${sourceUrl}`
+    }
+    const rawContent = String(data?.raw_content || '').trim()
+    if (!rawContent || rawContent.length > IMPORTED_DOCUMENT_SOURCE_LIMIT) return ''
+    return [
+      '已保存 OpenAPI 原文（已脱敏，仅用于本次计划解析）：',
+      '```json',
+      redactSensitiveText(rawContent, IMPORTED_DOCUMENT_SOURCE_LIMIT),
+      '```',
+    ].join('\n')
+  } catch {
+    return ''
+  }
+}
+
+async function importedAssetPlanContent() {
   if (queryText(route.query.from) !== 'asset') return ''
   const assetType = queryText(route.query.asset_type)
+  const assetId = queryText(route.query.asset_id)
   const assetLabels: Record<string, string> = {
     document: '接口文档',
     environment: '测试环境',
@@ -163,11 +186,13 @@ function importedAssetPlanContent() {
   const label = assetLabels[assetType] || '可复用资产'
   const context = redactImportedPlanContext(queryText(route.query.context))
   const title = redactImportedPlanContext(queryText(route.query.title))
-  if (!context && !title) return ''
+  const sourceContext = assetType === 'document' ? await importedDocumentSourceContext(assetId) : ''
+  if (!context && !title && !sourceContext) return ''
   return [
     `从 TestClaw ${label}创建新测试计划。`,
     title ? `资产：${title}` : '',
     context,
+    sourceContext,
     '安全边界：默认只读；不要复用凭证、Token、Cookie、会话或验证码值。',
   ].filter(Boolean).join('\n')
 }
@@ -811,7 +836,7 @@ async function loadSessions() {
 
 async function initializePage() {
   const qualityMemoryContent = importedQualityMemoryPlanContent()
-  const assetContent = qualityMemoryContent ? '' : importedAssetPlanContent()
+  const assetContent = qualityMemoryContent ? '' : await importedAssetPlanContent()
   const importedContent = qualityMemoryContent || assetContent
   if (!importedContent) {
     await loadSessions()

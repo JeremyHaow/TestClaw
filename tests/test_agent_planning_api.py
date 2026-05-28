@@ -172,6 +172,167 @@ def test_multi_direct_api_urls_normalize_to_schema_source() -> None:
     assert endpoints[0]["response_schema"]["required"] == ["url", "headers"]
 
 
+def test_document_asset_handoff_openapi_fence_normalizes_to_executable_source() -> None:
+    raw_openapi = {
+        "openapi": "3.0.3",
+        "info": {"title": "Asset doc", "version": "1.0.0"},
+        "servers": [{"url": "https://api.example.test"}],
+        "paths": {
+            "/health": {"get": {"summary": "Health", "responses": {"200": {"description": "ok"}}}},
+        },
+    }
+    payload = normalize_planner_run_payload(
+        None,
+        [
+            _message(
+                "从 TestClaw 接口文档资产创建新测试计划。\n"
+                "文档：Asset doc\n"
+                "已保存 OpenAPI 原文（已脱敏，仅用于本次计划解析）：\n"
+                "```json\n"
+                f"{json.dumps(raw_openapi)}\n"
+                "```"
+            )
+        ],
+    )
+
+    assert payload.test_type == "api"
+    assert payload.base_url == "https://api.example.test"
+    assert payload.source is not None
+    assert json.loads(payload.source)["paths"] == raw_openapi["paths"]
+
+
+def test_document_asset_handoff_auth_warning_does_not_fake_manual_token(
+    monkeypatch,
+) -> None:
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+    raw_openapi = {
+        "openapi": "3.0.3",
+        "info": {"title": "Asset auth doc", "version": "1.0.0"},
+        "servers": [{"url": "https://api.example.test"}],
+        "paths": {
+            "/profile": {
+                "get": {
+                    "summary": "Profile requires auth",
+                    "security": [{"bearerAuth": []}],
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+        "components": {
+            "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}
+        },
+    }
+    content = (
+        "从 TestClaw 接口文档资产创建新测试计划。\n"
+        "文档：Asset auth doc\n"
+        "需要鉴权端点：1\n"
+        "安全边界：默认只读；不要复用凭证、Token、Cookie、会话或验证码值。\n"
+        "已保存 OpenAPI 原文（已脱敏，仅用于本次计划解析）：\n"
+        "```json\n"
+        f"{json.dumps(raw_openapi)}\n"
+        "```"
+    )
+
+    payload = normalize_planner_run_payload(None, [_message(content)])
+
+    assert payload.token is None
+    assert payload.auth_mode == "auto"
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        response = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": content},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "collecting"
+    assert body["ready_to_execute"] is False
+    assert body["current_run_payload"] is None
+    assert any("是否需要鉴权" in message["content"] for message in body["messages"])
+    assert body["question_options"][0]["step"] == "auth_boundary"
+
+
+def test_conversational_question_option_intake_preserves_existing_document_source(
+    monkeypatch,
+) -> None:
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+    raw_openapi = {
+        "openapi": "3.0.3",
+        "info": {"title": "Asset auth doc", "version": "1.0.0"},
+        "servers": [{"url": "https://api.example.test"}],
+        "paths": {
+            "/profile": {
+                "get": {
+                    "summary": "Profile requires auth",
+                    "security": [{"bearerAuth": []}],
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+        "components": {
+            "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}
+        },
+    }
+    content = (
+        "从 TestClaw 接口文档资产创建新测试计划。\n"
+        "文档：Asset auth doc\n"
+        "需要鉴权端点：1\n"
+        "安全边界：默认只读；不要复用凭证、Token、Cookie、会话或验证码值。\n"
+        "已保存 OpenAPI 原文（已脱敏，仅用于本次计划解析）：\n"
+        "```json\n"
+        f"{json.dumps(raw_openapi)}\n"
+        "```"
+    )
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        first = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": content},
+            headers=headers,
+        )
+        response = client.post(
+            f"/api/v1/agent-plans/sessions/{created['id']}/intake",
+            json={
+                "action": "continue",
+                "current_step": "auth_boundary",
+                "selected_option": {
+                    "label": "手动鉴权",
+                    "value": "manual_auth",
+                    "field": "auth_boundary",
+                    "step": "auth_boundary",
+                    "message": "登录方式/凭证：使用手动提供的 Token、Cookie 或 Header。",
+                },
+                "message": "Authorization: Bearer valid-token。成功标准：只读 GET 接口有证据。",
+            },
+            headers=headers,
+        )
+
+    assert first.status_code == 200
+    assert first.json()["status"] == "collecting"
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session"]["status"] == "ready"
+    assert body["session"]["current_step"] == "review"
+    assert body["session"]["current_run_payload"]["source"]
+    assert json.loads(body["session"]["current_run_payload"]["source"])["paths"] == raw_openapi["paths"]
+    assert body["session"]["current_run_payload"]["token"] == "[REDACTED]"
+    assert body["next_question"] is None
+
+
 def test_multi_direct_api_urls_preserve_query_examples() -> None:
     payload = normalize_planner_run_payload(
         None,

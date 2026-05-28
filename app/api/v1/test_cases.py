@@ -325,6 +325,34 @@ def _extract_suite_target_url(api_cases: list[dict], ui_cases: list[dict]) -> st
     return "suite"
 
 
+def _source_run_id_from_case(test_case: TestCase) -> str:
+    test_data = test_case.test_data if isinstance(test_case.test_data, dict) else {}
+    case_asset = test_data.get("case_asset") if isinstance(test_data.get("case_asset"), dict) else {}
+    source_run_id = str(case_asset.get("source_run_id") or "").strip()
+    if source_run_id:
+        return source_run_id
+
+    source = str(test_case.source or "")
+    match = re.match(r"^run_case_asset:([^:]+):", source)
+    return match.group(1) if match else ""
+
+
+async def _extract_suite_source_run_target_url(db: DbSession, cases: list[TestCase]) -> str:
+    from app.models.task import Task
+
+    seen: set[str] = set()
+    for test_case in cases:
+        source_run_id = _source_run_id_from_case(test_case)
+        if not source_run_id or source_run_id in seen:
+            continue
+        seen.add(source_run_id)
+        task = await db.get(Task, source_run_id)
+        target_url = str(getattr(task, "target_url", "") or "").strip() if task else ""
+        if target_url.startswith(("http://", "https://")):
+            return target_url.rstrip("/")
+    return ""
+
+
 def _suite_worker_kwargs(
     agent_test_type: str,
     api_cases: list[dict],
@@ -457,6 +485,11 @@ async def delete_test_case(test_case_id: str, db: DbSession, _: CurrentUser):
     test_case = await db.get(TestCase, test_case_id)
     if test_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
+    suite_result = await db.execute(select(TestSuite))
+    for suite in suite_result.scalars():
+        case_ids = suite.test_case_ids or []
+        if test_case_id in case_ids:
+            suite.test_case_ids = [case_id for case_id in case_ids if case_id != test_case_id]
     await db.delete(test_case)
     await db.commit()
     return {"message": "deleted"}
@@ -551,6 +584,10 @@ async def run_suite(suite_id: str, db: DbSession, _: CurrentUser):
         db_test_type = TestType.API
 
     target_url = _extract_suite_target_url(api_cases, ui_cases)
+    if target_url == "suite":
+        source_run_target_url = await _extract_suite_source_run_target_url(db, cases)
+        if source_run_target_url:
+            target_url = source_run_target_url
 
     task = Task(
         objective=f"执行测试套件: {suite.name}",

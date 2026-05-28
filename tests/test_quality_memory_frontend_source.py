@@ -43,6 +43,8 @@ def test_quality_memory_page_preserves_insights_contract() -> None:
         "affected_targets",
         "affected_surfaces",
         "recurring_themes",
+        "resolved_by_success",
+        "resolved_at",
         "evidence_reproduction",
         "recommended_next_actions",
         "quality_trend",
@@ -50,6 +52,19 @@ def test_quality_memory_page_preserves_insights_contract() -> None:
         "statusBreakdownItems",
         "evidenceCoverageItems",
         "topRiskThemes",
+    ]:
+        assert hook in source
+
+
+def test_quality_memory_page_distinguishes_resolved_historical_blockers() -> None:
+    source = _source()
+
+    for hook in [
+        "已回归通过",
+        "最近通过",
+        "历史阻塞点已有后续通过运行覆盖",
+        "memory.resolved_by_success",
+        "selectedMemory.resolved_by_success",
     ]:
         assert hook in source
 
@@ -64,11 +79,13 @@ def test_quality_memory_page_routes_redacted_context_to_agent_plan() -> None:
         "from: 'quality-memory'",
         "context: redactSensitiveText(context)",
         "function redactSensitiveText",
-        "REDACTED_VALUE",
-        "password|passwd|pwd|token|secret|api[_-]?key|authorization|cookie|session|captcha|mfa|otp|csrf|xsrf|jwt",
+        "import { redactSensitiveText as redactAssetSensitiveText } from '../lib/assetHandoff'",
+        "return redactAssetSensitiveText(value, 900)",
         "默认只读",
     ]:
         assert hook in source
+
+    assert "function redactUrl" not in source
 
     agent_plan_source = AGENT_PLAN_PAGE.read_text(encoding="utf-8")
     for hook in [

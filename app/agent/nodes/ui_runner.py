@@ -12,7 +12,6 @@ from langchain_core.messages import HumanMessage
 from app.agent.action_runtime import append_ui_result_observations
 from app.agent.progress import persist_progress
 from app.agent.runtime.runtime import AgentRuntime
-from app.agent.runtime.tool_executor import ToolExecutor
 from app.agent.prompts import UI_EXECUTION_CONTEXT_PROMPT
 from app.agent.state import AgentState
 from app.agent.tool_registry import install_tool_context, record_tool_call, summarize_tool_calls
@@ -102,6 +101,10 @@ def _strip_url_quotes(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         return value[1:-1]
     return value
+
+
+def _goto_command(target_url: str) -> str:
+    return f"goto {target_url}"
 
 
 def _parse_json_object(content: str) -> dict:
@@ -482,6 +485,35 @@ def _find_single_clickable_ref(snapshot: str) -> str | None:
     return refs[0] if len(set(refs)) == 1 else None
 
 
+def _quote_cli_arg(value: str) -> str:
+    return shlex.quote(str(value))
+
+
+def _semantic_command_from_case_target(command: str, case: dict) -> tuple[str | None, str | None]:
+    name = command_name(command)
+    if name not in {"click", "fill", "select"}:
+        return None, None
+
+    parts = _safe_split_command(strip_playwright_cli_prefix(command))
+    if len(parts) < 2 or not _is_ref_token(parts[1]):
+        return None, None
+
+    target_action = case.get("target_action") if isinstance(case, dict) else None
+    if not isinstance(target_action, dict):
+        return None, None
+
+    target_text = re.sub(r"\s+", " ", str(target_action.get("text") or "")).strip()
+    if not target_text:
+        return None, None
+
+    if name == "click":
+        return f"click {_quote_cli_arg(target_text)}", target_text
+    if len(parts) >= 3:
+        value = " ".join(_quote_cli_arg(part) for part in parts[2:])
+        return f"{name} {_quote_cli_arg(target_text)} {value}", target_text
+    return None, None
+
+
 async def _resolve_semantic_command(command: str) -> tuple[str, dict | None]:
     """Resolve model-friendly text targets to current snapshot refs when possible."""
     name = command_name(command)
@@ -542,6 +574,20 @@ async def _resolve_semantic_command(command: str) -> tuple[str, dict | None]:
     return resolved, result
 
 
+async def _resolve_command_against_current_snapshot(command: str, case: dict) -> tuple[str, dict | None]:
+    semantic_command, target_text = _semantic_command_from_case_target(command, case)
+    if semantic_command:
+        resolved, resolution = await _resolve_semantic_command(semantic_command)
+        resolution = resolution or {"resolved": resolved != semantic_command, "target": target_text}
+        resolution["source_ref"] = _command_target(command)
+        resolution["semantic_command"] = semantic_command
+        if resolution.get("resolved"):
+            return resolved, resolution
+        return semantic_command, resolution
+
+    return await _resolve_semantic_command(command)
+
+
 def _build_commands_from_steps(
     case: dict,
     target_url: str,
@@ -549,7 +595,7 @@ def _build_commands_from_steps(
 ) -> list[str]:
     requires_auth_context = bool(case.get("requires_authenticated_context")) and authenticated_context_available
     commands = (
-        [f"open {target_url}", "snapshot"]
+        [_goto_command(target_url), "snapshot"]
         if target_url and not requires_auth_context
         else ["snapshot"]
     )
@@ -590,7 +636,7 @@ def _case_raw_commands(
 
     has_navigation = any(command_name(command) in {"open", "goto"} for command in commands)
     if target_url and not requires_auth_context and not has_navigation:
-        commands.insert(0, f"open {target_url}")
+        commands.insert(0, _goto_command(target_url))
 
     has_screenshot = any(command_name(command) == "screenshot" for command in commands)
     if not has_screenshot:
@@ -782,6 +828,15 @@ def _build_ui_case_batches(
                 )
                 normalized = [*setup_specs, *normalized]
                 raw_commands = [*authenticated_setup_commands, *raw_commands]
+            elif target_url and not any(
+                command_name(spec.get("command", "")) in {"open", "goto"}
+                for spec in normalized
+                if not spec.get("skip")
+            ):
+                entry_command = _goto_command(target_url)
+                entry_specs = normalize_playwright_commands([entry_command], include_unsupported=True)
+                normalized = [*entry_specs, *normalized]
+                raw_commands = [entry_command, *raw_commands]
         else:
             raw_commands = _case_raw_commands(case, target_url, authenticated_context_available)
             if authenticated_context_available and authenticated_setup_commands:
@@ -867,11 +922,12 @@ async def _execute_ui_case_batches(
     task_id: str,
     screenshot_dir: Path,
     state: AgentState,
+    runtime: AgentRuntime | None = None,
 ) -> dict:
     """Execute UI cases independently and collect per-case screenshot evidence."""
     from app.services.screenshot_storage import store_screenshot
 
-    tool_executor = ToolExecutor(state)
+    runtime = runtime or AgentRuntime(state)
     case_results: list[dict] = []
     command_results: list[dict] = []
     screenshots: list[str] = []
@@ -984,7 +1040,10 @@ async def _execute_ui_case_batches(
                 normalized_command = _full_page_screenshot_command(screenshot_path)
                 previous_action = _last_executed_action(case_command_results)
             elif spec.get("kind") == "command":
-                resolved_command, resolution = await _resolve_semantic_command(normalized_command)
+                resolved_command, resolution = await _resolve_command_against_current_snapshot(
+                    normalized_command,
+                    batch.get("case") or {},
+                )
                 if resolution:
                     record_tool_call(
                         state,
@@ -999,7 +1058,7 @@ async def _execute_ui_case_batches(
                         output_summary=resolution,
                         case_index=case_index,
                         case_title=case_title,
-                    )
+                        )
                     if resolution.get("resolved"):
                         normalized_command = resolved_command
                         normalization_warnings.append(
@@ -1013,13 +1072,33 @@ async def _execute_ui_case_batches(
                                 ),
                             }
                         )
+                    elif resolution.get("semantic_command"):
+                        normalized_command = resolved_command
+                        normalization_warnings.append(
+                            {
+                                "case_index": case_index,
+                                "case_title": case_title,
+                                "source_command": source_command,
+                                "detail": (
+                                    f"Replaced stale snapshot ref {resolution.get('source_ref')} "
+                                    f"with semantic target '{resolution.get('target')}'."
+                                ),
+                            }
+                        )
 
             start = time.perf_counter()
-            tool_result = await tool_executor.execute(
+            tool_result = await runtime.execute_tool(
                 "ui.playwright_cli",
                 {"command": normalized_command, "session": "default"},
+                stage="ui_runner",
+                case_index=case_index,
+                case_title=case_title,
             )
-            result = tool_result.raw if isinstance(tool_result.raw, dict) else tool_result.outputs
+            result = (
+                {**tool_result.outputs, **tool_result.raw}
+                if isinstance(tool_result.raw, dict)
+                else tool_result.outputs
+            )
             elapsed = round((time.perf_counter() - start) * 1000, 2)
             status_code = result.get("status_code", -1)
             stdout = result.get("stdout", "")
@@ -1142,11 +1221,18 @@ async def _execute_ui_case_batches(
             final_path = screenshot_dir / f"case_{case_index:03d}_final.png"
             final_command = _full_page_screenshot_command(final_path)
             start = time.perf_counter()
-            tool_result = await tool_executor.execute(
+            tool_result = await runtime.execute_tool(
                 "ui.playwright_cli",
                 {"command": final_command, "session": "default"},
+                stage="ui_runner",
+                case_index=case_index,
+                case_title=case_title,
             )
-            result = tool_result.raw if isinstance(tool_result.raw, dict) else tool_result.outputs
+            result = (
+                {**tool_result.outputs, **tool_result.raw}
+                if isinstance(tool_result.raw, dict)
+                else tool_result.outputs
+            )
             elapsed = round((time.perf_counter() - start) * 1000, 2)
             passed = result.get("status_code", -1) == 0 and final_path.exists()
             record_tool_call(
@@ -1370,7 +1456,7 @@ async def run(state: AgentState) -> AgentState:
     ui_cases = _apply_ui_execution_context_plan(ui_cases, context_decisions)
     batches = _build_ui_case_batches(ui_cases, ui_seed_url, authenticated_setup_commands)
     screenshot_dir = _ensure_screenshot_dir(task_id)
-    exec_result = await _execute_ui_case_batches(batches, task_id, screenshot_dir, state)
+    exec_result = await _execute_ui_case_batches(batches, task_id, screenshot_dir, state, runtime)
 
     state["ui_execution_result"] = exec_result
     append_ui_result_observations(state, exec_result, stage="ui_runner")

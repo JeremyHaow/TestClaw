@@ -17,6 +17,7 @@ from app.agent.nodes.ui_runner import (
     _find_single_clickable_ref,
     run as ui_runner_run,
 )
+from app.agent.runtime.models import ToolExecutionResult
 from app.api.v1.runs import (
     RunCreate,
     _rerun_context_from_task,
@@ -326,12 +327,37 @@ def test_authenticated_business_cases_use_real_snapshot_actions_without_reopenin
     assert len(cases) >= 4
     assert all(case["requires_authenticated_context"] for case in cases)
     assert any("Inventory" in case["title"] for case in cases)
-    assert any("click e3" in case["playwright_commands"] for case in cases)
+    assert any('click "Inventory"' in case["playwright_commands"] for case in cases)
 
     batches = _build_ui_case_batches(cases, "https://example.test/start", ["goto https://example.test/app"])
     first_commands = [spec["command"] for spec in batches[0]["commands"]]
     assert not any(command.startswith("open ") for command in first_commands)
     assert "reload" in first_commands
+
+
+def test_public_business_case_batches_open_target_and_use_semantic_actions() -> None:
+    snapshot = """
+### Snapshot
+```yaml
+- generic [ref=e1]:
+  - link "Help" [ref=e11] [cursor=pointer]
+  - button "View orders" [ref=e26] [cursor=pointer]
+```
+"""
+
+    cases = ui_test_planner._build_public_business_cases(snapshot)
+    action_case = next(case for case in cases if "View orders" in case["title"])
+    normalized_case = ui_test_planner._normalize_case(action_case)
+
+    assert 'click "View orders"' in normalized_case["playwright_commands"]
+    assert any(action.get("type") == "click_text" for action in normalized_case["ui_actions"])
+
+    batches = _build_ui_case_batches([normalized_case], "http://shop.example.test")
+    commands = [spec["command"] for spec in batches[0]["commands"] if not spec.get("skip")]
+
+    assert commands[0] == "goto http://shop.example.test"
+    assert any(command in {"click 'View orders'", 'click "View orders"'} for command in commands)
+    assert not any(command == "click e26" for command in commands)
 
 
 def test_authenticated_business_cases_include_deep_business_flows_from_snapshot() -> None:
@@ -357,28 +383,110 @@ def test_authenticated_business_cases_include_deep_business_flows_from_snapshot(
     assert "search_flow" in commands_by_operation
     assert "record_drilldown_flow" in commands_by_operation
     assert "safe_form_validation_flow" in commands_by_operation
-    assert any("fill e2" in command for command in commands_by_operation["search_flow"])
-    assert any("click e3" in command for command in commands_by_operation["search_flow"])
-    assert any(
-        command.startswith("run-code")
-        for command in commands_by_operation["safe_form_validation_flow"]
+    assert any('fill "Search orders"' in command for command in commands_by_operation["search_flow"])
+    assert any('click "Search"' in command for command in commands_by_operation["search_flow"])
+    assert any('click "Add order"' in command for command in commands_by_operation["safe_form_validation_flow"])
+    assert any('click "View"' in command for command in commands_by_operation["record_drilldown_flow"])
+    assert "go-back" in commands_by_operation["record_drilldown_flow"]
+    assert all(
+        not command.startswith("run-code")
+        for commands in commands_by_operation.values()
+        for command in commands
     )
-    assert any("click e4" in command for command in commands_by_operation["safe_form_validation_flow"])
+
+    normalized_cases = [ui_test_planner._normalize_case(dict(case)) for case in cases]
+    assert all(
+        action.get("type") != "run_code"
+        for case in normalized_cases
+        for action in case.get("ui_actions", [])
+    )
+    batches = _build_ui_case_batches(normalized_cases, "http://shop.example.test")
+    assert not any(
+        spec.get("blocked") and spec.get("agent_action_type") == "run_code"
+        for batch in batches
+        for spec in batch["commands"]
+    )
 
 
-def test_conditional_ui_helper_clicks_are_bounded_and_skippable() -> None:
-    close_command = ui_test_planner._conditional_click_labels_command(("取消", "返回"))
-    submit_command = ui_test_planner._conditional_required_submit_command()
-    drilldown_command = ui_test_planner._conditional_open_first_record_command()
+@pytest.mark.asyncio
+async def test_public_ui_planner_uses_snapshot_business_cases_without_login(monkeypatch) -> None:
+    snapshot = """
+### Snapshot
+```yaml
+- generic [ref=e1]:
+  - button "Orders" [ref=e2] [cursor=pointer]
+  - searchbox "Search orders" [ref=e3]
+  - button "Search" [ref=e4] [cursor=pointer]
+  - table "Orders" [ref=e5]:
+    - row "Order 1001" [ref=e6]:
+      - button "View details" [ref=e7] [cursor=pointer]
+  - button "Export CSV" [ref=e8] [cursor=pointer]
+```
+"""
 
-    for command in (close_command, submit_command, drilldown_command):
-        assert "click({ timeout: 1200 })" in command
-        assert "isVisible({ timeout: 500 })" in command
-        assert ".click(); return" not in command
+    async def fake_run_playwright_cli_command(command: str, session: str = "default") -> dict:
+        return {"status_code": 0, "stdout": snapshot if command == "snapshot" else "", "stderr": ""}
 
-    assert "no safe matching action" in close_command
-    assert "skip submit" in submit_command
-    assert "skip record open" in drilldown_command
+    monkeypatch.setattr(
+        "app.tools.playwright_tool.run_playwright_cli_command",
+        fake_run_playwright_cli_command,
+    )
+
+    state = {
+        "task_id": "public-ui",
+        "target_url": "http://shop.example.test",
+        "ui_seed_url": "http://shop.example.test",
+        "test_type": "ui",
+        "workflow_steps": [],
+    }
+
+    result = await ui_test_planner.run(state)
+    operations = {case.get("operation_type") for case in result["ui_cases"]}
+    titles = [case.get("title") for case in result["ui_cases"]]
+
+    assert "search_flow" in operations
+    assert "record_drilldown_flow" in operations
+    assert "export" in operations
+    assert any(title == "公开页面状态与核心入口检查" for title in titles)
+    assert all(case.get("source") != "authenticated_snapshot" for case in result["ui_cases"])
+    assert result["authenticated_ui_context"]["public_context"] is True
+
+
+def test_snapshot_business_helpers_avoid_arbitrary_run_code() -> None:
+    snapshot = """
+### Snapshot
+```yaml
+- generic [ref=e1]:
+  - table "Orders" [ref=e2]:
+    - row "Order 1001" [ref=e3]
+  - link "Add order" [ref=e4] [cursor=pointer]
+```
+"""
+
+    cases = ui_test_planner._build_authenticated_business_cases(snapshot, minimum_cases=4)
+    helper_cases = [
+        ui_test_planner._normalize_case(dict(case))
+        for case in cases
+        if case.get("operation_type") in {"record_drilldown_flow", "safe_form_validation_flow"}
+    ]
+
+    assert helper_cases
+    for case in helper_cases:
+        assert all(
+            not command.startswith("run-code")
+            for command in case.get("playwright_commands", [])
+        )
+        assert all(
+            action.get("type") != "run_code"
+            for action in case.get("ui_actions", [])
+        )
+
+    batches = _build_ui_case_batches(helper_cases, "http://shop.example.test")
+    assert not any(
+        spec.get("blocked") and spec.get("agent_action_type") == "run_code"
+        for batch in batches
+        for spec in batch["commands"]
+    )
 
 
 def test_authenticated_case_batches_open_target_when_auth_context_is_missing() -> None:
@@ -394,7 +502,7 @@ def test_authenticated_case_batches_open_target_when_auth_context_is_missing() -
     )
 
     commands = [spec["command"] for spec in batches[0]["commands"] if not spec.get("skip")]
-    assert commands[0] == "open https://example.test/start"
+    assert commands[0] == "goto https://example.test/start"
     assert 'click "Inventory"' in commands
 
 
@@ -492,6 +600,141 @@ async def test_ui_runner_writes_distinct_case_screenshot_evidence(tmp_path, monk
     ).read_text(encoding="utf-8")
     assert result["cases"][0]["screenshots"] == [result["screenshots"][0]]
     assert result["cases"][1]["screenshots"] == [result["screenshots"][1]]
+
+
+@pytest.mark.asyncio
+async def test_ui_runner_uses_runtime_outputs_when_raw_payload_lacks_status(tmp_path) -> None:
+    class RawlessRuntime:
+        async def execute_tool(
+            self,
+            tool_name: str,
+            inputs: dict,
+            *,
+            stage: str,
+            case_index: int,
+            case_title: str,
+        ) -> ToolExecutionResult:
+            command = inputs["command"]
+            stdout = ""
+            if command.startswith("screenshot"):
+                parts = shlex.split(command)
+                path = Path(parts[parts.index("--filename") + 1])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("image", encoding="utf-8")
+            elif command == "snapshot":
+                stdout = "Mock shop snapshot"
+            return ToolExecutionResult(
+                tool_name=tool_name,
+                layer="ui",
+                status="success",
+                outputs={"status_code": 0, "stdout": stdout, "stderr": ""},
+                raw={},
+            )
+
+    batches = _build_ui_case_batches(
+        [
+            {
+                "title": "structured open",
+                "ui_actions": [
+                    {"type": "open", "url": "http://shop.example.test", "reason": "open shop"},
+                    {"type": "snapshot", "reason": "read page"},
+                    {"type": "screenshot", "reason": "capture page"},
+                ],
+            }
+        ],
+        "http://shop.example.test",
+    )
+
+    result = await _execute_ui_case_batches(
+        batches,
+        "task-rawless",
+        tmp_path,
+        {"task_id": "task-rawless"},
+        runtime=RawlessRuntime(),
+    )
+
+    assert result["passed"] == 1
+    assert result["command_failed"] == 0
+    assert result["cases"][0]["commands"][0]["status_code"] == 0
+    assert result["cases"][0]["commands"][0]["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_ui_runner_recovers_stale_snapshot_ref_from_case_target_action(tmp_path, monkeypatch) -> None:
+    current_snapshot = """
+### Snapshot
+```yaml
+- generic [ref=e1]:
+  - link "Help" [ref=e42] [cursor=pointer]
+```
+"""
+
+    async def fake_run_playwright_cli_command(command: str, session: str = "default") -> dict:
+        assert command == "snapshot"
+        return {"status_code": 0, "stdout": current_snapshot, "stderr": ""}
+
+    monkeypatch.setattr(
+        "app.tools.playwright_tool.run_playwright_cli_command",
+        fake_run_playwright_cli_command,
+    )
+
+    class StaleRefRuntime:
+        def __init__(self) -> None:
+            self.commands: list[str] = []
+
+        async def execute_tool(
+            self,
+            tool_name: str,
+            inputs: dict,
+            *,
+            stage: str,
+            case_index: int,
+            case_title: str,
+        ) -> ToolExecutionResult:
+            command = inputs["command"]
+            self.commands.append(command)
+            stdout = current_snapshot if command == "snapshot" else ""
+            if command.startswith("screenshot"):
+                parts = shlex.split(command)
+                path = Path(parts[parts.index("--filename") + 1])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("image", encoding="utf-8")
+            return ToolExecutionResult(
+                tool_name=tool_name,
+                layer="ui",
+                status="success",
+                outputs={"status_code": 0, "stdout": stdout, "stderr": ""},
+                raw={},
+            )
+
+    runtime = StaleRefRuntime()
+    batches = _build_ui_case_batches(
+        [
+            {
+                "title": "stale ref help",
+                "target_action": {"ref": "e11", "text": "Help", "role": "link"},
+                "ui_actions": [
+                    {"type": "snapshot", "reason": "read page"},
+                    {"type": "click_ref", "ref": "e11", "reason": "old snapshot ref"},
+                    {"type": "screenshot", "reason": "capture page"},
+                ],
+            }
+        ],
+        "http://shop.example.test",
+    )
+
+    result = await _execute_ui_case_batches(
+        batches,
+        "task-stale-ref",
+        tmp_path,
+        {"task_id": "task-stale-ref"},
+        runtime=runtime,
+    )
+
+    assert result["passed"] == 1
+    assert "goto http://shop.example.test" in runtime.commands
+    assert "click e42" in runtime.commands
+    assert "click e11" not in runtime.commands
 
 
 def test_auto_route_runs_api_before_ui_when_base_url_is_available() -> None:

@@ -103,6 +103,7 @@ async def test_golden_api_auth_failure_has_plan_observation_evaluation_and_repor
     ]
     assert state["agent_observations"][0]["failure_type"] == "auth_failure"
     assert state["evidence_evaluation"]["next_action"] == "ask_human"
+    assert state["agent_runtime_status"] == "waiting_for_human"
     assert state["agent_protocol_evaluations"][0]["outcome"] == "needs_human"
     assert state["final_report"]["overall_verdict"] == "FAIL"
     assert any(item["source"] == "api" for item in state["final_report"]["bugs_found"])
@@ -163,10 +164,10 @@ async def test_golden_api_failure_matrix_classifies_transport_server_and_schema_
     state = await _planned_base(test_type="api", objective="Golden API failure matrix regression")
     state["agent_execution_stage"] = "api"
     state["api_execution_result"] = {
-        "total": 4,
-        "executed": 4,
+        "total": 5,
+        "executed": 5,
         "passed": 0,
-        "failed": 4,
+        "failed": 5,
         "skipped": 0,
         "all_passed": False,
         "complete": True,
@@ -199,6 +200,14 @@ async def test_golden_api_failure_matrix_classifies_transport_server_and_schema_
                 "http_executed": True,
             },
             {
+                "label": "Forbidden failure",
+                "method": "GET",
+                "url": "https://api.example.test/forbidden",
+                "status_code": 403,
+                "passed": False,
+                "http_executed": True,
+            },
+            {
                 "label": "Schema failure",
                 "method": "GET",
                 "url": "https://api.example.test/schema",
@@ -215,10 +224,11 @@ async def test_golden_api_failure_matrix_classifies_transport_server_and_schema_
 
     failure_types = {item["failure_type"] for item in state["agent_observations"]}
 
-    assert {"network_error", "timeout", "backend_error", "schema_contract"} <= failure_types
+    assert {"network_error", "timeout", "backend_error", "auth_failure", "schema_contract"} <= failure_types
     assert state["agent_protocol_summary"]["by_failure_type"]["network_error"] == 1
     assert state["agent_protocol_summary"]["by_failure_type"]["timeout"] == 1
     assert state["agent_protocol_summary"]["by_failure_type"]["backend_error"] == 1
+    assert state["agent_protocol_summary"]["by_failure_type"]["auth_failure"] == 1
     assert state["agent_protocol_summary"]["by_failure_type"]["schema_contract"] == 1
 
 
@@ -318,6 +328,7 @@ async def test_golden_ui_captcha_blocker_asks_human_and_reports_setup_failure() 
     assert state["agent_observations"][0]["failure_type"] == "ui_setup_failed"
     assert state["evidence_evaluation"]["next_action"] == "ask_human"
     assert state["evidence_evaluation"]["failure_type"] == "ui_setup_failed"
+    assert state["agent_runtime_status"] == "waiting_for_human"
     assert state["agent_human_question"]
     assert state["final_report"]["overall_verdict"] == "FAIL"
     assert state["final_report"]["bugs_found"][0]["source"] == "ui_setup"
@@ -361,7 +372,89 @@ async def test_golden_ui_high_risk_structured_action_is_blocked_and_asks_human()
 
     assert state["agent_observations"][0]["failure_type"] == "ui_high_risk_action_blocked"
     assert state["evidence_evaluation"]["next_action"] == "ask_human"
+    assert state["agent_runtime_status"] == "waiting_for_human"
     assert state["agent_protocol_evaluations"][0]["outcome"] == "needs_human"
+
+
+@pytest.mark.asyncio
+async def test_golden_ui_assertion_missing_replans_with_protocol_evidence() -> None:
+    state = await _planned_base(test_type="ui", target_url="https://app.example.test")
+    state["agent_execution_stage"] = "ui"
+    state["ui_execution_result"] = {
+        "total": 1,
+        "completed": 1,
+        "passed": 0,
+        "failed": 1,
+        "command_total": 1,
+        "command_completed": 1,
+        "command_failed": 1,
+        "screenshots": [],
+        "snapshot_texts": [MOCK_UI_PAGE_SNAPSHOT],
+        "all_passed": False,
+        "complete": True,
+        "commands": [
+            {
+                "case_index": 0,
+                "case_title": "Dashboard assertion",
+                "command": "assert_visible Dashboard",
+                "normalized_command": "snapshot",
+                "status": "executed",
+                "status_code": 1,
+                "stderr": "Snapshot did not contain expected text: Dashboard",
+                "passed": False,
+                "assertion": {"type": "snapshot_contains", "expected": "Dashboard", "passed": False},
+            }
+        ],
+        "cases": [{"case_index": 0, "title": "Dashboard assertion", "passed": False}],
+    }
+    append_ui_result_observations(state, state["ui_execution_result"], stage="ui_runner")
+
+    state = await execution_evaluator.run(state)
+
+    assert state["agent_observations"][0]["failure_type"] == "ui_assertion_failure"
+    assert {item["kind"] for item in state["agent_evidence"]} == {"ui_assertion"}
+    assert state["evidence_evaluation"]["next_action"] == "replan_ui"
+    assert state["agent_protocol_evaluations"][0]["failure_type"] == "ui_assertion_failure"
+
+
+@pytest.mark.asyncio
+async def test_golden_ui_navigation_timeout_retries_before_reporting() -> None:
+    state = await _planned_base(test_type="ui", target_url="https://app.example.test")
+    state["agent_execution_stage"] = "ui"
+    state["ui_execution_result"] = {
+        "total": 1,
+        "completed": 1,
+        "passed": 0,
+        "failed": 1,
+        "command_total": 1,
+        "command_completed": 1,
+        "command_failed": 1,
+        "screenshots": [],
+        "snapshot_texts": [],
+        "all_passed": False,
+        "complete": True,
+        "commands": [
+            {
+                "case_index": 0,
+                "case_title": "Navigate dashboard",
+                "command": "goto https://app.example.test/dashboard",
+                "normalized_command": "goto https://app.example.test/dashboard",
+                "status": "executed",
+                "status_code": -1,
+                "stderr": "Navigation timed out while waiting for load state.",
+                "passed": False,
+            }
+        ],
+        "cases": [{"case_index": 0, "title": "Navigate dashboard", "passed": False}],
+    }
+    append_ui_result_observations(state, state["ui_execution_result"], stage="ui_runner")
+
+    state = await execution_evaluator.run(state)
+
+    assert state["agent_observations"][0]["failure_type"] == "timeout"
+    assert state["evidence_evaluation"]["next_action"] == "retry_same_action"
+    assert state["agent_retry_counts"]["ui"] == 1
+    assert state["agent_protocol_evaluations"][0]["outcome"] == "needs_retry"
 
 
 @pytest.mark.asyncio

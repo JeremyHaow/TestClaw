@@ -4,8 +4,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.v1 import runs
+from app.config import settings
 from app.main import app
-from app.services import api_auth, auth_preflight_service
+from app.models.llm_provider import LLMProvider
+from app.services import api_auth, auth_preflight_service, preflight_service
 
 
 def _token(client: TestClient) -> str:
@@ -14,7 +16,7 @@ def _token(client: TestClient) -> str:
     return login.json()["access_token"]
 
 
-def test_run_preflight_classifies_raw_openapi_and_reports_readiness() -> None:
+def test_run_preflight_classifies_raw_openapi_and_reports_readiness(monkeypatch) -> None:
     openapi = {
         "openapi": "3.0.0",
         "info": {"title": "Demo API", "version": "1.0.0"},
@@ -28,6 +30,17 @@ def test_run_preflight_classifies_raw_openapi_and_reports_readiness() -> None:
             }
         },
     }
+
+    async def fake_count_rows(db, model) -> int:
+        if model is LLMProvider:
+            return 0
+        return 0
+
+    async def fake_count_default_planners(db) -> int:
+        return 0
+
+    monkeypatch.setattr(preflight_service, "count_rows", fake_count_rows)
+    monkeypatch.setattr(preflight_service, "count_default_planners", fake_count_default_planners)
 
     with TestClient(app) as client:
         token = _token(client)
@@ -46,9 +59,16 @@ def test_run_preflight_classifies_raw_openapi_and_reports_readiness() -> None:
     assert body["estimated_skipped_count"] == 0
     assert body["api_execution_policy"] == "safe_read_only"
     assert body["expected_flow"][0] == "识别输入"
-    assert any(
-        check["key"] == "provider" and check["status"] == "missing" for check in body["checks"]
-    )
+    assert body["readiness"] == "blocked"
+    provider_check = _check_by_key(body, "provider")
+    assert provider_check["status"] == "missing"
+    assert "模型驱动" in provider_check["detail"]
+    planner_check = _check_by_key(body, "planner")
+    assert planner_check["status"] == "missing"
+    assert "不能启动" in planner_check["detail"]
+    auth_check = _check_by_key(body, "auth")
+    assert auth_check["status"] == "ready"
+    assert body["auth_preflight"]["strategy"] == "no_auth_declared"
     serialized = json.dumps(body, ensure_ascii=False)
     assert "模型与 Agent" in serialized
     assert "系统设置" not in serialized
@@ -426,6 +446,7 @@ def test_run_preflight_mission_preview_does_not_expose_manual_auth_values(monkey
     preview = body["mission_preview"]
     serialized = json.dumps(body, ensure_ascii=False)
     assert preview["counts"]["auth_required_count"] == 1
+    assert "手动 Token/Header 已通过" in preview["auth_readiness"]
     assert "预览不展示" in preview["auth_readiness"]
     assert "manual-token-secret" not in serialized
     assert "header-secret" not in serialized
@@ -1538,7 +1559,70 @@ def test_run_preflight_auto_auth_resolves_inferred_login_under_openapi_server_ba
     assert "wms-login-token" not in json.dumps(response.json())
 
 
-def test_create_run_rejects_auth_required_api_without_token_header_or_auto_auth() -> None:
+def test_create_run_rejects_without_default_planner(monkeypatch) -> None:
+    async def fake_count_default_planners(db) -> int:
+        return 0
+
+    monkeypatch.setattr(runs, "_count_default_planners", fake_count_default_planners)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs",
+            json={"source": json.dumps(_auth_required_openapi()), "test_type": "api"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 400
+    assert "默认 Planner" in response.json()["detail"]
+
+
+def test_create_run_allows_environment_default_planner(monkeypatch) -> None:
+    dispatched = {}
+
+    async def fake_count_default_planners(db) -> int:
+        return 0
+
+    def fake_delay(task_id: str, objective: str, target_url: str, **kwargs) -> None:
+        dispatched["task_id"] = task_id
+        dispatched["target_url"] = target_url
+        dispatched["kwargs"] = kwargs
+
+    monkeypatch.setattr(settings, "DEFAULT_OPENAI_API_KEY", "sk-env-default")
+    monkeypatch.setattr(runs, "_count_default_planners", fake_count_default_planners)
+    monkeypatch.setattr(runs.run_agent_task, "delay", fake_delay)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        response = client.post(
+            "/api/v1/runs",
+            json={
+                "source": json.dumps(
+                    {
+                        "openapi": "3.0.0",
+                        "info": {"title": "Env Planner API", "version": "1.0.0"},
+                        "servers": [{"url": "https://api.example.test"}],
+                        "paths": {"/health": {"get": {"responses": {"200": {"description": "ok"}}}}},
+                    }
+                ),
+                "test_type": "api",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert dispatched["task_id"] == response.json()["id"]
+    assert dispatched["target_url"] == "https://api.example.test"
+
+
+def test_create_run_rejects_auth_required_api_without_token_header_or_auto_auth(
+    monkeypatch,
+) -> None:
+    async def fake_count_default_planners(db) -> int:
+        return 1
+
+    monkeypatch.setattr(runs, "_count_default_planners", fake_count_default_planners)
+
     with TestClient(app) as client:
         token = _token(client)
         response = client.post(
@@ -1568,6 +1652,9 @@ def test_create_run_rejects_new_auto_test_type() -> None:
 def test_create_run_auto_auth_injects_resolved_header(monkeypatch) -> None:
     dispatched = {}
 
+    async def fake_count_default_planners(db) -> int:
+        return 1
+
     class FakeResponse:
         status_code = 200
         headers = {}
@@ -1596,6 +1683,7 @@ def test_create_run_auto_auth_injects_resolved_header(monkeypatch) -> None:
 
     monkeypatch.setattr(api_auth.httpx, "AsyncClient", FakeAsyncClient)
     monkeypatch.setattr(runs.run_agent_task, "delay", fake_delay)
+    monkeypatch.setattr(runs, "_count_default_planners", fake_count_default_planners)
 
     with TestClient(app) as client:
         token = _token(client)
@@ -1623,6 +1711,9 @@ def test_create_run_reuses_matching_auth_preflight_id(monkeypatch) -> None:
     calls: list[tuple[str, str]] = []
     dispatched = {}
 
+    async def fake_count_default_planners(db) -> int:
+        return 1
+
     class FakeResponse:
         status_code = 200
         headers = {}
@@ -1649,6 +1740,7 @@ def test_create_run_reuses_matching_auth_preflight_id(monkeypatch) -> None:
 
     monkeypatch.setattr(api_auth.httpx, "AsyncClient", FakeAsyncClient)
     monkeypatch.setattr(runs.run_agent_task, "delay", fake_delay)
+    monkeypatch.setattr(runs, "_count_default_planners", fake_count_default_planners)
 
     payload = {
         "source": json.dumps(_auth_required_openapi()),

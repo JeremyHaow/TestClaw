@@ -253,3 +253,19 @@ def test_agent_plan_consumes_quality_memory_handoff_once() -> None:
         "onMounted(initializePage)",
     ]:
         assert hook in source
+
+
+def test_agent_plan_document_asset_handoff_fetches_saved_document_source() -> None:
+    source = PAGE.read_text(encoding="utf-8")
+
+    for hook in [
+        "const IMPORTED_DOCUMENT_SOURCE_LIMIT = 18000",
+        "async function importedDocumentSourceContext",
+        "await api.get(`/documents/${assetId}`)",
+        "已保存 OpenAPI 原文",
+        "redactSensitiveText(rawContent, IMPORTED_DOCUMENT_SOURCE_LIMIT)",
+        "const sourceContext = assetType === 'document' ? await importedDocumentSourceContext(assetId) : ''",
+        "const assetContent = qualityMemoryContent ? '' : await importedAssetPlanContent()",
+        "delete nextQuery.asset_id",
+    ]:
+        assert hook in source

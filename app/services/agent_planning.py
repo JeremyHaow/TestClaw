@@ -57,7 +57,7 @@ _CAPTCHA_RE = re.compile(
 )
 _TOKEN_RE = re.compile(r"(?i)\bBearer\s+([A-Za-z0-9._~+/=-]+)")
 _KEY_VALUE_TOKEN_RE = re.compile(
-    r"(?i)\b(?:token|access_token|api_key|apikey)\b\s*(?:[:=：]|是|为)?\s*([^\s,，;；]+)"
+    r"(?i)\b(?:token|access_token|api_key|apikey)\b\s*(?:[:=：]|是|为)\s*([^\s,，;；。]+)"
 )
 _API_INTENT_RE = re.compile(r"(?i)\b(api|openapi|swagger|endpoint)\b|接口")
 _API_DIRECT_URL_HINT_RE = re.compile(

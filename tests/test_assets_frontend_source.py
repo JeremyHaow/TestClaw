@@ -6,6 +6,7 @@ DOCUMENTS_PAGE = ROOT / "frontend/src/pages/DocumentsPage.vue"
 ENVIRONMENTS_PAGE = ROOT / "frontend/src/pages/EnvironmentsPage.vue"
 TEST_CASES_PAGE = ROOT / "frontend/src/pages/TestCasesPage.vue"
 AGENT_PLAN_PAGE = ROOT / "frontend/src/pages/AgentPlanPage.vue"
+QUALITY_MEMORY_PAGE = ROOT / "frontend/src/pages/QualityMemoryPage.vue"
 ASSET_COMPONENT_DIR = ROOT / "frontend/src/components/assets"
 ASSET_HANDOFF = ROOT / "frontend/src/lib/assetHandoff.ts"
 
@@ -56,6 +57,18 @@ def test_phase_6_3_assets_reuse_run_and_agent_plan_paths() -> None:
     environments = _source(ENVIRONMENTS_PAGE)
     assert "test_type: 'ui'" in environments
     assert "source: item.base_url" in environments
+
+
+def test_environment_copy_preserves_variable_keys_without_values() -> None:
+    environments = _source(ENVIRONMENTS_PAGE)
+
+    assert "function variableKeysToEmptyObject" in environments
+    assert "function copyNameFor" in environments
+    assert "existingNames" in environments
+    assert "Object.keys(item?.variables || {})" in environments
+    assert "name: copyNameFor(item)" in environments
+    assert "variables: variableKeysToEmptyObject(item)" in environments
+    assert "variables: {}" not in environments.split("async function copyEnvironment", 1)[1].split("function startEnvironmentRun", 1)[0]
 
 
 def test_phase_6_3_loading_empty_and_card_copy_are_complete() -> None:
@@ -150,3 +163,19 @@ def test_phase_6_3_handoff_redacts_asset_context_and_agent_plan_consumes_it() ->
     assert "environmentVariableKeys(item)" in environment_plan_context
     assert "item.variables" not in environment_plan_context
     assert "import { redactSensitiveText } from '../lib/assetHandoff'" in agent_plan
+
+
+def test_asset_handoff_url_redaction_stops_at_structural_delimiters() -> None:
+    handoff = _source(ASSET_HANDOFF)
+    quality_memory = _source(QUALITY_MEMORY_PAGE)
+
+    expected_pattern = r"""const URL_CANDIDATE_PATTERN = /https?:\/\/[^\s"'`<>\[\]{}),，。;；]+/gi"""
+    assert expected_pattern in handoff
+    assert "text.replace(URL_CANDIDATE_PATTERN, (url) => redactUrl(url))" in handoff
+    assert '/https?:\\/\\/[^\\s,，。)]+' not in handoff
+    assert "%22%7D" not in handoff
+
+    assert "import { redactSensitiveText as redactAssetSensitiveText } from '../lib/assetHandoff'" in quality_memory
+    assert "return redactAssetSensitiveText(value, 900)" in quality_memory
+    assert "function redactUrl" not in quality_memory
+    assert '/https?:\\/\\/[^\\s,，。)]+' not in quality_memory

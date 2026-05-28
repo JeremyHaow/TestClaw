@@ -33,7 +33,9 @@ const props = withDefaults(
   },
 )
 
+const hasBlockingText = computed(() => Boolean(String(props.blockingText || '').trim()))
 const normalizedBlocker = computed(() => props.blockingText || '暂无阻塞')
+const blockerLabel = computed(() => (hasBlockingText.value ? '当前阻塞：' : '当前状态：'))
 </script>
 
 <template>
@@ -98,7 +100,7 @@ const normalizedBlocker = computed(() => props.blockingText || '暂无阻塞')
     </div>
 
     <div class="mt-3 rounded-lg border border-gray-100 bg-gray-50 px-3 py-2 text-xs leading-5 text-gray-600">
-      <span class="font-bold text-gray-700">当前阻塞：</span>{{ normalizedBlocker }}
+      <span class="font-bold text-gray-700">{{ blockerLabel }}</span>{{ normalizedBlocker }}
     </div>
   </section>
 </template>

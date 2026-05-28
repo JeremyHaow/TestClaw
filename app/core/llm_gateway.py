@@ -72,9 +72,16 @@ class LLMGateway:
             .order_by(LLMProvider.created_at.desc())
         )
         provider = (await db.execute(stmt)).scalars().first()
-        if provider is None:
-            raise RuntimeError(f"No active default provider for role: {field}")
-        return self.build_client(provider)
+        if provider is not None:
+            return self.build_client(provider)
+        if settings.DEFAULT_OPENAI_API_KEY:
+            role_models = {
+                "is_default_coder": settings.DEFAULT_MODEL_CODER,
+                "is_default_vision": settings.DEFAULT_MODEL_VISION,
+                "is_default_planner": settings.DEFAULT_MODEL_PLANNER,
+            }
+            return self.build_fallback_openai_client(model_name=role_models.get(field))
+        raise RuntimeError(f"No active default provider for role: {field}")
 
     async def get_coder(self, db: AsyncSession) -> BaseChatModel:
         return await self._get_default(db, "is_default_coder")
@@ -98,9 +105,11 @@ class LLMGateway:
             return self.build_fallback_openai_embeddings_client()
         raise RuntimeError("No active OpenAI-compatible embedding provider configured")
 
-    def build_fallback_openai_client(self, api_key: str | None = None) -> ChatOpenAI:
+    def build_fallback_openai_client(
+        self, api_key: str | None = None, model_name: str | None = None
+    ) -> ChatOpenAI:
         return ChatOpenAI(
-            model=settings.DEFAULT_MODEL_CODER,
+            model=model_name or settings.DEFAULT_MODEL_CODER,
             api_key=api_key or settings.DEFAULT_OPENAI_API_KEY,
             base_url=settings.DEFAULT_OPENAI_BASE_URL,
             temperature=0.2,

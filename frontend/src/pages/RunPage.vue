@@ -792,15 +792,31 @@ function buildAuthCredentials() {
   return Object.keys(credentials).length ? credentials : undefined
 }
 
-function buildRunPayload() {
+function shouldTreatSetupAsObjectiveContext(forCreate: boolean) {
+  return forCreate && form.test_type === 'ui' && form.auth_mode === 'none_confirmed'
+}
+
+function objectiveWithSafetyBoundary(baseObjective: string, setupInstructions: string) {
+  if (!setupInstructions) return baseObjective
+  const safetyContext = `安全边界：${setupInstructions}`
+  return baseObjective ? `${baseObjective}\n${safetyContext}` : safetyContext
+}
+
+function buildRunPayload(options: { forCreate?: boolean } = {}) {
+  const forCreate = Boolean(options.forCreate)
   const headers = isManualAuthMode.value ? buildHeaders() : undefined
+  const setupInstructions = form.setup_instructions.trim()
+  const objective = objectiveWithSafetyBoundary(
+    form.objective.trim(),
+    shouldTreatSetupAsObjectiveContext(forCreate) ? setupInstructions : '',
+  )
   const payload: any = {
     source: form.source.trim(),
     test_type: form.test_type,
     auth_mode: form.auth_mode,
     captcha_mode: form.captcha_mode,
   }
-  if (form.objective.trim()) payload.objective = form.objective.trim()
+  if (objective) payload.objective = objective
   if (baseUrlForPayload.value) payload.base_url = baseUrlForPayload.value
   const authCredentials = buildAuthCredentials()
   if (authCredentials) payload.auth_credentials = authCredentials
@@ -814,7 +830,9 @@ function buildRunPayload() {
   if (preflight.value?.auth_preflight?.auth_preflight_id) {
     payload.auth_preflight_id = preflight.value.auth_preflight.auth_preflight_id
   }
-  if (form.setup_instructions.trim()) payload.setup_instructions = form.setup_instructions.trim()
+  if (setupInstructions && !shouldTreatSetupAsObjectiveContext(forCreate)) {
+    payload.setup_instructions = setupInstructions
+  }
   return payload
 }
 
@@ -861,7 +879,7 @@ async function submit() {
 
   submitting.value = true
   try {
-    const { data } = await api.post('/runs', buildRunPayload())
+    const { data } = await api.post('/runs', buildRunPayload({ forCreate: true }))
     toast.success('测试智能体已接收任务')
     router.push(`/runs/${data.id}`)
   } catch (err: any) {

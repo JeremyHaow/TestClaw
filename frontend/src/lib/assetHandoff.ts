@@ -3,6 +3,7 @@ export const REDACTED_VALUE = '[REDACTED]'
 const DEFAULT_CONTEXT_LIMIT = 1400
 const SENSITIVE_KEY_PATTERN = 'password|passwd|pwd|token|secret|api[_-]?key|authorization|auth|cookie|session|captcha|mfa|otp|csrf|xsrf|jwt'
 const SENSITIVE_FIELD_PATTERN = /password|passwd|pwd|token|secret|api[_-]?key|authorization|auth|cookie|session|captcha|mfa|otp|csrf|xsrf|jwt/i
+const URL_CANDIDATE_PATTERN = /https?:\/\/[^\s"'`<>\[\]{}),，。;；]+/gi
 
 function isSensitiveQueryKey(key: string) {
   return new RegExp(`(^|[_-])(${SENSITIVE_KEY_PATTERN})([_-]|$)`, 'i').test(key)
@@ -26,7 +27,7 @@ function redactUrl(value: string) {
 
 export function redactSensitiveText(value: unknown, limit = DEFAULT_CONTEXT_LIMIT) {
   let text = String(value ?? '').trim()
-  text = text.replace(/https?:\/\/[^\s,，。)]+/gi, (url) => redactUrl(url))
+  text = text.replace(URL_CANDIDATE_PATTERN, (url) => redactUrl(url))
   text = text.replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*/gi, `$1 ${REDACTED_VALUE}`)
   text = text.replace(
     new RegExp(`(["'])(${SENSITIVE_KEY_PATTERN})\\1\\s*:\\s*(["'])(.*?)\\3`, 'gi'),

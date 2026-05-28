@@ -46,6 +46,80 @@
 - UI may describe Multi-Agent only as role-based agent orchestration: Planner/Coder/Vision model defaults plus LangGraph nodes for planning, case generation, execution, reporting, and memory.
 - Do not imply autonomous peer-to-peer agent collaboration unless the backend implements that behavior.
 
+## Scenario: Agent Run Default Model Readiness
+
+### 1. Scope / Trigger
+
+- Trigger: creating an Agent Run requires model-driven planning/evaluation. If no default Planner is configured, the run must not silently degrade into deterministic guardrails.
+- Applies to `app/api/v1/runs.py`, `app/services/preflight_service.py`, `app/core/llm_gateway.py`, run preflight UI, and Plan Mode execution.
+- Purpose: prevent "successful" runs that never actually use a planner model and therefore appear unintelligent or under-call the LLM.
+
+### 2. Signatures
+
+- Preflight check:
+  ```text
+  POST /api/v1/runs/preflight
+  checks[].key="planner"
+  checks[].status="ready|missing"
+  readiness="blocked" when planner is missing
+  ```
+- Run creation:
+  ```text
+  POST /api/v1/runs -> 400 when no DB default Planner and no DEFAULT_OPENAI_API_KEY
+  ```
+- Environment fallback:
+  ```text
+  DEFAULT_OPENAI_API_KEY
+  DEFAULT_OPENAI_BASE_URL
+  DEFAULT_MODEL_PLANNER
+  DEFAULT_MODEL_CODER
+  DEFAULT_MODEL_VISION
+  ```
+
+### 3. Contracts
+
+- A database `LLMProvider` with `is_default_planner=true` and `is_active=true` satisfies Planner readiness.
+- If no DB default exists, `DEFAULT_OPENAI_API_KEY` may satisfy readiness; `LLMGateway.get_planner()` must use `DEFAULT_MODEL_PLANNER` in that case.
+- `create_run()` must fail before creating a `Task` when neither readiness path exists.
+- Preflight must label missing Provider/Planner as `missing`, not `warning`, so frontend blocks run creation.
+- Deterministic guardrails may be fallback inside an already-running graph when a model call fails, but they are not a substitute for startup model readiness.
+
+### 4. Validation & Error Matrix
+
+- No DB providers and no `DEFAULT_OPENAI_API_KEY` -> preflight `readiness="blocked"` and create-run `400`.
+- DB provider exists but no active default Planner -> preflight planner check `missing`, create-run `400`.
+- `DEFAULT_OPENAI_API_KEY` exists and DB provider table is empty -> preflight provider/planner checks `ready`, create-run may queue.
+- Planner model call times out or returns invalid JSON after startup -> evaluator records `model_error` and uses bounded deterministic fallback.
+
+### 5. Good/Base/Bad Cases
+
+- Good: user sees "未设置默认 Planner" before starting and configures a model in Model & Agent.
+- Base: deployment uses only `DEFAULT_OPENAI_API_KEY`; run creation still works and planner uses `DEFAULT_MODEL_PLANNER`.
+- Bad: run starts with no model, later execution logs contain `No active default provider for role: is_default_planner`, and UI reports a shallow guardrail result as an Agent decision.
+
+### 6. Tests Required
+
+- Preflight regression: no planner returns `readiness="blocked"` and planner/provider checks are `missing`.
+- Create-run regression: no planner returns `400` and does not dispatch a worker task.
+- Environment fallback regression: `DEFAULT_OPENAI_API_KEY` allows create-run even with no DB provider.
+- Gateway unit/regression: role-specific environment fallback uses `DEFAULT_MODEL_PLANNER`, `DEFAULT_MODEL_CODER`, and `DEFAULT_MODEL_VISION`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+if planner_count == 0:
+    checks.append(RunPreflightCheck(key="planner", status="warning"))
+```
+
+#### Correct
+
+```python
+if not planner_count and not settings.DEFAULT_OPENAI_API_KEY:
+    raise HTTPException(status_code=400, detail="未设置默认 Planner 模型")
+```
+
 ## Scenario: Agent Plan Mode Session Contract
 
 ### 1. Scope / Trigger

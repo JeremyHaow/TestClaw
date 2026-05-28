@@ -119,6 +119,50 @@ def test_test_cases_list_redacts_and_bounds_test_data() -> None:
         assert "raw_content" not in item["test_data"]
 
 
+def test_deleting_test_case_removes_it_from_suites() -> None:
+    prefix = f"case-suite-delete-{uuid.uuid4()}"
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        created_case_ids: list[str] = []
+        for index in range(2):
+            response = client.post(
+                "/api/v1/test-cases",
+                headers=headers,
+                json={
+                    "title": f"{prefix}-{index}",
+                    "steps": [f"Step {index}"],
+                    "expected": [f"Expected {index}"],
+                    "priority": "P1",
+                    "category": "UI",
+                    "source": prefix,
+                },
+            )
+            assert response.status_code == 200
+            created_case_ids.append(response.json()["id"])
+
+        suite = client.post(
+            "/api/v1/test-cases/suites",
+            headers=headers,
+            json={"name": prefix, "test_case_ids": created_case_ids},
+        )
+        assert suite.status_code == 200
+        suite_id = suite.json()["id"]
+
+        deleted = client.delete(f"/api/v1/test-cases/{created_case_ids[0]}", headers=headers)
+        assert deleted.status_code == 200
+
+        updated_suite = client.get(f"/api/v1/test-cases/suites/{suite_id}", headers=headers)
+        assert updated_suite.status_code == 200
+        assert updated_suite.json()["test_case_ids"] == [created_case_ids[1]]
+
+        deleted = client.delete(f"/api/v1/test-cases/{created_case_ids[1]}", headers=headers)
+        assert deleted.status_code == 200
+
+        updated_suite = client.get(f"/api/v1/test-cases/suites/{suite_id}", headers=headers)
+        assert updated_suite.status_code == 200
+        assert updated_suite.json()["test_case_ids"] == []
+
+
 def test_knowledge_update_regenerates_embedding(monkeypatch) -> None:
     class FakeEmbeddingService:
         def __init__(self) -> None:
@@ -246,6 +290,61 @@ def test_environment_update_preserves_masked_variable_values() -> None:
 
     environment = asyncio.run(load_environment(body["id"]))
     assert decrypt_value(environment.variables_encrypted["TOKEN"]) == "super-secret-token"
+
+
+def test_environment_duplicate_names_return_conflict() -> None:
+    prefix = f"duplicate-env-{uuid.uuid4()}"
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        first = client.post(
+            "/api/v1/environments",
+            headers=headers,
+            json={
+                "name": prefix,
+                "base_url": "https://api.example.test",
+                "variables": {},
+                "is_production": False,
+            },
+        )
+        assert first.status_code == 200
+
+        duplicate_create = client.post(
+            "/api/v1/environments",
+            headers=headers,
+            json={
+                "name": prefix,
+                "base_url": "https://api.example.test/copy",
+                "variables": {},
+                "is_production": False,
+            },
+        )
+        assert duplicate_create.status_code == 409
+        assert duplicate_create.json()["detail"] == "Environment name already exists"
+
+        second = client.post(
+            "/api/v1/environments",
+            headers=headers,
+            json={
+                "name": f"{prefix}-second",
+                "base_url": "https://api.example.test/second",
+                "variables": {},
+                "is_production": False,
+            },
+        )
+        assert second.status_code == 200
+
+        duplicate_update = client.put(
+            f"/api/v1/environments/{second.json()['id']}",
+            headers=headers,
+            json={
+                "name": prefix,
+                "base_url": "https://api.example.test/second",
+                "variables": {},
+                "is_production": False,
+            },
+        )
+        assert duplicate_update.status_code == 409
+        assert duplicate_update.json()["detail"] == "Environment name already exists"
 
 
 def test_provider_role_defaults_are_unique_on_create_and_update() -> None:

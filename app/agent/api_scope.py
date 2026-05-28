@@ -570,7 +570,7 @@ def _sanitize_assertions(
             expected = assertion.get("expected", documented_status)
             expected_values = _status_expected_values(expected)
             if (
-                category not in {"AUTH", "PARAM_VALIDATION"}
+                category not in {"AUTH", "SECURITY", "PARAM_VALIDATION"}
                 and expected_values
                 and documented_status not in expected_values
             ):

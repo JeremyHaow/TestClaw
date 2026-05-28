@@ -582,7 +582,7 @@ def _expected_status_values(expected_status) -> set[int]:
 
 
 def _is_auth_negative_probe(req: dict) -> bool:
-    if str(req.get("category") or "").upper() != "AUTH":
+    if str(req.get("category") or "").upper() not in {"AUTH", "SECURITY"}:
         return False
     if _expected_status_values(req.get("expected_status", 200)) & {401, 403}:
         return True
@@ -666,6 +666,31 @@ def _auth_negative_success_advisory(req: dict, resp_status: int, payload) -> str
     if 200 <= resp_status < 300:
         return "鉴权负向探测移除鉴权后仍返回成功状态，已作为安全策略提醒记录，不计入主通过率失败。"
     return None
+
+
+def _auth_negative_expected_rejection(req: dict, resp_status: int, payload) -> bool:
+    if not _is_auth_negative_probe(req) or not _is_auth_failure(resp_status, payload):
+        return False
+    expected_values = _expected_status_values(req.get("expected_status", 200))
+    for assertion in req.get("assertions") or []:
+        if not isinstance(assertion, dict):
+            continue
+        if str(assertion.get("type") or "").strip().lower() != "status_code":
+            continue
+        expected_values.update(_expected_status_values(assertion.get("expected")))
+    return resp_status in expected_values or bool(expected_values & {401, 403})
+
+
+def _skipped_auth_negative_schema_assertion(reason: str) -> dict:
+    return {
+        "type": "schema",
+        "passed": None,
+        "blocking": False,
+        "skipped": True,
+        "advisory": True,
+        "reason": reason,
+        "source": "auth_negative_expected_rejection",
+    }
 
 
 def _mark_assertions_advisory(assertion_results: list[dict], reason: str) -> None:
@@ -2365,7 +2390,11 @@ def _evaluate_assertions(req: dict, resp_status: int, payload) -> list[dict]:
         assertions.insert(0, {"type": "status_code", "expected": req.get("expected_status", 200)})
 
     response_schema = req.get("response_schema")
-    if response_schema and req.get("auto_schema_assertion"):
+    auth_negative_rejection = _auth_negative_expected_rejection(req, resp_status, payload)
+    auth_negative_schema_reason = (
+        "鉴权负例已按预期返回 401/403；成功响应 OpenAPI schema 不适用于错误响应。"
+    )
+    if response_schema and req.get("auto_schema_assertion") and not auth_negative_rejection:
         assertions.append(
             {
                 "type": "schema",
@@ -2385,7 +2414,10 @@ def _evaluate_assertions(req: dict, resp_status: int, payload) -> list[dict]:
         elif atype in {"json_type", "type"}:
             results.append(_evaluate_json_type_assertion(assertion, payload))
         elif atype in {"schema", "schema_valid", "json_schema"}:
-            results.append(_evaluate_schema_assertion(assertion, payload, response_schema))
+            if auth_negative_rejection:
+                results.append(_skipped_auth_negative_schema_assertion(auth_negative_schema_reason))
+            else:
+                results.append(_evaluate_schema_assertion(assertion, payload, response_schema))
         elif atype in {"body_contains", "contains"}:
             results.append(_evaluate_body_contains_assertion(assertion, payload))
     return results
@@ -2580,12 +2612,21 @@ def _build_case_test_requests(
         raw_url = tmpl.get("url") or tmpl.get("path") or tmpl.get("endpoint") or ""
         path_endpoint = {"path_params": tmpl.get("path_params", [])}
         path_dependencies = _path_param_dependency_keys(raw_url, path_endpoint)
-        url = _build_request_url(base_url, raw_url)
+        case_base_url = str(tmpl.get("base_url") or base_url or "").strip()
+        url = _build_request_url(case_base_url, raw_url)
         url = _resolve_path_params(url, path_endpoint, unresolved_as_dependency=True)
         if not url:
             continue
         if method in WRITE_API_METHODS and not write_allowed:
-            requests.append({
+            write_payload = (
+                tmpl.get("body")
+                or tmpl.get("json")
+                or tmpl.get("request_body")
+                or case.get("body")
+                or case.get("request_body")
+            )
+            blocked_write = write_payload not in (None, "", [], {})
+            request = {
                 "label": case.get("title", f"SKIPPED_WRITE {method} {url}"),
                 "method": method,
                 "url": url,
@@ -2594,7 +2635,11 @@ def _build_case_test_requests(
                 "expected_status": None,
                 "category": "SKIPPED",
                 "skip_reason": "当前策略为安全只读，未执行会创建、修改或删除数据的请求",
-            })
+            }
+            if blocked_write:
+                request["skip_type"] = SAFE_WRITE_BLOCK_SKIP_TYPE
+                request["failure_type"] = SAFE_WRITE_BLOCK_SKIP_TYPE
+            requests.append(request)
             continue
         if method in WRITE_API_METHODS:
             safe_write_reason = _safe_write_skip_reason(
@@ -2795,10 +2840,16 @@ def _all_safe_schema_coverage_metadata(
     safe_endpoints: list[dict],
     selected_requests: list[dict],
 ) -> dict:
+    safe_endpoint_ids = {
+        f"{str(endpoint.get('method') or '').upper()} {str(endpoint.get('path') or '').strip()}"
+        for endpoint in safe_endpoints
+        if endpoint.get("method") and endpoint.get("path")
+    }
     selected_endpoint_ids = {
         identity
         for request in selected_requests
         if (identity := _schema_endpoint_identity(request))
+        and identity in safe_endpoint_ids
     }
     safe_endpoint_total = len(safe_endpoints)
     selected_safe_endpoint_total = len(selected_endpoint_ids)
@@ -3113,6 +3164,61 @@ def _build_test_requests(
     return requests
 
 
+def _append_schema_write_skip_requests(
+    requests: list[dict],
+    api_schema: list[dict],
+    base_url: str,
+    execution_policy: str,
+) -> list[dict]:
+    if _policy_allows_write(_normalize_api_execution_policy(execution_policy)):
+        return requests
+
+    def request_identity_path(request: dict) -> str:
+        raw = str(request.get("schema_path") or request.get("path") or request.get("url") or "")
+        parsed = urlsplit(raw)
+        return parsed.path if parsed.scheme and parsed.netloc else raw
+
+    existing = {
+        (
+            str(request.get("schema_method") or request.get("method") or "").upper(),
+            request_identity_path(request),
+        )
+        for request in requests
+        if isinstance(request, dict)
+    }
+    next_requests = list(requests)
+    for endpoint in api_schema or []:
+        if not isinstance(endpoint, dict):
+            continue
+        method = str(endpoint.get("method") or "GET").upper()
+        if method not in WRITE_API_METHODS:
+            continue
+        raw_path = str(endpoint.get("path") or "")
+        if not raw_path or (method, raw_path) in existing:
+            continue
+        path = _resolve_path_params(raw_path, endpoint, unresolved_as_dependency=True)
+        full_url = _build_request_url(base_url, path)
+        if not full_url:
+            continue
+        reason = "当前策略为安全只读，未执行会创建、修改或删除数据的请求"
+        next_requests.append(
+            {
+                "label": f"SKIPPED_WRITE {method} {path}",
+                "method": method,
+                "url": full_url,
+                "schema_method": method,
+                "schema_path": raw_path,
+                "headers": {},
+                "body": None,
+                "expected_status": None,
+                "category": "SKIPPED",
+                "skip_reason": reason,
+            }
+        )
+        existing.add((method, raw_path))
+    return next_requests
+
+
 def _update_api_execution_state(
     state: AgentState,
     results: list[dict],
@@ -3274,7 +3380,18 @@ async def run(state: AgentState) -> AgentState:
         auth_headers,
         execution_policy=execution_policy,
     )
-    if action_request_candidates:
+    selected_suite_cases = str(state.get("source_input") or "").strip().lower() == "suite" and bool(api_cases)
+    if selected_suite_cases:
+        request_candidates = _build_case_test_requests(
+            api_cases,
+            base_url,
+            target_url,
+            auth_headers,
+            write_allowed=write_allowed,
+        )
+        selection_source = "api_cases"
+        fallback_reason = "selected_suite_cases"
+    elif action_request_candidates:
         request_candidates = action_request_candidates
         selection_source = AGENT_ACTION_HTTP_REQUEST_SOURCE
         fallback_reason = (
@@ -3294,7 +3411,7 @@ async def run(state: AgentState) -> AgentState:
         fallback_reason = "crud_action_chain_required_but_not_executable"
     elif all_safe_get_coverage_requested:
         request_candidates = _build_test_requests(
-            safe_schema_endpoints,
+            api_schema,
             base_url,
             auth_headers,
             execution_policy,
@@ -3324,6 +3441,13 @@ async def run(state: AgentState) -> AgentState:
             auth_headers,
             write_allowed=write_allowed,
         )
+        if api_schema and not write_allowed:
+            case_requests = _append_schema_write_skip_requests(
+                case_requests,
+                api_schema,
+                base_url,
+                execution_policy,
+            )
         if case_requests and (write_allowed or _has_executable_request(case_requests)):
             request_candidates = case_requests
             selection_source = "api_cases"
@@ -3401,6 +3525,15 @@ async def run(state: AgentState) -> AgentState:
     state["api_request_selection"] = request_selection
     derive_action = find_agent_action(agent_actions, "api.derive_schema_requests")
     if derive_action and selection_source in {ALL_SAFE_GET_COVERAGE_SOURCE, STRATEGY_SCHEMA_SOURCE}:
+        derived_candidate_total = request_selection.get("candidate_total")
+        derived_selected_total = request_selection.get("selected_total")
+        if selection_source == ALL_SAFE_GET_COVERAGE_SOURCE:
+            derived_candidate_total = request_selection.get(
+                "safe_endpoint_total", derived_candidate_total
+            )
+            derived_selected_total = request_selection.get(
+                "selected_safe_endpoint_total", derived_selected_total
+            )
         record_agent_action_observation(
             state,
             derive_action,
@@ -3408,8 +3541,8 @@ async def run(state: AgentState) -> AgentState:
             status="success" if derive_action.get("allowed") else "blocked",
             output_summary={
                 "source": selection_source,
-                "candidate_total": request_selection.get("candidate_total"),
-                "selected_total": request_selection.get("selected_total"),
+                "candidate_total": derived_candidate_total,
+                "selected_total": derived_selected_total,
                 "omitted": request_selection.get("omitted"),
                 "coverage_scope": request_selection.get("coverage_scope")
                 or strategy.get("coverage_scope"),
@@ -3612,7 +3745,7 @@ async def run(state: AgentState) -> AgentState:
             try:
                 start = time.perf_counter()
                 remaining_budget = None if execution_budget is None else execution_budget - http_executed_count
-                tool_result = await runtime.executor.execute(
+                tool_result = await runtime.execute_tool(
                     "api.http_request",
                     {"request": req},
                     context={
@@ -3621,6 +3754,7 @@ async def run(state: AgentState) -> AgentState:
                         "request_budget": remaining_budget,
                         "execution_policy": execution_policy,
                     },
+                    stage="api_runner",
                 )
                 raw_result = tool_result.raw or {}
                 resp = raw_result.get("response")
@@ -3688,7 +3822,7 @@ async def run(state: AgentState) -> AgentState:
                         auth_refreshed = True
                         start = time.perf_counter()
                         remaining_budget = None if execution_budget is None else execution_budget - http_executed_count
-                        tool_result = await runtime.executor.execute(
+                        tool_result = await runtime.execute_tool(
                             "api.http_request",
                             {"request": req},
                             context={
@@ -3697,6 +3831,7 @@ async def run(state: AgentState) -> AgentState:
                                 "request_budget": remaining_budget,
                                 "execution_policy": execution_policy,
                             },
+                            stage="api_runner",
                         )
                         raw_result = tool_result.raw or {}
                         resp = raw_result.get("response")

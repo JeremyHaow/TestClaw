@@ -67,6 +67,8 @@ def test_phase_6_10_knowledge_page_renders_rag_cards_with_required_metadata() ->
         "fragmentCount(entry)",
         "usageCount(entry)",
         "lastUpdatedLabel(entry)",
+        "knowledgeSummary(entry)",
+        "memoryCandidate(entry)",
         "embedding_available",
     ]:
         assert hook in source
@@ -74,6 +76,7 @@ def test_phase_6_10_knowledge_page_renders_rag_cards_with_required_metadata() ->
     assert "usage_count" in source
     assert "chunk_count" in source
     assert "fragment_count" in source
+    assert "编辑时可查看和修改完整原始内容" in source
 
 
 def test_phase_6_10_knowledge_actions_use_only_existing_api_capabilities() -> None:

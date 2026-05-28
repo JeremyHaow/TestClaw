@@ -109,6 +109,7 @@ const snapshotKeys = [
   'agent_observations',
   'agent_evidence',
   'agent_protocol_evaluations',
+  'run_findings',
   'agent_protocol_summary',
   'runtime_events',
   'evidence_evaluation',
@@ -118,6 +119,9 @@ const snapshotKeys = [
   'agent_replan_feedback',
   'agent_retry_counts',
   'agent_retry_feedback',
+  'agent_runtime_status',
+  'agent_continuation_run_id',
+  'agent_source_run_id',
   'agent_human_question',
   'agent_strategy_decision',
   'agent_tool_plan',
@@ -741,9 +745,22 @@ const agentProtocolEvidence = computed(() => ensureList(run.value?.agent_evidenc
 const agentProtocolEvaluations = computed(() => ensureList(run.value?.agent_protocol_evaluations))
 const agentProtocolSummary = computed(() => run.value?.agent_protocol_summary || null)
 const runtimeEvents = computed(() => ensureList(run.value?.runtime_events))
-const latestRuntimeAction = computed(() => lastItem(agentActions.value) || lastItem(agentActionObservations.value))
+const agentRuntimeStatus = computed(() => String(run.value?.agent_runtime_status || '').toLowerCase())
 const latestProtocolObservation = computed(() => lastItem(agentProtocolObservations.value))
 const latestProtocolEvaluation = computed(() => lastItem(agentProtocolEvaluations.value))
+function isSkippedProtocolObservation(item: any) {
+  const status = String(item?.status || item?.outcome || '').toLowerCase()
+  return status === 'skipped' || item?.outputs?.skipped === true
+}
+const latestDisplayObservation = computed(() => {
+  if (isActiveRun.value) return latestProtocolObservation.value
+  return agentProtocolObservations.value.slice().reverse().find((item: any) => !isSkippedProtocolObservation(item))
+    || latestProtocolObservation.value
+})
+const latestRuntimeAction = computed(() => {
+  if (!isActiveRun.value) return null
+  return lastItem(agentActions.value) || lastItem(agentActionObservations.value)
+})
 const recentProtocolObservations = computed(() => agentProtocolObservations.value.slice().reverse().slice(0, 6))
 const recentProtocolEvidence = computed(() => agentProtocolEvidence.value.slice().reverse().slice(0, 6))
 const protocolEvidenceCount = computed(() => Number(agentProtocolSummary.value?.evidence_total ?? agentProtocolEvidence.value.length))
@@ -843,7 +860,7 @@ const triageAffectedSurfaces = computed(() => ensureList(triageSummary.value?.af
 const pagedTriageAffectedSurfaces = computed(() => indexedPage(triageAffectedSurfaces.value, triageSurfacePage.value, triageSurfacePageSize))
 const triageBlockingFindings = computed(() => ensureList(triageSummary.value?.blocking_findings))
 const pagedTriageBlockingFindings = computed(() => indexedPage(triageBlockingFindings.value, triageFindingPage.value, triageFindingPageSize))
-const reportBugs = computed(() => ensureList(run.value?.final_report?.bugs_found))
+const reportBugs = computed(() => ensureList(run.value?.final_report?.bugs_found || run.value?.run_findings))
 const pagedReportBugs = computed(() => indexedPage(reportBugs.value, reportBugPage.value, reportBugPageSize))
 const interventionSummary = computed(() => run.value?.intervention_summary || null)
 const showInterventionPanel = computed(() => Boolean(interventionSummary.value?.useful))
@@ -1116,15 +1133,17 @@ const statusTitle = computed(() => {
   return 'Agent Cockpit'
 })
 const statusDescription = computed(() => {
-  if (latestProtocolObservation.value?.summary) return latestProtocolObservation.value.summary
   if (isActiveRun.value) return '测试智能体正在准备测试计划、执行动作并采集证据'
   if (run.value?.last_error) return run.value.last_error
   if (run.value?.final_report?.summary) return run.value.final_report.summary
+  if (latestProtocolEvaluation.value?.reason) return latestProtocolEvaluation.value.reason
+  if (latestDisplayObservation.value?.summary) return latestDisplayObservation.value.summary
   if (currentStep.value?.detail) return currentStep.value.detail
   return '暂无更多执行信息'
 })
 const currentStepLabel = computed(() => {
-  if (latestProtocolObservation.value) return protocolRecordTitle(latestProtocolObservation.value)
+  if (!isActiveRun.value && latestProtocolEvaluation.value) return protocolRecordTitle({ ...latestProtocolEvaluation.value, record_type: 'evaluation' })
+  if (latestDisplayObservation.value) return protocolRecordTitle(latestDisplayObservation.value)
   const step = currentStep.value
   if (!step) return '初始化'
   if (typeof step === 'string') return step
@@ -1145,7 +1164,24 @@ const evidenceCount = computed(() => {
   return Number(triageSummary.value?.evidence?.count || 0) + uiScreenshotCount.value + toolCalls.value.length + protocolEvidenceCount.value
 })
 const currentBlockingText = computed(() => {
-  return run.value?.agent_human_question || interventionSummary.value?.reason || run.value?.last_error || latestAgentEvaluation.value?.reason || latestProtocolObservation.value?.failure_type || ''
+  if (run.value?.agent_human_question) return run.value.agent_human_question
+  if (interventionSummary.value?.reason) return interventionSummary.value.reason
+  if (run.value?.last_error) return run.value.last_error
+  const evaluation = latestAgentEvaluation.value || {}
+  const evaluationOutcome = String(evaluation.outcome || '').toLowerCase()
+  if (
+    evaluation.failure_type
+    || evaluation.sufficient_evidence === false
+    || ['blocked', 'failed', 'needs_human', 'insufficient'].includes(evaluationOutcome)
+  ) {
+    return evaluation.reason || evaluation.failure_type || ''
+  }
+  const observation = latestProtocolObservation.value || {}
+  const observationStatus = String(observation.status || observation.outcome || '').toLowerCase()
+  if (observation.failure_type || ['failed', 'blocked'].includes(observationStatus)) {
+    return observation.failure_type || observation.summary || ''
+  }
+  return ''
 })
 const releaseRiskLabel = computed(() => triageSummary.value?.release_risk?.label || triageSummary.value?.release_risk?.level || '等待结果')
 
@@ -1275,7 +1311,9 @@ watch(
           <h3 class="mt-1 truncate text-lg font-semibold text-[#0F172A]">{{ run.objective }}</h3>
           <p class="mt-1 text-sm text-[#475569]">
             {{ latestProtocolEvaluation?.next_action ? `Next action: ${agentActionLabel(latestProtocolEvaluation.next_action)}` : 'Next action: waiting' }}
-            <span v-if="run.agent_human_question"> · waiting_for_human</span>
+            <span v-if="agentRuntimeStatus === 'waiting_for_human' || run.agent_human_question"> · waiting_for_human</span>
+            <span v-else-if="agentRuntimeStatus"> · {{ agentRuntimeStatus }}</span>
+            <span v-if="run.agent_continuation_run_id"> · continuation {{ run.agent_continuation_run_id }}</span>
           </p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
@@ -1293,12 +1331,14 @@ watch(
         <div class="space-y-4">
           <RuntimeCurrentStep
             :action="latestRuntimeAction"
-            :observation="latestProtocolObservation"
+            :observation="latestDisplayObservation"
             :evaluation="latestProtocolEvaluation || latestAgentEvaluation"
           />
           <RuntimeHumanHandoff
             v-model="interventionText"
+            v-model:cancel-current="interventionCancelCurrent"
             :question="run.agent_human_question"
+            :can-cancel-current="isActiveRun"
             :submitting="interventionSubmitting"
             @submit="submitInterventionRerun"
           />

@@ -1,10 +1,14 @@
 import logging
 
+from sqlalchemy import select
+
 from app.agent.progress import persist_progress
 from app.agent.runtime.failure_taxonomy import report_category_for_failure
 from app.agent.state import AgentState
 from app.agent.tool_registry import record_tool_call, summarize_tool_calls
 from app.agent.api_scope import ALL_SAFE_GET_COVERAGE_SOURCE
+from app.core.redaction import redact_sensitive_data
+from app.models.run_artifacts import RunFinding
 
 logger = logging.getLogger(__name__)
 
@@ -401,6 +405,58 @@ def _agent_evaluation_recommendations(state: AgentState) -> list[str]:
     return recommendations[:4]
 
 
+def _finding_evidence_ids(state: AgentState, finding: dict) -> list[str]:
+    source = str(finding.get("source") or "")
+    category = str(finding.get("category") or "")
+    refs: list[str] = []
+    seen: set[str] = set()
+    for observation in state.get("agent_observations") or []:
+        if not isinstance(observation, dict):
+            continue
+        if source == "api" and observation.get("layer") != "api":
+            continue
+        if source in {"ui", "ui_setup"} and observation.get("layer") != "ui":
+            continue
+        failure_type = str(observation.get("failure_type") or "")
+        if category and report_category_for_failure(failure_type) != category:
+            continue
+        for evidence_id in observation.get("evidence_ids") or []:
+            key = str(evidence_id)
+            if key and key not in seen:
+                seen.add(key)
+                refs.append(key)
+    return refs[:12]
+
+
+async def _persist_run_findings(state: AgentState, findings: list[dict]) -> None:
+    db = state.get("db_session")
+    run_id = state.get("task_id")
+    if not db or not run_id or not findings:
+        return
+    result = await db.execute(select(RunFinding.title).where(RunFinding.run_id == str(run_id)))
+    existing_titles = {str(item) for item in result.scalars()}
+    for finding in findings:
+        title = str(finding.get("title") or "Runtime finding")[:255]
+        if title in existing_titles:
+            continue
+        db.add(
+            RunFinding(
+                run_id=str(run_id),
+                title=title,
+                severity=str(finding.get("severity") or "MEDIUM").lower(),
+                confidence=str(finding.get("confidence") or "medium").lower(),
+                category=str(finding.get("category") or "unknown")[:64],
+                surface=str(finding.get("source") or "")[:255] or None,
+                description=str(finding.get("description") or title),
+                evidence_ids_json=_finding_evidence_ids(state, finding),
+                reproduction_steps_json=redact_sensitive_data(finding.get("reproduction_steps") or []),
+                next_action=str(finding.get("next_action") or ""),
+                status="open",
+            )
+        )
+        existing_titles.add(title)
+
+
 async def run(state: AgentState) -> AgentState:
     api_result = state.get("api_execution_result")
     ui_result = state.get("ui_execution_result")
@@ -566,6 +622,7 @@ async def run(state: AgentState) -> AgentState:
     state["tool_summary"] = summarize_tool_calls(state.get("tool_calls"))
     final_report["tool_summary"] = state["tool_summary"]
     final_report["artifacts"]["tool_call_count"] = state["tool_summary"].get("total", 0)
+    await _persist_run_findings(state, final_report["bugs_found"])
     artifacts["tool_calls"] = state.get("tool_calls", [])
     artifacts["tool_summary"] = state["tool_summary"]
     state["artifacts"] = artifacts

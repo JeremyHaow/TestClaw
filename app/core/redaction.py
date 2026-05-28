@@ -43,6 +43,12 @@ _SAFE_SENSITIVE_METADATA_KEYS = {
     "authentication_required",
     "captcha_mode",
 }
+_SAFE_LABEL_COUNT_MAP_KEYS = {
+    "by_evidence_kind",
+    "by_failure_type",
+    "by_layer",
+    "by_status",
+}
 _SENSITIVE_TEXT_KEY = (
     r"(?:password|passwd|access[_-]?token|refresh[_-]?token|id[_-]?token|"
     r"token|secret|api[_-]?key|authorization|authentication|auth|cookie|credential|"
@@ -162,6 +168,19 @@ def _redact_structured_text(text: str) -> str | None:
     return json.dumps(redact_sensitive_data(parsed), ensure_ascii=False, default=str)
 
 
+def _redact_label_count_map(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return redact_sensitive_data(value)
+    redacted: dict[Any, Any] = {}
+    for key, child in value.items():
+        safe_key = sanitize_persisted_text(key) if isinstance(key, str) else key
+        if isinstance(child, (int, float, bool)) or child is None:
+            redacted[safe_key] = child
+        else:
+            redacted[safe_key] = redact_sensitive_data(child)
+    return redacted
+
+
 def _redact_playwright_like_command(text: str) -> str:
     redacted = _PLAYWRIGHT_TWO_QUOTED_ARGS_RE.sub(
         lambda match: (
@@ -191,6 +210,8 @@ def redact_sensitive_data(value: Any) -> Any:
             key_text = str(safe_key)
             if key_text.lower() in _HEADER_CONTAINER_KEYS:
                 redacted[safe_key] = redact_sensitive_headers(child)
+            elif key_text.lower() in _SAFE_LABEL_COUNT_MAP_KEYS:
+                redacted[safe_key] = _redact_label_count_map(child)
             elif key_text.lower() in _SAFE_SENSITIVE_METADATA_KEYS:
                 redacted[safe_key] = redact_sensitive_data(child)
             elif is_sensitive_header(key_text):

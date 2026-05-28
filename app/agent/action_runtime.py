@@ -940,15 +940,15 @@ def _api_failure_type(result: dict[str, Any]) -> str | None:
     ):
         return "dependency_missing"
 
-    method = _normalize_method(result.get("method"))
-    if bool(result.get("skipped")) and method in WRITE_API_METHODS:
-        return "safe_write_blocked"
-
-    if result.get("skipped") and any(
+    if result.get("skipped") and not raw_failure_type and any(
         marker in skip_reason
         for marker in ("safe read", "read-only", "安全只读", "安全写入", "write gate")
     ):
-        return "safe_write_blocked"
+        return None
+
+    method = _normalize_method(result.get("method"))
+    if bool(result.get("skipped")) and method in WRITE_API_METHODS:
+        return None
 
     if result.get("error"):
         text = str(result.get("error") or "").lower()
@@ -1122,6 +1122,34 @@ def _append_tool_call_protocol(
     return str(payload["tool_call_id"])
 
 
+def append_agent_tool_call(
+    state: dict[str, Any],
+    *,
+    tool_name: str,
+    layer: str,
+    status: str,
+    inputs: dict[str, Any] | None = None,
+    outputs: dict[str, Any] | None = None,
+    elapsed_ms: float | None = None,
+    action_id: str | None = None,
+    case_index: int | None = None,
+    case_title: str | None = None,
+) -> str:
+    """Append a runtime protocol tool call record."""
+    return _append_tool_call_protocol(
+        state,
+        tool_name=tool_name,
+        layer=layer,
+        status=status,
+        inputs=inputs,
+        outputs=outputs,
+        elapsed_ms=elapsed_ms,
+        action_id=action_id,
+        case_index=case_index,
+        case_title=case_title,
+    )
+
+
 def _append_evidence_protocol(
     state: dict[str, Any],
     *,
@@ -1153,6 +1181,32 @@ def _append_evidence_protocol(
         evidence.model_dump(mode="json", exclude_none=True),
     )
     return str(payload["evidence_id"])
+
+
+def append_agent_evidence(
+    state: dict[str, Any],
+    *,
+    kind: str,
+    stage: str,
+    layer: str,
+    title: str,
+    status: str,
+    summary: str = "",
+    uri: str | None = None,
+    data: dict[str, Any] | None = None,
+) -> str:
+    """Append a runtime protocol evidence record."""
+    return _append_evidence_protocol(
+        state,
+        kind=kind,
+        stage=stage,
+        layer=layer,
+        title=title,
+        status=status,
+        summary=summary,
+        uri=uri,
+        data=data,
+    )
 
 
 def append_agent_observation(
@@ -1201,11 +1255,9 @@ def append_agent_observation(
         metadata=redact_sensitive_data(metadata or {}),
         timestamp=timestamp,
     )
-    payload = _append_protocol_record(
-        state,
-        "agent_observations",
-        observation.model_dump(mode="json", exclude_none=True),
-    )
+    serialized = observation.model_dump(mode="json", exclude_none=True)
+    serialized.setdefault("failure_type", None)
+    payload = _append_protocol_record(state, "agent_observations", serialized)
     _protocol_summary(state)
     return payload
 

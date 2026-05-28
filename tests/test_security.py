@@ -164,6 +164,24 @@ def test_redact_sensitive_text_redacts_embedded_playwright_fill_and_type_values(
     assert redact_sensitive_text(redacted) == redacted
 
 
+def test_redact_sensitive_data_preserves_runtime_taxonomy_count_keys():
+    payload = {
+        "agent_protocol_summary": {
+            "by_failure_type": {"auth_failure": 1, "ui_high_risk_action_blocked": 2},
+            "by_layer": {"api": 1},
+            "by_status": {"failed": 1},
+        },
+        "headers": {"Authorization": "Bearer runtime-secret"},
+    }
+
+    redacted = redact_sensitive_data(payload)
+
+    assert redacted["agent_protocol_summary"]["by_failure_type"]["auth_failure"] == 1
+    assert redacted["agent_protocol_summary"]["by_failure_type"]["ui_high_risk_action_blocked"] == 2
+    assert redacted["agent_protocol_summary"]["by_layer"]["api"] == 1
+    assert redacted["headers"]["Authorization"] == REDACTED_VALUE
+
+
 def test_redact_sensitive_text_redacts_spaced_credential_markers():
     redacted = redact_sensitive_text(
         "JWT jwt-secret, CSRF csrf-secret, X-CSRF xcsrf-secret, "

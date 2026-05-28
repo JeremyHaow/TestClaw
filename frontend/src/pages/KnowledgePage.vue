@@ -31,6 +31,17 @@ interface KnowledgeEntry {
   name?: string | null
 }
 
+type MemoryCandidate = {
+  kind?: string | null
+  target_hint?: string | null
+  summary?: string | null
+  planner_hint?: string | null
+  reason?: string | null
+  failure_type?: string | null
+  final_verdict?: string | null
+  facts?: Array<{ fact_type?: string | null; summary?: string | null; planner_hint?: string | null }>
+}
+
 const toast = useToast()
 const items = ref<KnowledgeEntry[]>([])
 const loading = ref(false)
@@ -182,6 +193,12 @@ function firstNumber(...values: unknown[]) {
 function entryTitle(entry: KnowledgeEntry) {
   const direct = String(entry.title || entry.name || '').trim()
   if (direct) return direct
+  const candidate = memoryCandidate(entry)
+  if (candidate) {
+    const kind = String(candidate.kind || '运行记忆')
+    const target = String(candidate.target_hint || '').trim()
+    return target ? `${kind} · ${target}` : kind
+  }
   const firstLine = String(entry.content || '')
     .trim()
     .split(/\n+/)
@@ -191,7 +208,45 @@ function entryTitle(entry: KnowledgeEntry) {
   return firstLine.length > 32 ? `${firstLine.slice(0, 32)}...` : firstLine
 }
 
+function memoryCandidate(entry: KnowledgeEntry | null): MemoryCandidate | null {
+  const content = String(entry?.content || '')
+  if (!content.includes('TESTCLAW_MEMORY_CANDIDATE_V1')) return null
+  const start = content.indexOf('{')
+  const end = content.lastIndexOf('}')
+  if (start < 0 || end <= start) return null
+  try {
+    const parsed = JSON.parse(content.slice(start, end + 1))
+    return parsed && typeof parsed === 'object' ? parsed as MemoryCandidate : null
+  } catch {
+    return null
+  }
+}
+
+function compactText(value: unknown, limit = 220) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim()
+  if (text.length <= limit) return text
+  return `${text.slice(0, limit).trim()}...`
+}
+
+function knowledgeSummary(entry: KnowledgeEntry | null) {
+  const candidate = memoryCandidate(entry)
+  if (candidate) {
+    return compactText(candidate.summary || candidate.planner_hint || candidate.reason || entry?.content, 260)
+  }
+  return compactText(entry?.content, 260)
+}
+
+function candidateFactSummaries(entry: KnowledgeEntry | null) {
+  const facts = memoryCandidate(entry)?.facts
+  return Array.isArray(facts)
+    ? facts.map((fact) => compactText(fact.summary || fact.planner_hint, 180)).filter(Boolean).slice(0, 4)
+    : []
+}
+
 function knowledgeType(entry: KnowledgeEntry) {
+  const candidate = memoryCandidate(entry)
+  if (candidate?.kind === 'successful_strategy') return '成功策略'
+  if (candidate?.kind === 'failure_recovery') return '失败恢复'
   const explicitType = String(entry.knowledge_type || entry.type || '').trim()
   if (explicitType) return explicitType
   const content = String(entry.content || '').toLowerCase()
@@ -329,7 +384,7 @@ onMounted(fetchItems)
                       {{ retrievalStatusLabel(entry) }}
                     </span>
                   </div>
-                  <p class="mt-2 line-clamp-3 text-xs leading-5 text-gray-500">{{ entry.content }}</p>
+                  <p class="mt-2 line-clamp-3 text-xs leading-5 text-gray-500">{{ knowledgeSummary(entry) }}</p>
                 </div>
               </div>
 
@@ -452,7 +507,40 @@ onMounted(fetchItems)
           </template>
 
           <div v-else class="max-h-[420px] overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-4 lg:max-h-[calc(100vh-22rem)]">
-            <p class="whitespace-pre-wrap break-words text-sm leading-6 text-gray-700">{{ selectedEntry.content }}</p>
+            <div v-if="memoryCandidate(selectedEntry)" class="space-y-4">
+              <div>
+                <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">摘要</div>
+                <p class="mt-1 text-sm leading-6 text-gray-700">{{ knowledgeSummary(selectedEntry) }}</p>
+              </div>
+              <div v-if="memoryCandidate(selectedEntry)?.planner_hint">
+                <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Planner Hint</div>
+                <p class="mt-1 text-sm leading-6 text-gray-700">{{ compactText(memoryCandidate(selectedEntry)?.planner_hint, 360) }}</p>
+              </div>
+              <div class="grid gap-3 sm:grid-cols-3">
+                <div class="rounded-lg border border-gray-200 bg-white p-3">
+                  <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Target</div>
+                  <div class="mt-1 truncate text-xs font-semibold text-gray-700">{{ memoryCandidate(selectedEntry)?.target_hint || '未记录' }}</div>
+                </div>
+                <div class="rounded-lg border border-gray-200 bg-white p-3">
+                  <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Verdict</div>
+                  <div class="mt-1 truncate text-xs font-semibold text-gray-700">{{ memoryCandidate(selectedEntry)?.final_verdict || '未记录' }}</div>
+                </div>
+                <div class="rounded-lg border border-gray-200 bg-white p-3">
+                  <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Failure</div>
+                  <div class="mt-1 truncate text-xs font-semibold text-gray-700">{{ memoryCandidate(selectedEntry)?.failure_type || '无' }}</div>
+                </div>
+              </div>
+              <div v-if="candidateFactSummaries(selectedEntry).length">
+                <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Facts</div>
+                <ul class="mt-2 space-y-2">
+                  <li v-for="fact in candidateFactSummaries(selectedEntry)" :key="fact" class="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm leading-6 text-gray-700">
+                    {{ fact }}
+                  </li>
+                </ul>
+              </div>
+              <p class="text-xs text-gray-400">编辑时可查看和修改完整原始内容。</p>
+            </div>
+            <p v-else class="whitespace-pre-wrap break-words text-sm leading-6 text-gray-700">{{ selectedEntry.content }}</p>
           </div>
         </div>
       </section>

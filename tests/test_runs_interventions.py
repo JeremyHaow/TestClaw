@@ -3,11 +3,13 @@ import json
 import uuid
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from app.api.v1 import runs
 from app.core.redaction import REDACTED_VALUE
 from app.database import AsyncSessionLocal
 from app.main import app
+from app.models.run_artifacts import RunIntervention
 from app.models.task import Task, TaskStatus, TestType as TaskTestType
 
 
@@ -44,6 +46,25 @@ async def _task_status(task_id: str) -> str:
         task = await session.get(Task, task_id)
         assert task is not None
         return task.status.value if hasattr(task.status, "value") else str(task.status)
+
+
+async def _task_snapshot(task_id: str) -> dict[str, object]:
+    async with AsyncSessionLocal() as session:
+        task = await session.get(Task, task_id)
+        assert task is not None
+        status = task.status.value if hasattr(task.status, "value") else str(task.status)
+        return {
+            "status": status,
+            "execution_log": json.loads(task.execution_log or "{}"),
+        }
+
+
+async def _interventions_for_run(task_id: str) -> list[RunIntervention]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(RunIntervention).where(RunIntervention.run_id == task_id)
+        )
+        return list(result.scalars())
 
 
 def test_run_detail_intervention_summary_surfaces_setup_login_blocker_without_secrets() -> None:
@@ -151,6 +172,8 @@ def test_assisted_intervention_rerun_appends_setup_instructions_and_redacts_resp
         new_run_id = response.json()["id"]
         detail = client.get(f"/api/v1/runs/{new_run_id}", headers={"Authorization": f"Bearer {token}"})
 
+    interventions = asyncio.run(_interventions_for_run(task_id))
+
     assert dispatched["target_url"] == "https://app.example.test/login"
     assert dispatched["kwargs"]["auth_headers"] == {"X-Tenant": "qa"}
     assert dispatched["kwargs"]["custom_headers"] == {"X-Trace-ID": "trace-safe"}
@@ -162,6 +185,85 @@ def test_assisted_intervention_rerun_appends_setup_instructions_and_redacts_resp
     assert "rerun-secret" not in serialized_response
     assert "captcha-secret" not in serialized_response
     assert "old-secret" not in serialized_response
+    assert REDACTED_VALUE in serialized_response
+    assert len(interventions) == 1
+    assert interventions[0].status == "applied"
+    assert interventions[0].scope == "continuation_run"
+    assert "rerun-secret" not in interventions[0].supplemental_instructions
+    assert REDACTED_VALUE in interventions[0].supplemental_instructions
+
+
+def test_assisted_intervention_runs_synchronously_when_dispatch_fails(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fail_delay(*args, **kwargs) -> None:
+        raise RuntimeError("broker down")
+
+    async def fake_run_graph(state: dict) -> dict:
+        captured["state"] = dict(state)
+        return {
+            **state,
+            "ui_execution_result": {
+                "total": 1,
+                "completed": 1,
+                "passed": 1,
+                "failed": 0,
+                "skipped": 0,
+            },
+            "final_report": {
+                "overall_verdict": "PASS",
+                "summary": "assisted rerun completed",
+            },
+            "workflow_steps": [
+                {"node": "ui_runner", "status": "done", "detail": "fallback ran"}
+            ],
+        }
+
+    monkeypatch.setattr(runs.run_agent_task, "delay", fail_delay)
+    monkeypatch.setattr(runs, "run_graph_with_progress", fake_run_graph)
+
+    execution_log = {
+        "source_input": "https://app.example.test/login",
+        "input_type": "url",
+        "ui_seed_url": "https://app.example.test/login",
+        "setup_instructions": "Use tenant qa before testing.",
+        "auth_headers": {"X-Tenant": "qa"},
+        "custom_headers": {"X-Trace-ID": "trace-safe"},
+    }
+    supplemental = "Use username demo and password=sync-secret; captcha=sync-captcha-secret."
+
+    with TestClient(app) as client:
+        token = _token(client)
+        task_id = asyncio.run(_insert_task(status=TaskStatus.FAILED, execution_log=execution_log))
+        response = client.post(
+            f"/api/v1/runs/{task_id}/interventions",
+            json={"supplemental_instructions": supplemental},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+        new_run_id = response.json()["id"]
+        detail = client.get(f"/api/v1/runs/{new_run_id}", headers={"Authorization": f"Bearer {token}"})
+
+    state = captured["state"]
+    assert state["task_id"] == new_run_id
+    assert state["target_url"] == "https://app.example.test/login"
+    assert state["test_type"] == "ui"
+    assert state["auth_headers"] == {"X-Trace-ID": "trace-safe", "X-Tenant": "qa"}
+    assert state["custom_headers"] == {"X-Trace-ID": "trace-safe"}
+    assert state["db_session"] is not None
+    assert "Use tenant qa" in state["setup_instructions"]
+    assert "password=sync-secret" in state["setup_instructions"]
+    assert state["login_instructions"] == state["setup_instructions"]
+
+    snapshot = asyncio.run(_task_snapshot(new_run_id))
+    assert snapshot["status"] == TaskStatus.SUCCEEDED.value
+    execution_log = snapshot["execution_log"]
+    assert execution_log["ui_execution_result"]["completed"] == 1
+    assert execution_log["workflow_steps"][-1]["detail"] == "fallback ran"
+
+    serialized_response = response.text + detail.text
+    assert "sync-secret" not in serialized_response
+    assert "sync-captcha-secret" not in serialized_response
     assert REDACTED_VALUE in serialized_response
 
 

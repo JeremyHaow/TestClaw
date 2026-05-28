@@ -39,6 +39,17 @@ async def _insert_task(
     return task_id
 
 
+async def _task_snapshot(task_id: str) -> dict[str, object]:
+    async with AsyncSessionLocal() as session:
+        task = await session.get(Task, task_id)
+        assert task is not None
+        status = task.status.value if hasattr(task.status, "value") else str(task.status)
+        return {
+            "status": status,
+            "execution_log": json.loads(task.execution_log or "{}"),
+        }
+
+
 async def _insert_suite(*, run_id: str, name: str = "Release smoke suite") -> str:
     suite_id = str(uuid.uuid4())
     async with AsyncSessionLocal() as session:
@@ -567,6 +578,79 @@ def test_run_triage_export_rejects_invalid_format() -> None:
 
     assert response.status_code == 400
     assert response.json()["detail"] == "format must be markdown or json"
+
+
+def test_rerun_runs_synchronously_when_celery_dispatch_fails(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fail_delay(*args, **kwargs) -> None:
+        raise RuntimeError("broker down")
+
+    async def fake_run_graph(state: dict) -> dict:
+        captured["state"] = dict(state)
+        return {
+            **state,
+            "api_execution_result": {
+                "total": 1,
+                "executed": 1,
+                "passed": 1,
+                "failed": 0,
+                "skipped": 0,
+            },
+            "final_report": {
+                "overall_verdict": "PASS",
+                "summary": "rerun completed",
+            },
+            "workflow_steps": [
+                {"node": "api_runner", "status": "done", "detail": "fallback ran"}
+            ],
+        }
+
+    monkeypatch.setattr(runs_api.run_agent_task, "delay", fail_delay)
+    monkeypatch.setattr(runs_api, "run_graph_with_progress", fake_run_graph)
+
+    execution_log = {
+        "source_input": "https://api.example.test/openapi.json",
+        "input_type": "swagger_url",
+        "api_execution_policy": "read_only",
+        "allow_out_of_schema_api_cases": False,
+        "api_cases": [{"title": "GET health"}],
+        "auth_headers": {"Authorization": "Bearer old-secret", "X-Tenant": "qa"},
+        "custom_headers": {"X-Trace-ID": "trace-safe"},
+    }
+
+    with TestClient(app) as client:
+        token = _token(client)
+        task_id = asyncio.run(
+            _insert_task(status=TaskStatus.SUCCEEDED, execution_log=execution_log)
+        )
+        response = client.post(
+            f"/api/v1/runs/{task_id}/rerun",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    new_run_id = body["id"]
+    assert new_run_id != task_id
+    assert body["status"] == TaskStatus.SUCCEEDED.value
+
+    state = captured["state"]
+    assert state["task_id"] == new_run_id
+    assert state["objective"] == "triage detail"
+    assert state["target_url"] == "https://api.example.test"
+    assert state["test_type"] == "api"
+    assert state["source_input"] == "https://api.example.test/openapi.json"
+    assert state["api_execution_policy"] == "read_only"
+    assert state["auth_headers"] == {"X-Trace-ID": "trace-safe", "X-Tenant": "qa"}
+    assert state["custom_headers"] == {"X-Trace-ID": "trace-safe"}
+    assert state["db_session"] is not None
+
+    snapshot = asyncio.run(_task_snapshot(new_run_id))
+    assert snapshot["status"] == TaskStatus.SUCCEEDED.value
+    execution_log = snapshot["execution_log"]
+    assert execution_log["api_execution_result"]["executed"] == 1
+    assert execution_log["workflow_steps"][-1]["detail"] == "fallback ran"
 
 
 def test_run_triage_export_route_stays_distinct_from_neighbor_run_routes(monkeypatch) -> None:
