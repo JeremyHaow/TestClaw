@@ -1433,7 +1433,7 @@ def test_ui_plan_without_auth_boundary_keeps_collecting(monkeypatch) -> None:
         created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
         response = client.post(
             f"/api/v1/agent-plans/{created['id']}/messages",
-            json={"content": "测试页面 https://example.com ，只做 UI 只读冒烟检查。"},
+            json={"content": "测试页面 https://app.internal.test ，只做 UI 只读冒烟检查。"},
             headers=headers,
         )
 
@@ -1480,7 +1480,7 @@ def test_ui_auth_boundary_followup_preserves_ui_mode(monkeypatch) -> None:
         created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
         first = client.post(
             f"/api/v1/agent-plans/{created['id']}/messages",
-            json={"content": "测试页面 https://example.com ，只做 UI 只读冒烟检查。"},
+            json={"content": "测试页面 https://app.internal.test ，只做 UI 只读冒烟检查。"},
             headers=headers,
         )
         followup = client.post(
@@ -1495,7 +1495,7 @@ def test_ui_auth_boundary_followup_preserves_ui_mode(monkeypatch) -> None:
     body = followup.json()
     assert body["status"] == "ready"
     assert body["current_run_payload"]["test_type"] == "ui"
-    assert body["current_run_payload"]["source"] == "https://example.com"
+    assert body["current_run_payload"]["source"] == "https://app.internal.test"
     assert body["current_run_payload"]["auth_mode"] == "none_confirmed"
 
 
@@ -2075,3 +2075,247 @@ def test_planning_session_isolated_by_user(monkeypatch) -> None:
     assert delete_message_response.status_code == 404
     assert reject_response.status_code == 404
     assert execute_response.status_code == 404
+
+
+# -------------------------------------------------------------------------
+# T1: planner intelligence regressions
+# `.trellis/tasks/05-28-agent-plan-planner-intelligence`
+# -------------------------------------------------------------------------
+
+
+def test_collecting_recognizes_provided_target_and_success_criteria(monkeypatch) -> None:
+    """A user message that already names target + success criteria must not
+    bounce back the same '请补充成功标准' question. Live audit bug 1.11."""
+
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        response = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "请测试 https://httpbin.org/get，状态码 200"},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    # httpbin.org is a recognized public domain; status should reach ready.
+    assert body["status"] == "ready"
+    assert body["current_run_payload"]["auth_mode"] == "none_confirmed"
+    # No clarifying question must be asked about success criteria when the
+    # user already supplied "状态码 200".
+    assistant_questions: list[str] = []
+    for message in body["messages"]:
+        if message["role"] != "assistant":
+            continue
+        plan_data = message.get("plan") or {}
+        questions = plan_data.get("questions") if isinstance(plan_data, dict) else None
+        if isinstance(questions, list):
+            assistant_questions.extend(str(item) for item in questions if item)
+    assert all("成功标准是什么" not in question for question in assistant_questions), assistant_questions
+
+
+def test_collecting_recognizes_public_domain_auth_boundary(monkeypatch) -> None:
+    """A public no-auth domain should not trigger a re-ask for the auth boundary."""
+
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        response = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "请测试 https://postman-echo.com/get"},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["current_run_payload"]["auth_mode"] == "none_confirmed"
+    assistant_text = " ".join(
+        message["content"] for message in body["messages"] if message["role"] == "assistant"
+    )
+    assert "是否需要鉴权" not in assistant_text
+
+
+def test_repetition_guard_swaps_body_after_identical_generic_response(monkeypatch) -> None:
+    """Second unparseable user input must not produce the same generic
+    "还需要补充这些信息" reply. Live audit bug 1.2."""
+
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        first = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "测试一下百度的网页"},
+            headers=headers,
+        )
+        second = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "1112"},
+            headers=headers,
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_assistant = [m for m in first.json()["messages"] if m["role"] == "assistant"][-1]
+    second_assistant = [m for m in second.json()["messages"] if m["role"] == "assistant"][-1]
+    assert "还需要补充这些信息" in first_assistant["content"]
+    # Second turn must not duplicate the first generic body.
+    assert "上一轮的补充信息还没识别到" in second_assistant["content"]
+    assert "还需要补充这些信息" not in second_assistant["content"]
+    # question_options must remain populated so the frontend can guide the user.
+    assert second.json()["question_options"], "guard must keep question_options"
+
+
+def test_task_objective_dedupes_repeated_sentences(monkeypatch) -> None:
+    """Asset handoff + user free chat must not duplicate the safety sentence.
+    Live audit bug 1.4."""
+
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    # The asset handoff message and a user follow-up that both contain the
+    # safety boundary sentence ("安全边界：默认只读；...") must collapse to once.
+    handoff = (
+        "从 TestClaw 接口文档创建新测试计划。\n"
+        "资产：ruoyi_wms\n"
+        "Source URL：https://api.internal.test/openapi.json\n"
+        "安全边界：默认只读；不要复用凭证、Token、Cookie、会话或验证码值。\n"
+        "从 TestClaw 接口文档资产创建新测试计划。"
+    )
+    followup = "安全边界：默认只读；不要复用凭证、Token、Cookie、会话或验证码值。"
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        first = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": handoff},
+            headers=headers,
+        )
+        second = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": followup},
+            headers=headers,
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    # Even before becoming ready, the planner-derived objective text used as
+    # task_objective surfaces in setup_instructions / objective when the
+    # run_payload is composed. Verify by normalizing directly.
+    from app.models.agent_planning import AgentPlanningMessage as _Msg
+
+    composed = normalize_planner_run_payload(
+        None,
+        [
+            _Msg(session_id="test-session", role="user", content=handoff),
+            _Msg(session_id="test-session", role="user", content=followup),
+        ],
+    )
+    safety_sentence = "安全边界：默认只读"
+    assert composed.objective.count(safety_sentence) <= 1, composed.objective
+    handoff_sentence = "从 TestClaw 接口文档创建新测试计划"
+    assert composed.objective.count(handoff_sentence) <= 1, composed.objective
+
+
+def test_free_chat_while_pending_step_does_not_silently_skip(monkeypatch) -> None:
+    """Free-chat messages while a structured step is `待确认` must not silently
+    advance the stepper. Live audit bug 1.13."""
+
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post(
+            "/api/v1/agent-plans/sessions",
+            json={},
+            headers=headers,
+        ).json()
+        session_id = created["id"]
+        # Step 1: confirm target_kind via structured intake.
+        client.post(
+            f"/api/v1/agent-plans/sessions/{session_id}/intake",
+            json={
+                "action": "continue",
+                "current_step": "target_kind",
+                "selected_option": {
+                    "label": "API / 接口",
+                    "value": "api_openapi",
+                    "field": "target_kind",
+                    "step": "target_kind",
+                    "message": "测试目标类型：API / OpenAPI/Swagger 接口来源。",
+                },
+            },
+            headers=headers,
+        )
+        # User now opens the bottom chat composer and sends free-chat text
+        # while coverage_scope is still 待确认.
+        chat_response = client.post(
+            f"/api/v1/agent-plans/{session_id}/messages",
+            json={"content": "另外补充一些上下文"},
+            headers=headers,
+        )
+
+    assert chat_response.status_code == 200
+    body = chat_response.json()
+    # Server must include current_step in every session payload so the
+    # frontend stepper is driven from server state, not chat turn count.
+    assert "current_step" in body
+    # Status is still collecting; current_step must be a known intake stage,
+    # never a silent jump that leaves coverage_scope at 待确认 while moving on.
+    assert body["status"] == "collecting"
+    assert body["current_step"] == "scope"
+
+
+def test_chinese_credential_chat_message_is_persisted_redacted(monkeypatch) -> None:
+    """Live audit bug 1.5: 用户消息 '登录账号是admin，密码是admin123' must not
+    persist verbatim. Redacted form must appear in stored chat history and in
+    any task_objective composition path."""
+
+    async def fake_llm(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(agent_planning_service, "_call_planner_llm", fake_llm)
+
+    with TestClient(app) as client:
+        token = _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        created = client.post("/api/v1/agent-plans", json={}, headers=headers).json()
+        response = client.post(
+            f"/api/v1/agent-plans/{created['id']}/messages",
+            json={"content": "目标 https://api.internal.test/openapi.json 登录账号是admin，密码是admin123"},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    user_message = next(m for m in body["messages"] if m["role"] == "user")
+    assert "admin123" not in user_message["content"]
+    assert "[REDACTED]" in user_message["content"]
+    # Defensive: response body never echoes the secret.
+    assert "admin123" not in response.text

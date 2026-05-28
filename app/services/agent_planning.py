@@ -129,6 +129,25 @@ _PLACEHOLDER_CHOICE_RE = re.compile(
     r"我会补充这份\s*API\s*文档对应的基础\s*URL",
     re.I,
 )
+_PUBLIC_AUTH_FREE_DOMAINS = (
+    "httpbin.org",
+    "postman-echo.com",
+    "example.com",
+    "example.org",
+    "example.net",
+    "github.io",
+    "httpstat.us",
+    "jsonplaceholder.typicode.com",
+)
+_SUCCESS_CRITERIA_RE = re.compile(
+    r"(?i)状态码|返回码|响应码|应该是\s*\d|"
+    r"\b(?:status[\s_-]?code|status\s+is|must\s+(?:be|return)|expect(?:s|ed)?\s+\d)\b|"
+    r"成功标准|发布阻断|必须返回|应当返回|期望返回|返回\s*\d{3}"
+)
+_NO_AUTH_KEYWORDS_RE = re.compile(
+    r"(?i)无需鉴权|无需登录|公开访问|不需要鉴权|不需要登录|不用登录|不用登陆|"
+    r"public\s+access|no\s+auth(?:entication)?|login\s+not\s+required"
+)
 
 
 class PlannerAuthCredentials(BaseModel):
@@ -241,6 +260,36 @@ def parse_json_object_text(value: str | None) -> dict[str, Any] | None:
 
 def _clean_text(value: Any, *, limit: int = 800) -> str:
     return " ".join(str(value or "").split())[:limit]
+
+
+# Sentence terminators include both ASCII and Chinese punctuation; the
+# regex captures the trailing terminator so we can preserve it when rebuilding.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？!?\.;；])\s+|\n+")
+
+
+def _dedupe_sentences(value: Any, *, limit: int = 800) -> str:
+    """Deduplicate sentences case-insensitively while preserving original order.
+
+    Prevents `task_objective` (composed from asset handoff context + user
+    free-chat + safety boundary defaults) from collapsing the same
+    "安全边界：..." sentence multiple times into the executed plan view.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    sentences = [piece.strip() for piece in _SENTENCE_SPLIT_RE.split(text) if piece and piece.strip()]
+    if not sentences:
+        return _clean_text(text, limit=limit)
+    seen: set[str] = set()
+    kept: list[str] = []
+    for sentence in sentences:
+        normalized = " ".join(sentence.lower().split())
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        kept.append(sentence)
+    rebuilt = " ".join(kept)
+    return _clean_text(rebuilt, limit=limit)
 
 
 def _clean_url(value: Any) -> str | None:
@@ -468,6 +517,49 @@ def _last_regex_value(pattern: re.Pattern[str], text: str) -> str | None:
     return last_match.group(1).strip().strip("'\"")
 
 
+def _has_public_no_auth_domain(text: str) -> bool:
+    """Detect public domains that should infer no-auth without re-asking the user."""
+    for url in _urls_from_text(text):
+        try:
+            host = urlsplit(url).hostname or ""
+        except Exception:
+            continue
+        host = host.lower()
+        for domain in _PUBLIC_AUTH_FREE_DOMAINS:
+            if host == domain or host.endswith(f".{domain}"):
+                return True
+    return False
+
+
+def _recognize_provided_fields(messages: list[AgentPlanningMessage]) -> dict[str, bool]:
+    """Identify which planner intake fields are already supplied by user history.
+
+    Used to filter `_missing_questions` so the planner does not re-ask for
+    facts already in the conversation. Returns a dict of booleans keyed by
+    `target`, `auth_boundary`, `success_criteria` so callers can subtract
+    those questions before emitting a generic clarifying response.
+    """
+    active_text, _ = _active_user_text_after_rejection(messages)
+    text = active_text or "\n".join(
+        message.content for message in messages if message.role == "user"
+    )
+    if not text:
+        return {"target": False, "auth_boundary": False, "success_criteria": False}
+    source = _source_from_text(text)
+    target_present = bool(source)
+    auth_boundary_present = bool(
+        _NO_AUTH_RE.search(text)
+        or _NO_AUTH_KEYWORDS_RE.search(text)
+        or _has_public_no_auth_domain(text)
+    )
+    success_criteria_present = bool(_SUCCESS_CRITERIA_RE.search(text))
+    return {
+        "target": target_present,
+        "auth_boundary": auth_boundary_present,
+        "success_criteria": success_criteria_present,
+    }
+
+
 def _credentials_from_text(text: str) -> dict[str, str]:
     values: dict[str, str] = {}
     username = _last_regex_value(_USERNAME_RE, text)
@@ -543,7 +635,9 @@ def _infer_auth_mode(
     if requested in ALLOWED_AUTH_MODES:
         return requested
     lowered = text.lower()
-    if _NO_AUTH_RE.search(lowered):
+    if _NO_AUTH_RE.search(lowered) or _NO_AUTH_KEYWORDS_RE.search(lowered):
+        return "none_confirmed"
+    if _has_public_no_auth_domain(text):
         return "none_confirmed"
     if token or headers:
         return "manual"
@@ -613,13 +707,13 @@ def normalize_planner_run_payload(
         text=intent_text,
     )
     objective_text = active_context_text if has_rejection_boundary else payload.get("objective")
-    objective = _clean_text(
+    objective = _dedupe_sentences(
         objective_text or redact_sensitive_text(active_context_text),
         limit=500,
     )
     if not objective:
         objective = "对目标执行安全的 TestClaw 智能体检查。"
-    setup_instructions = _clean_text(
+    setup_instructions = _dedupe_sentences(
         (active_context_text if has_rejection_boundary else payload.get("setup_instructions"))
         or redact_sensitive_text(active_context_text),
         limit=2000,
@@ -645,8 +739,12 @@ def normalize_planner_run_payload(
     )
 
 
-def _missing_questions(payload: PlannerRunPayload) -> list[str]:
-    if not payload.source:
+def _missing_questions(
+    payload: PlannerRunPayload,
+    recognized: dict[str, bool] | None = None,
+) -> list[str]:
+    recognized = recognized or {}
+    if not payload.source and not recognized.get("target"):
         return [
             "TestClaw 应测试哪个目标？请粘贴 URL 或 OpenAPI/Swagger 来源。",
             "这次希望覆盖哪些范围？例如关键路径、回归范围、接口契约或页面冒烟。",
@@ -654,12 +752,15 @@ def _missing_questions(payload: PlannerRunPayload) -> list[str]:
             "安全边界是什么？是否只允许只读检查，还是测试环境允许写入。",
             "什么结果算成功？请描述通过标准、必须覆盖的断言或需要重点发现的问题。",
         ]
-    input_type = classify_input(payload.source)
+    input_type = classify_input(payload.source) if payload.source else "unknown"
     if input_type in {"swagger_json", "swagger_yaml"} and not payload.base_url:
-        return [
+        questions = [
             "执行这份 API 文档时应使用哪个基础 URL？",
             "这次的成功标准是什么？例如必须覆盖的接口、断言或发布阻断条件。",
         ]
+        if recognized.get("success_criteria"):
+            questions = [questions[0]]
+        return questions
     has_auth_material = bool(
         payload.token
         or payload.headers
@@ -670,16 +771,26 @@ def _missing_questions(payload: PlannerRunPayload) -> list[str]:
         or (payload.auth_config and payload.auth_config.enabled)
     )
     if payload.test_type == "api" and payload.auth_mode == "auto" and not has_auth_material:
-        return [
+        questions = [
             "这个 API 目标是否需要鉴权？如需鉴权请提供测试 Token/Header 或登录凭据；如果可公开访问，请明确说明无需鉴权。",
             "这次 API 运行的成功标准是什么？例如必须覆盖的接口、状态码或发布阻断条件。",
         ]
+        if recognized.get("auth_boundary"):
+            questions = [questions[1]]
+        if recognized.get("success_criteria"):
+            questions = [item for item in questions if "成功标准" not in item]
+        return questions
     if payload.test_type == "ui" and payload.auth_mode == "auto" and not has_auth_material:
-        return [
+        questions = [
             "这个页面是否需要登录？如需登录请提供测试账号；如果是公开页面，请明确说明无需登录。",
             "UI 检查的安全边界是什么？例如只浏览、不提交表单，或允许在测试环境写入。",
             "这次 UI 运行的成功标准是什么？例如关键页面可达、核心流程无报错或特定断言通过。",
         ]
+        if recognized.get("auth_boundary"):
+            questions = [item for item in questions if "是否需要登录" not in item]
+        if recognized.get("success_criteria"):
+            questions = [item for item in questions if "成功标准" not in item]
+        return questions
     return []
 
 
@@ -1225,6 +1336,53 @@ def _sanitize_llm_output(raw: dict[str, Any]) -> PlannerLLMOutput | None:
         return None
 
 
+def _is_repetition_of_previous_assistant(
+    messages: list[AgentPlanningMessage],
+    new_message_body: str,
+    new_questions: list[str],
+) -> bool:
+    """Detect when the new generic collecting reply would duplicate the previous turn.
+
+    Triggers only when the new response would emit the same canonical body
+    ("还需要补充这些信息") with an identical (or superset) question set as
+    the immediately previous assistant message. Returns False when the new
+    questions are a strict subset (i.e. the planner has narrowed scope) so
+    legitimate forward progress is not blocked.
+    """
+    if not new_questions:
+        return False
+    if "还需要补充这些信息" not in new_message_body:
+        return False
+    previous_assistant: AgentPlanningMessage | None = None
+    for message in reversed(messages):
+        if message.role == "assistant":
+            previous_assistant = message
+            break
+    if previous_assistant is None:
+        return False
+    if "还需要补充这些信息" not in (previous_assistant.content or ""):
+        return False
+    previous_plan = parse_json_object_text(previous_assistant.plan_json)
+    previous_questions_raw: list[Any] = []
+    if isinstance(previous_plan, dict):
+        questions_value = previous_plan.get("questions")
+        if isinstance(questions_value, list):
+            previous_questions_raw = questions_value
+    previous_set = {
+        " ".join(str(item or "").split())
+        for item in previous_questions_raw
+        if str(item or "").strip()
+    }
+    new_set = {" ".join(question.split()) for question in new_questions if question.strip()}
+    if not previous_set or not new_set:
+        return False
+    # Allow narrowing: if the new set is a strict subset of the previous set,
+    # the planner is making progress and we should not block.
+    if new_set < previous_set:
+        return False
+    return new_set == previous_set or new_set > previous_set
+
+
 class AgentPlanningService:
     async def create_session(
         self,
@@ -1530,7 +1688,8 @@ class AgentPlanningService:
             run_payload={},
         )
         payload = normalize_planner_run_payload(llm_output.run_payload, messages)
-        questions = _missing_questions(payload)
+        recognized = _recognize_provided_fields(messages)
+        questions = _missing_questions(payload, recognized)
         ready = not questions and bool(payload.source)
         if ready and llm_output.ready_to_execute is False and llm_output.run_payload:
             ready = str(llm_output.status).lower() in {"ready", "ready_to_execute", "plan_ready"}
@@ -1562,6 +1721,11 @@ class AgentPlanningService:
         if not llm_output.questions and questions:
             message = "还需要补充这些信息：\n" + "\n".join(
                 f"- {question}" for question in questions[:5]
+            )
+        if _is_repetition_of_previous_assistant(messages, message, questions):
+            message = (
+                "上一轮的补充信息还没识别到。请使用上方的选项卡选择目标类型/范围/鉴权/安全/成功标准；"
+                "或者直接粘贴目标 URL/OpenAPI 文档地址。"
             )
         return PlannerTurnResult(
             message=redact_sensitive_text(message),
@@ -1674,11 +1838,18 @@ def redacted_plan_session_payload(
     title = redact_sensitive_text(session.title)
     if title == "New plan":
         title = "新计划"
+    if session.status == PLAN_SESSION_EXECUTED:
+        current_step = "executed"
+    elif session.status == PLAN_SESSION_READY or current_run_payload:
+        current_step = "review"
+    else:
+        current_step = "target"
     payload: dict[str, Any] = {
         "id": session.id,
         "title": title,
         "status": session.status,
         "ready_to_execute": session.status == PLAN_SESSION_READY and bool(current_run_payload),
+        "current_step": current_step,
         "current_plan": redact_sensitive_data(current_plan) if current_plan else None,
         "current_run_payload": redact_sensitive_data(current_run_payload)
         if current_run_payload

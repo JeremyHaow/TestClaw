@@ -32,6 +32,7 @@ _CONVERSATION_KEYS = ("conversation_id", "conversationId", "conversationID")
 _TRANSCRIPT_KEYS = ("transcript_path", "transcriptPath", "transcript")
 _NESTED_KEYS = ("input", "properties", "event", "hook_input", "hookInput")
 _KNOWN_PLATFORMS = {
+    "paseo",
     "claude",
     "codex",
     "cursor",
@@ -46,6 +47,7 @@ _KNOWN_PLATFORMS = {
 }
 
 _ENV_SESSION_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("paseo", ("PASEO_AGENT_ID", "PASEO_SESSION_ID")),
     ("claude", ("CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID")),
     ("codex", ("CODEX_SESSION_ID", "CODEX_THREAD_ID")),
     ("cursor", ("CURSOR_SESSION_ID",)),

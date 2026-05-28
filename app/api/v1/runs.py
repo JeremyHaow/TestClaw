@@ -284,6 +284,14 @@ class RunInterventionCreate(BaseModel):
     cancel_current: bool = False
 
 
+class RunApprovalRequest(BaseModel):
+    """Request body for resolving a human-in-the-loop approval."""
+
+    request_id: str
+    approved: bool
+    message: str | None = None
+
+
 class RunCaseAssetSavedCase(BaseModel):
     id: str
     title: str
@@ -4494,6 +4502,51 @@ async def cancel_run(run_id: str, db: DbSession, _: CurrentUser):
         raise HTTPException(status_code=404, detail="Run not found")
     await _cancel_active_task(db, task, "Run cancelled by user")
     return {"message": "Run cancelled"}
+
+
+@router.get("/{run_id}/approval")
+async def get_pending_approvals(run_id: str, db: DbSession, _: CurrentUser):
+    """List pending approval requests for a running v2 agent loop."""
+    from app.agent.v2.approval import list_pending_requests
+
+    task = await task_service.get(db, run_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {"pending": await list_pending_requests(db, run_id)}
+
+
+@router.post("/{run_id}/approval")
+async def resolve_approval(
+    run_id: str,
+    payload: RunApprovalRequest,
+    db: DbSession,
+    _: CurrentUser,
+):
+    """Resolve a human-in-the-loop approval request for a v2 agent run."""
+    from app.agent.v2.approval import resolve_persisted_request
+
+    task = await task_service.get(db, run_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    resolved = await resolve_persisted_request(
+        db,
+        run_id,
+        payload.request_id,
+        payload.approved,
+        payload.message,
+    )
+    if not resolved:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Approval request {payload.request_id} not found or already resolved",
+        )
+
+    return {
+        "resolved": True,
+        "request_id": payload.request_id,
+        "approved": payload.approved,
+    }
 
 
 @router.delete("/{run_id}")

@@ -94,6 +94,24 @@ _PLAYWRIGHT_UNQUOTED_VALUE_RE = re.compile(
 )
 _UNSAFE_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
+# Chinese credential templates such as "密码是admin123" / "账号为alice" / "tenant是acme".
+# Match the key, the connector (是/为), and the value up to the next whitespace,
+# ASCII or full-width punctuation, or end of string. Only the value is redacted so the
+# key remains readable, e.g. "密码是[REDACTED]". The value group rejects `[` so an
+# already-redacted `[REDACTED]` value is not matched again on a second pass
+# (idempotent redaction).
+_CHINESE_CREDENTIAL_KEYS = (
+    "账号", "账户", "用户名", "登录名", "登录账号", "用户账号",
+    "密码", "口令", "登录密码",
+    "验证码", "动态码", "动态验证码", "一次性码", "短信码",
+    "tenant", "租户",
+)
+_CHINESE_CREDENTIAL_KEY_GROUP = "|".join(re.escape(key) for key in _CHINESE_CREDENTIAL_KEYS)
+_CHINESE_CREDENTIAL_RE = re.compile(
+    rf"(?i)({_CHINESE_CREDENTIAL_KEY_GROUP})\s*(是|为)\s*"
+    r"([^\[\s,，;；。'\"`)\]\}<>]+)"
+)
+
 
 def _compact_header_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
@@ -151,6 +169,10 @@ def redact_sensitive_text(text: str) -> str:
     )
     redacted = _SPACED_SECRET_RE.sub(lambda match: f"{match.group(1)}{REDACTED_VALUE}", redacted)
     redacted = _BARE_SECRET_RE.sub(lambda match: f"{match.group(1)}{REDACTED_VALUE}", redacted)
+    redacted = _CHINESE_CREDENTIAL_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}{REDACTED_VALUE}",
+        redacted,
+    )
     return _redact_playwright_like_command(redacted)
 
 

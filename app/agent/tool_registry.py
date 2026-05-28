@@ -303,7 +303,18 @@ TOOL_CAPABILITIES: tuple[ToolCapability, ...] = (
         skill="api-contract-testing",
         description="Execute HTTP requests with configured timeout, retry, headers, query parameters, and JSON body.",
         risk="network",
-        input_schema={"method": "string", "url": "string", "headers": "object", "body": "object"},
+        input_schema={
+            "type": "object",
+            "properties": {
+                "method": {"type": "string"},
+                "url": {"type": "string"},
+                "headers": {"type": "object", "additionalProperties": True},
+                "body": {"type": "object", "additionalProperties": True},
+                "query_params": {"type": "object", "additionalProperties": True},
+            },
+            "required": ["method", "url"],
+            "additionalProperties": False,
+        },
         output_schema={"status_code": "number", "elapsed_ms": "number", "body": "object|string"},
     ),
     ToolCapability(
@@ -453,6 +464,62 @@ TOOL_CAPABILITIES: tuple[ToolCapability, ...] = (
         risk="read_only",
         input_schema={"observations": "array", "success_criteria": "array", "tool_calls": "array"},
         output_schema={"sufficient": "boolean", "next_action": "string", "missing_evidence": "array"},
+    ),
+    ToolCapability(
+        name="parse_openapi",
+        layer="planner",
+        skill="api-parsing",
+        description="Parse an OpenAPI/Swagger document from a URL or raw JSON/YAML content. Returns endpoint list, auth requirements, and base URL.",
+        risk="read_only",
+        input_schema={"source": "string"},
+        output_schema={"endpoint_count": "number", "base_url": "string", "auth_required_count": "number"},
+    ),
+    ToolCapability(
+        name="batch_http_get",
+        layer="api",
+        skill="api-batch-testing",
+        description="Execute multiple GET requests in sequence. Useful for testing many endpoints at once. Returns pass/fail counts.",
+        risk="read_only",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "endpoints": {"type": "array", "items": {"type": "string"}},
+                "headers": {"type": "object", "additionalProperties": True},
+                "assert_status": {"type": "integer"},
+                "base_url": {"type": "string"},
+            },
+            "required": ["endpoints"],
+            "additionalProperties": False,
+        },
+        output_schema={"total": "number", "passed": "number", "failed": "number", "results": "array"},
+    ),
+    ToolCapability(
+        name="finish",
+        layer="reporter",
+        skill="test-reporting",
+        description="Finish the v2 agent loop with a structured, evidence-linked report summary.",
+        risk="read_only",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "verdict": {
+                    "type": "string",
+                    "enum": ["PASS", "FAIL", "BUG_FOUND", "INCOMPLETE"],
+                },
+                "summary": {"type": "string"},
+                "findings": {"type": "array", "items": {"type": "object"}},
+                "recommendations": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["verdict", "summary", "findings", "recommendations"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "status": "string",
+            "verdict": "string",
+            "summary": "string",
+            "findings": "array",
+            "recommendations": "array",
+        },
     ),
 )
 
@@ -631,6 +698,28 @@ AUTOMATION_SKILLS: tuple[AutomationSkill, ...] = (
         failure_recovery=["Report blockers and coverage gaps when execution is incomplete."],
         safety_constraints=["redact_secrets", "evidence_linked_findings"],
     ),
+    AutomationSkill(
+        name="api-parsing",
+        layer="planner",
+        description="Parse OpenAPI/Swagger documents from URLs or raw content into structured endpoint descriptors for testing.",
+        triggers=["openapi url", "swagger json", "swagger yaml", "api document"],
+        tools=["parse_openapi"],
+        required_inputs=["source"],
+        expected_observations=["endpoint count", "base URL", "auth requirements"],
+        failure_recovery=["Ask user for a valid OpenAPI URL or raw document content."],
+        safety_constraints=["read_only", "redact_secrets"],
+    ),
+    AutomationSkill(
+        name="api-batch-testing",
+        layer="api",
+        description="Execute multiple GET requests in sequence for broad read-only endpoint coverage testing.",
+        triggers=["batch endpoint testing", "smoke test", "all GET requests"],
+        tools=["batch_http_get"],
+        required_inputs=["endpoints"],
+        expected_observations=["pass/fail counts", "status codes", "error details"],
+        failure_recovery=["Report failed endpoints with status codes and error context."],
+        safety_constraints=["read_only", "safe_methods_only"],
+    ),
 )
 
 
@@ -648,6 +737,28 @@ def tool_capabilities_by_name() -> dict[str, dict[str, Any]]:
 
 def allowed_tool_names() -> set[str]:
     return set(tool_capabilities_by_name())
+
+
+V2_TOOL_NAMES = frozenset(
+    {
+        "api.http_request",
+        "ui.playwright_cli",
+        "memory.retrieve",
+        "human.ask",
+        "parse_openapi",
+        "batch_http_get",
+        "finish",
+    }
+)
+
+
+def v2_tool_capabilities() -> tuple[ToolCapability, ...]:
+    """Return only tools that are executable by the v2 loop/runtime."""
+    return tuple(tool for tool in TOOL_CAPABILITIES if tool.name in V2_TOOL_NAMES)
+
+
+def v2_tool_capabilities_by_name() -> dict[str, dict[str, Any]]:
+    return {tool.name: _tool_contract(tool) for tool in v2_tool_capabilities()}
 
 
 def select_skills_for_state(state: dict[str, Any]) -> list[dict[str, Any]]:

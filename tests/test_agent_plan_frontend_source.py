@@ -269,3 +269,31 @@ def test_agent_plan_document_asset_handoff_fetches_saved_document_source() -> No
         "delete nextQuery.asset_id",
     ]:
         assert hook in source
+
+
+def test_agent_plan_current_step_reads_from_server_session() -> None:
+    """Stepper navigation must use server-provided current_step, never
+    chat turn count. Live audit bug 1.13."""
+
+    source = PAGE.read_text(encoding="utf-8")
+    current_step = re.search(
+        r"const currentStepId = computed<IntakeStepId>\(\(\) => \{[\s\S]*?\n\}\)",
+        source,
+    )
+    server_step = re.search(
+        r"const serverCurrentStepId = computed[^\n]*\n",
+        source,
+    )
+
+    assert current_step is not None
+    assert server_step is not None
+    # serverCurrentStepId must be sourced from activeSession.current_step.
+    assert "activeSession.value?.current_step" in server_step.group(0)
+    # currentStepId must check serverCurrentStepId before any fallback.
+    block = current_step.group(0)
+    assert "if (serverCurrentStepId.value) return serverCurrentStepId.value" in block
+    # Defensive: stepper must not be derived from messages.length or message
+    # turn count which would be desynced from real intake progress.
+    assert "messages.value.length" not in block
+    assert "messages.length" not in block
+

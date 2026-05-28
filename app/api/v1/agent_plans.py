@@ -124,6 +124,30 @@ STRUCTURED_FIELD_BY_STEP = {
 STRUCTURED_REQUIRED_STEPS = {"target_kind", "auth_boundary", "safety_boundary"}
 
 
+async def _augment_session_payload_with_structured_intake(
+    payload: dict[str, Any],
+    session: AgentPlanningSession,
+    db: DbSession,
+) -> dict[str, Any]:
+    """Surface `structured_intake` and a structured-aware `current_step`.
+
+    The chat-only endpoints (`/messages`, edit, delete) historically returned
+    `current_step = "target"` and no `structured_intake` even when the user
+    already confirmed earlier steps via the structured intake endpoint. That
+    desynced the frontend stepper from real progress (live audit bug 1.13).
+    """
+    plan = await _load_structured_plan(db, session)
+    if plan is None:
+        return payload
+    structured = redact_sensitive_data(
+        {step: _structured_plan_step_data(plan, step) for step in STRUCTURED_INTAKE_STEP_IDS}
+    )
+    payload["structured_intake"] = structured
+    if session.status not in {PLAN_SESSION_READY, PLAN_SESSION_EXECUTED}:
+        payload["current_step"] = _structured_plan_current_step(plan, session)
+    return payload
+
+
 async def _load_owned_session(session_id: str, db: DbSession, user: CurrentUser):
     session = await agent_planning_service.get_session(
         db,
@@ -949,6 +973,7 @@ def _latest_assistant_text(messages: list[AgentPlanningMessage]) -> str:
 
 async def _stream_turn_events(
     action: Callable[[], Awaitable[tuple[AgentPlanningSession, list[AgentPlanningMessage]]]],
+    db: DbSession | None = None,
 ) -> AsyncIterator[str]:
     process_events: list[dict[str, str]] = []
     for step in PLANNER_PROCESS_STEPS:
@@ -967,10 +992,15 @@ async def _stream_turn_events(
             waiting_event = {**WAITING_PROCESS_STEP, "status": "active"}
             process_events.append(waiting_event)
             yield _sse_event("process", waiting_event)
+        session_payload = redacted_plan_session_payload(session, messages)
+        if db is not None:
+            session_payload = await _augment_session_payload_with_structured_intake(
+                session_payload, session, db
+            )
         yield _sse_event(
             "final",
             {
-                "session": redacted_plan_session_payload(session, messages),
+                "session": session_payload,
                 "process_events": process_events,
             },
         )
@@ -1126,7 +1156,8 @@ async def get_agent_plan_session_alias(session_id: str, db: DbSession, user: Cur
 async def get_planning_session(session_id: str, db: DbSession, user: CurrentUser):
     session = await _load_owned_session(session_id, db, user)
     messages = await agent_planning_service.list_messages(db, session_id=session.id)
-    return redacted_plan_session_payload(session, messages)
+    response_payload = redacted_plan_session_payload(session, messages)
+    return await _augment_session_payload_with_structured_intake(response_payload, session, db)
 
 
 @router.delete("/{session_id}", status_code=204)
@@ -1153,7 +1184,8 @@ async def add_planning_message(
         session=session,
         content=content,
     )
-    return redacted_plan_session_payload(session, messages)
+    response_payload = redacted_plan_session_payload(session, messages)
+    return await _augment_session_payload_with_structured_intake(response_payload, session, db)
 
 
 @router.post("/{session_id}/messages/stream")
@@ -1176,7 +1208,7 @@ async def stream_planning_message(
             content=content,
         )
 
-    return StreamingResponse(_stream_turn_events(action), media_type="text/event-stream")
+    return StreamingResponse(_stream_turn_events(action, db), media_type="text/event-stream")
 
 
 @router.put("/{session_id}/messages/{message_id}")
@@ -1203,7 +1235,8 @@ async def edit_planning_message(
         raise HTTPException(status_code=404, detail="Planning message not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return redacted_plan_session_payload(session, messages)
+    response_payload = redacted_plan_session_payload(session, messages)
+    return await _augment_session_payload_with_structured_intake(response_payload, session, db)
 
 
 @router.put("/{session_id}/messages/{message_id}/stream")
@@ -1229,7 +1262,7 @@ async def stream_edit_planning_message(
             content=content,
         )
 
-    return StreamingResponse(_stream_turn_events(action), media_type="text/event-stream")
+    return StreamingResponse(_stream_turn_events(action, db), media_type="text/event-stream")
 
 
 @router.delete("/{session_id}/messages/{message_id}")
@@ -1249,7 +1282,8 @@ async def delete_planning_message(
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail="Planning message not found") from exc
-    return redacted_plan_session_payload(session, messages)
+    response_payload = redacted_plan_session_payload(session, messages)
+    return await _augment_session_payload_with_structured_intake(response_payload, session, db)
 
 
 @router.post("/{session_id}/reject")
@@ -1269,7 +1303,8 @@ async def reject_current_plan(
         session=session,
         reason=payload.reason,
     )
-    return redacted_plan_session_payload(session, messages)
+    response_payload = redacted_plan_session_payload(session, messages)
+    return await _augment_session_payload_with_structured_intake(response_payload, session, db)
 
 
 @router.post("/{session_id}/execute", response_model=AgentPlanExecuteResponse)

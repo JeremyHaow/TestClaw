@@ -60,6 +60,34 @@ def test_worker_sessionmaker_binds_sessions_without_expiration() -> None:
     asyncio.run(inspect_session())
 
 
+def test_run_graph_with_progress_can_select_v2_graph(monkeypatch) -> None:
+    class FakeGraph:
+        async def astream(self, state: dict[str, Any], stream_mode: str):
+            assert stream_mode == "updates"
+            yield {
+                "agent_loop": {
+                    "final_report": {"verdict": "PASS"},
+                    "workflow_steps": [
+                        {"node": "agent_loop", "status": "done", "detail": "v2 completed"}
+                    ],
+                }
+            }
+
+    monkeypatch.setattr(worker_tasks, "v2_agent_graph", FakeGraph())
+    final_state = asyncio.run(
+        worker_tasks.run_graph_with_progress(
+            {
+                "task_id": "no-db-task",
+                "agent_runtime_version": "v2",
+                "workflow_steps": [],
+            }
+        )
+    )
+
+    assert final_state["final_report"]["verdict"] == "PASS"
+    assert final_state["workflow_steps"][-1]["node"] == "agent_loop"
+
+
 def test_worker_session_scope_survives_sequential_asyncio_run_loops() -> None:
     # Reproducing asyncpg loop ownership needs a live PostgreSQL worker stack; this checks the
     # worker-only factory contract with real sessions across consecutive asyncio.run loops.

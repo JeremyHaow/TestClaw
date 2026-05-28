@@ -114,6 +114,95 @@ total = (await db.execute(count_stmt)).scalar_one()
 base = select(Task).order_by(Task.created_at.desc()).offset(offset).limit(page_size)
 ```
 
+## Scenario: V2 Agent Approval State Across API and Worker
+
+### 1. Scope / Trigger
+
+- Trigger: v2 agent loop can pause on human approval for write operations while the run is executing in a Celery worker.
+- Applies to `app/agent/v2/approval.py`, `app/agent/v2/agent_loop.py`, `app/api/v1/runs.py`, and any future approval UI.
+- Purpose: FastAPI and Celery workers are separate processes; approval state must not depend on a module-level Python dict.
+
+### 2. Signatures
+
+- Execution log field:
+  ```json
+  {
+    "v2_approval_requests": [
+      {
+        "request_id": "uuid",
+        "status": "pending|approved|denied|timed_out",
+        "action": "POST https://api.example.test/items",
+        "method": "POST",
+        "url": "https://api.example.test/items",
+        "risk_level": "medium|high",
+        "body_preview": "[REDACTED]",
+        "tool_name": "api.http_request",
+        "approved": null,
+        "response_message": null
+      }
+    ]
+  }
+  ```
+- API:
+  ```text
+  GET  /api/v1/runs/{run_id}/approval
+  POST /api/v1/runs/{run_id}/approval
+  {"request_id": "...", "approved": true, "message": "..."}
+  ```
+
+### 3. Contracts
+
+- The worker persists each approval request into `Task.execution_log.v2_approval_requests` before waiting.
+- The API reads and resolves the persisted request from the database, not only an in-memory `ApprovalChannel` registry.
+- The worker polls persisted DB state and resumes when status becomes `approved` or `denied`.
+- The in-memory registry is only an optimization for same-process tests/local sync execution.
+- Approval records returned to clients must omit raw `tool_args` and redact body previews, auth headers, tokens, passwords, cookies, captcha/MFA/OTP values, and response messages.
+- `app/agent/progress.py::EXECUTION_LOG_KEYS` must include `v2_approval_requests`; otherwise later progress persistence can drop or overwrite approval resolution state.
+
+### 4. Validation & Error Matrix
+
+- Run id missing -> `404 Run not found`.
+- Request id not found -> `404 Approval request ... not found or already resolved`.
+- Request already resolved -> `404 Approval request ... not found or already resolved`.
+- Pending request approved -> worker observes `approved` and executes the guarded tool.
+- Pending request denied -> worker observes `denied` and feeds a denial observation back to the model.
+- Approval timeout -> persisted status becomes `timed_out`, `approved=false`.
+
+### 5. Good/Base/Bad Cases
+
+- Good: worker writes a pending approval to `execution_log`, FastAPI resolves it from another DB session, worker polls the change and resumes.
+- Base: local in-process execution also resolves the `ApprovalChannel` future immediately after DB resolution.
+- Bad: FastAPI reads a module global `_registry` created inside the worker process and returns no pending approvals in production.
+- Bad: progress persistence writes stale pending `v2_approval_requests` from agent state over an API-resolved approval record.
+
+### 6. Tests Required
+
+- Unit: `ApprovalRequest.to_dict()` omits `tool_args` and redacts `body_preview`.
+- Unit: `ApprovalChannel` approve/deny/timeout behavior.
+- Integration: worker session persists pending approval, separate API session resolves it, worker-side request returns approved/denied.
+- API: `GET/POST /runs/{run_id}/approval` reads/writes persisted approval state and returns 404 for missing/already-resolved requests.
+- Regression: execution log never contains raw password/token/cookie values from approval request or response text.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+_registry: dict[str, ApprovalChannel] = {}
+
+@router.get("/{run_id}/approval")
+async def get_pending_approvals(run_id: str):
+    return {"pending": pending_requests(run_id)}
+```
+
+#### Correct
+
+```python
+@router.get("/{run_id}/approval")
+async def get_pending_approvals(run_id: str, db: AsyncSession):
+    return {"pending": await list_pending_requests(db, run_id)}
+```
+
 ## Write Patterns
 
 ```python

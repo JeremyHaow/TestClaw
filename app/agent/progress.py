@@ -55,6 +55,7 @@ EXECUTION_LOG_KEYS = (
     "agent_runtime_status",
     "agent_continuation_run_id",
     "agent_source_run_id",
+    "v2_approval_requests",
     "agent_human_question",
     "agent_strategy_decision",
     "agent_tool_plan",
@@ -221,6 +222,15 @@ def _result_all_passed(result: Any, ran: bool) -> bool:
 def determine_final_status(state: dict[str, Any]) -> TaskStatus:
     if state.get("cancelled"):
         return TaskStatus.CANCELLED
+
+    final_report = state.get("final_report") if isinstance(state.get("final_report"), dict) else {}
+    verdict = str(final_report.get("verdict") or final_report.get("overall_verdict") or "").upper()
+    if verdict in {"PASS", "PASSED", "SUCCESS", "SUCCEEDED"}:
+        return TaskStatus.SUCCEEDED
+    if verdict in {"BUG_FOUND", "BUG", "FAILED_WITH_FINDINGS"}:
+        return TaskStatus.BUG_FOUND
+    if verdict in {"FAIL", "FAILED"}:
+        return TaskStatus.FAILED
 
     api_result = state.get("api_execution_result")
     ui_result = state.get("ui_execution_result")

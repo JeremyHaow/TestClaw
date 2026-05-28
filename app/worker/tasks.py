@@ -24,6 +24,7 @@ from app.agent.progress import (
     persist_progress,
     persist_task_state,
 )
+from app.agent.v2.graph import v2_agent_graph
 from app.config import settings
 from app.core.redaction import redact_sensitive_data
 from app.models.bug_report import BugReport
@@ -32,6 +33,13 @@ from app.services.task_service import normalize_agent_test_type, task_service
 from app.worker.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
+
+
+def _graph_for_state(state: dict[str, Any]):
+    version = str(state.get("agent_runtime_version") or settings.AGENT_RUNTIME_VERSION or "v1")
+    if version.strip().lower() == "v2":
+        return v2_agent_graph
+    return agent_graph
 
 
 def _create_worker_engine() -> AsyncEngine:
@@ -241,7 +249,8 @@ async def run_graph_with_progress(state: dict[str, Any]) -> dict[str, Any]:
     )
 
     try:
-        async for chunk in agent_graph.astream(final_state, stream_mode="updates"):
+        selected_graph = _graph_for_state(final_state)
+        async for chunk in selected_graph.astream(final_state, stream_mode="updates"):
             for node_name, node_state in chunk.items():
                 if isinstance(node_state, dict):
                     final_state.update(node_state)
@@ -285,6 +294,7 @@ async def _run(task_id: str, objective: str, target_url: str, **kwargs: Any) -> 
         setup_instructions = kwargs.pop("setup_instructions", None)
         login_instructions = kwargs.pop("login_instructions", None)
         test_type = normalize_agent_test_type(kwargs.pop("test_type", None), default="full")
+        agent_runtime_version = kwargs.pop("agent_runtime_version", None)
 
         state = {
             "task_id": task_id,
@@ -297,6 +307,8 @@ async def _run(task_id: str, objective: str, target_url: str, **kwargs: Any) -> 
             "db_session": db,
             **kwargs,
         }
+        if agent_runtime_version:
+            state["agent_runtime_version"] = agent_runtime_version
 
         merged_headers = {}
         if isinstance(custom_headers, dict):

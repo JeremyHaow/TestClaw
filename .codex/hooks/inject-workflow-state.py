@@ -122,6 +122,8 @@ def find_trellis_root(start: Path) -> Optional[Path]:
 # ---------------------------------------------------------------------------
 
 def _detect_platform(input_data: dict) -> str | None:
+    if os.environ.get("PASEO_AGENT_ID") or os.environ.get("PASEO_SESSION_ID"):
+        return "paseo"
     if isinstance(input_data.get("cursor_version"), str):
         return "cursor"
     env_map = {
@@ -283,7 +285,7 @@ def resolve_breadcrumb_key(
 
     Non-codex platforms return the plain status unchanged.
     """
-    if platform == "codex":
+    if platform in {"codex", "paseo"}:
         mode = "inline"
         if isinstance(config, dict):
             codex_cfg = config.get("codex")
@@ -358,7 +360,7 @@ def main() -> int:
         breadcrumb = build_breadcrumb(
             task_id, status, templates, source, breadcrumb_key=status_key
         )
-    if platform == "codex":
+    if platform in {"codex", "paseo"}:
         parts: list[str] = [CODEX_SUB_AGENT_NOTICE]
         if task is None:
             parts.append(CODEX_NO_TASK_BOOTSTRAP_NOTICE)

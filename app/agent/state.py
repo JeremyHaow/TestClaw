@@ -108,6 +108,7 @@ class AgentState(TypedDict, total=False):
     workflow_steps: list[dict]
     progress_events: list[dict]
     current_step: dict | None
+    v2_approval_requests: list[dict] | None
     auth_headers: dict[str, str] | None
     auth_config: dict[str, Any] | None
     auth_mode: Literal["auto", "manual", "none_confirmed"] | None

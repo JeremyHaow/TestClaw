@@ -174,7 +174,7 @@ def _resolve_context_key(project_dir: Path, hook_input: dict) -> str | None:
         from common.active_task import resolve_context_key  # type: ignore[import-not-found]
     except Exception:
         return None
-    return resolve_context_key(hook_input, platform="codex")
+    return resolve_context_key(hook_input, platform=_context_platform())
 
 
 def _resolve_active_task(trellis_dir: Path, hook_input: dict):
@@ -183,7 +183,13 @@ def _resolve_active_task(trellis_dir: Path, hook_input: dict):
         sys.path.insert(0, str(scripts_dir))
     from common.active_task import resolve_active_task  # type: ignore[import-not-found]
 
-    return resolve_active_task(trellis_dir.parent, hook_input, platform="codex")
+    return resolve_active_task(trellis_dir.parent, hook_input, platform=_context_platform())
+
+
+def _context_platform() -> str:
+    if os.environ.get("PASEO_AGENT_ID") or os.environ.get("PASEO_SESSION_ID"):
+        return "paseo"
+    return "codex"
 
 
 def run_script(script_path: Path, context_key: str | None = None) -> str:
