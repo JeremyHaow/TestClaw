@@ -18,7 +18,21 @@ TestClaw 是一个可直接使用的全链路智能测试平台，包含 FastAPI
 - 用户名：`admin`
 - 密码：`testclaw123`
 
-可在 `.env` 中通过 `DEFAULT_ADMIN_USERNAME` / `DEFAULT_ADMIN_PASSWORD` 修改。
+`DEFAULT_ADMIN_USERNAME` / `DEFAULT_ADMIN_PASSWORD` in `.env` are bootstrap settings:
+startup creates the configured user only if that username does not exist. Changing
+these settings does not reset an existing password or rename an existing account.
+Set strong, unique values before the first production startup.
+
+To rotate or recover an existing administrator password, run from the repository
+root with trusted server access and the application's database configuration:
+
+```bash
+uv run python -m app.cli.reset_admin_password --username admin
+```
+
+The command prompts twice without echoing the password. See
+[administrator password management](docs/production-deployment.md#administrator-password-management)
+for Docker commands, access restrictions, and token revocation details.
 
 ## 本地开发
 

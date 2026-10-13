@@ -4,6 +4,53 @@
 
 ---
 
+## Scenario: Administrator Bootstrap and Explicit Password Recovery
+
+### 1. Scope / Trigger
+
+- Applies to local account initialization, the operator CLI, and deployment documentation.
+- Environment changes must never silently overwrite an existing password.
+
+### 2. Signatures
+
+- `python -m app.cli.reset_admin_password --username NAME`
+- `AuthService.reset_admin_password(db: AsyncSession, username: str, password: str) -> None`
+- Configuration: `DATABASE_URL`, `DEFAULT_ADMIN_USERNAME`, `DEFAULT_ADMIN_PASSWORD`, `SECRET_KEY`.
+
+### 3. Contracts
+
+- Bootstrap creates only missing usernames. Existing hashes and account flags are preserved.
+- The CLI requires trusted server/container and DB access, an explicit username, and two hidden terminal prompts; no password argument, environment input, or HTTP reset route.
+- Reset updates only an existing active administrator's hash using the shared salted PBKDF2 helper. It never creates users/tables, promotes roles, or enables accounts.
+- Accept 12–1024 characters, reject whitespace-only input, and preserve valid input exactly.
+- Own/dispose the command's async engine in one event loop; avoid importing FastAPI startup.
+- Never echo passwords, hashes, raw DB exceptions, or connection credentials.
+- Existing JWTs are not revoked by password reset. Rotate `SECRET_KEY` and recreate all API/worker instances for global revocation; do not rotate `FERNET_KEY` for this purpose.
+
+### 4. Validation & Error Matrix
+
+- Successful committed reset: exit `0`; new password logs in and previous password fails.
+- Missing/non-admin/inactive account or invalid password: exit `1`, no account modification.
+- Mismatch, non-TTY, failed hidden input, cancellation, or DB error: nonzero exit with a safe message.
+- Missing username or unsupported arguments: exit `2`, without echoing argument values.
+
+### 5. Good/Base/Bad Cases
+
+- Good: operator verifies deployment, runs the CLI, and checks old/new login behavior.
+- Base: initial startup creates the configured admin once.
+- Bad: overwriting hashes on every restart, using `--password`, or exposing unauthenticated recovery.
+
+### 6. Tests Required
+
+- Isolated SQLite tests cover salted hashes, bootstrap preservation, successful persistence, old/new login, and rejected accounts/input.
+- CLI tests cover hidden-input failure, cancellation, no secret output, and uninitialized schema without bootstrap side effects.
+- Never run reset tests against a deployment or developer database.
+
+### 7. Wrong vs Correct
+
+- Wrong: change `DEFAULT_ADMIN_PASSWORD` and restart to rotate an existing password.
+- Correct: run the explicit CLI against the intended deployment's `DATABASE_URL`; subsequent startup preserves the reset hash.
+
 ## Scenario: Domain Behind Host Caddy, Optional Compose Nginx
 
 ### 1. Scope / Trigger
